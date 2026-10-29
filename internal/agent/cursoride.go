@@ -62,7 +62,20 @@ type cursorIDESaved struct {
 	Raw    map[string]string `json:"raw,omitempty"`
 }
 
-var noticeCursorIDE = newNotice("Cursor reads its proxy settings when it starts — quit and reopen Cursor to use magpie's models, and leave magpie running. Trust magpie's certificate ({cert}) so Cursor accepts the proxy, then pick a magpie model in Cursor's model menu.")
+var (
+	noticeCursorIDE       = newNotice("Cursor reads its proxy settings when it starts — quit and reopen Cursor to use magpie's models, and leave magpie running, then pick a magpie model in Cursor's model menu.")
+	noticeCursorIDEKept   = newNotice("magpie's certificate is already trusted for your user, so this connect did not install it again.")
+	noticeCursorIDEWin    = newNotice("Approve the one Windows prompt to trust magpie's certificate for your user (it is not installed for the whole machine). If you dismissed it, disconnect and connect Cursor on the Agents page again, or open {cert} and install it under Current User → Trusted Root Certification Authorities.")
+	noticeCursorIDEMac    = newNotice("Enter your login keychain password when macOS asks, to trust magpie's certificate for your user (no administrator password). If you dismissed it, disconnect and connect Cursor on the Agents page again, or open {cert} in Keychain Access and set When using this certificate to Always Trust.")
+	noticeCursorIDELinux  = newNotice("Cursor on Linux also reads the system trust store, which still needs magpie's certificate. Run {command} once, then quit and reopen Cursor.")
+	noticeCursorIDEManual = newNotice("Trust magpie's certificate ({cert}) so Cursor accepts the proxy.")
+)
+
+// cursorIDETrustFn replaces TrustCA in tests. Production leaves it nil.
+var cursorIDETrustFn func(certPath string) cursoride.TrustResult
+
+var cursorIDETrustMu sync.Mutex
+var cursorIDETrustRes cursoride.TrustResult
 
 func cursorIDE(home string) *Agent {
 	dir := cursorIDEUserDir(runtime.GOOS, home, appdir.Getenv)
@@ -73,11 +86,10 @@ func cursorIDE(home string) *Agent {
 		// the IDE's model menu is the catalog picked for this row
 		ListsModels: true,
 		detect:      func() bool { return cursorIDEHere(dir) },
-		Notice: func() string {
-			return noticeCursorIDE.say("cert", cursoride.CertFile(cursorIDECADir()))
-		},
-		Check: func() string { return cursorIDECheck(path) },
-		Sync:  func() error { return cursorIDESync(path) },
+		Notice:      func() string { return cursorIDENotice(path) },
+		OnKept:      cursorIDEOnKept,
+		Check:       func() string { return cursorIDECheck(path) },
+		Sync:        func() error { return cursorIDESync(path) },
 		Fields: []Field{{
 			Key: "provider", Label: "provider",
 			Get: func() string {
@@ -117,6 +129,69 @@ func cursorIDEUserDir(goos, home string, getenv func(string) string) string {
 }
 
 func cursorIDECADir() string { return filepath.Join(appdir.Config(), "cursor-ide") }
+
+func cursorIDEOnKept() error {
+	if err := cursorIDEEnsure(); err != nil {
+		return err
+	}
+	cursorIDEApplyTrust()
+	return nil
+}
+
+func cursorIDEApplyTrust() {
+	cert := cursoride.CertFile(cursorIDECADir())
+	var res cursoride.TrustResult
+	if cursorIDETrustFn != nil {
+		res = cursorIDETrustFn(cert)
+	} else {
+		res = cursoride.TrustCA(cert)
+	}
+	cursorIDETrustMu.Lock()
+	cursorIDETrustRes = res
+	cursorIDETrustMu.Unlock()
+	// A trust failure is recorded for the notice. It does not fail connect.
+	switch {
+	case res.Already:
+		log.Printf("Cursor: certificate is already trusted for this user; install skipped")
+	case res.User && res.Step == "":
+		log.Printf("Cursor: certificate installed for this user")
+	case res.Step != "":
+		log.Printf("Cursor: certificate is not in the user trust store yet (%s)", res.Step)
+	}
+}
+
+func cursorIDENotice(settingsPath string) string {
+	base := noticeCursorIDE.String()
+	if !cursorIDEProxySet(settingsPath) {
+		return base
+	}
+	cursorIDETrustMu.Lock()
+	res := cursorIDETrustRes
+	cursorIDETrustMu.Unlock()
+	cert := cursoride.CertFile(cursorIDECADir())
+	var extra string
+	switch res.Step {
+	case cursoride.TrustStepWindows:
+		extra = noticeCursorIDEWin.say("cert", cert)
+	case cursoride.TrustStepDarwin:
+		extra = noticeCursorIDEMac.say("cert", cert)
+	case cursoride.TrustStepLinux:
+		if res.Command == "" {
+			extra = noticeCursorIDEManual.say("cert", cert)
+		} else {
+			extra = noticeCursorIDELinux.say("command", res.Command)
+		}
+	case cursoride.TrustStepManual:
+		extra = noticeCursorIDEManual.say("cert", cert)
+	}
+	if extra == "" && res.Already {
+		extra = noticeCursorIDEKept.String()
+	}
+	if extra == "" {
+		return base
+	}
+	return base + " " + extra
+}
 
 func cursorIDEProxySet(path string) bool {
 	url := cursoride.ProxyURL()
@@ -163,7 +238,11 @@ func cursorIDESet(path, v string) error {
 	switch v {
 	case magpieID:
 		if cursorIDEMatches(path) {
-			return cursorIDEEnsure()
+			if err := cursorIDEEnsure(); err != nil {
+				return err
+			}
+			cursorIDEApplyTrust()
+			return nil
 		}
 		first := stashLoad()[cursorIDEStashKey] == ""
 		if err := cursorIDERemember(path); err != nil {
@@ -181,8 +260,12 @@ func cursorIDESet(path, v string) error {
 			}
 			return err
 		}
+		cursorIDEApplyTrust()
 		return nil
 	case "":
+		// Disconnect puts Cursor's settings back and stops the proxy.
+		// The CA stays trusted: the next connect checks and skips the
+		// install when it is still there.
 		if err := cursorIDERestore(path); err != nil {
 			return err
 		}

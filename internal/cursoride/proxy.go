@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -89,8 +90,11 @@ func (p *Proxy) Start() (string, error) {
 		return "", err
 	}
 	p.ln = ln
-	p.srv = &http.Server{Handler: p, ReadHeaderTimeout: 10 * time.Second}
-	go func() { _ = p.srv.Serve(ln) }()
+	srv := &http.Server{Handler: p, ReadHeaderTimeout: 10 * time.Second}
+	p.srv = srv
+	// Serve the local server. Reading p.srv here races Close, which
+	// clears that field while this goroutine is still starting.
+	go func() { _ = srv.Serve(ln) }()
 	return "http://" + ln.Addr().String(), nil
 }
 
@@ -175,7 +179,7 @@ func (p *Proxy) mitm(w http.ResponseWriter, r *http.Request) {
 	case "/aiserver.v1.BidiService/BidiAppend":
 		p.bidi(w, r)
 	default:
-		p.forward(w, r, nil)
+		p.forward(w, r, nil, false)
 	}
 }
 
@@ -195,7 +199,7 @@ func (p *Proxy) inferenceSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.isLocal() {
-		p.forward(w, r.WithContext(r.Context()), body)
+		p.forward(w, r.WithContext(r.Context()), body, false)
 		return
 	}
 	w.Header().Set("Content-Type", "application/connect+proto")
@@ -220,12 +224,9 @@ func (p *Proxy) bidi(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "read", http.StatusBadRequest)
 		return
 	}
-	if enc := strings.ToLower(r.Header.Get("Content-Encoding")); enc == "gzip" || len(body) >= 2 && body[0] == 0x1f && body[1] == 0x8b {
-		if plain, zerr := decodeCatalogBody(body, r.Header.Get("Content-Encoding")); zerr == nil {
-			body = plain
-		} else {
-			bidiLog("gunzip-fail err=%v len=%d", zerr, len(body))
-		}
+	body, gunzipped := gunzipRequest(body, r.Header.Get("Content-Encoding"))
+	if gunzipped {
+		bidiLog("gunzipped len=%d", len(body))
 	}
 	plain, _, err := UnwrapUnary(body)
 	if err != nil {
@@ -243,7 +244,7 @@ func (p *Proxy) bidi(w http.ResponseWriter, r *http.Request) {
 	}
 	if id == "" {
 		bidiLog("forward no-id dataLen=%d blobLen=%d", len(data), len(blob))
-		p.forward(w, r, body)
+		p.forward(w, r, body, gunzipped)
 		return
 	}
 	var raw []byte
@@ -262,7 +263,7 @@ func (p *Proxy) bidi(w http.ResponseWriter, r *http.Request) {
 		bidiLog("append id=%s via=hex n=%d", id, len(raw))
 	default:
 		bidiLog("forward empty-payload id=%s", id)
-		p.forward(w, r, body)
+		p.forward(w, r, body, gunzipped)
 		return
 	}
 	if s := p.hub.localOf(id); s != nil {
@@ -279,7 +280,7 @@ func (p *Proxy) bidi(w http.ResponseWriter, r *http.Request) {
 		bidiLog("run model=%q ours=%v route=%q", run.ModelID, ours, route.Model)
 		if !ours {
 			p.hub.mark(id, false, Route{}, "")
-			p.forward(w, r, body)
+			p.forward(w, r, body, gunzipped)
 			return
 		}
 		s := p.hub.mark(id, true, route, run.ConversationID)
@@ -287,7 +288,7 @@ func (p *Proxy) bidi(w http.ResponseWriter, r *http.Request) {
 		writeProto(w, nil, "application/proto")
 		return
 	}
-	p.forward(w, r, body)
+	p.forward(w, r, body, gunzipped)
 }
 
 func (p *Proxy) localAppend(w http.ResponseWriter, s *sess, raw []byte) {
@@ -392,7 +393,7 @@ func (p *Proxy) runChat(s *sess, chat Chat) {
 }
 
 func (p *Proxy) fetch(r *http.Request, body []byte) (int, []byte, string, error) {
-	resp, err := p.do(r, body)
+	resp, err := p.do(r, body, false)
 	if err != nil {
 		return 0, nil, "", err
 	}
@@ -433,7 +434,28 @@ func decodeCatalogBody(b []byte, contentEncoding string) ([]byte, error) {
 	return plain, nil
 }
 
-func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, body []byte) {
+// gunzipRequest is the body to inspect. plain is true only when those
+// bytes are no longer gzip: a later forward must drop Content-Encoding
+// and send Content-Length for this slice. A failed gunzip keeps the
+// original bytes and plain false, so the headers the client sent still
+// match. x-gzip is the same encoding.
+func gunzipRequest(body []byte, contentEncoding string) ([]byte, bool) {
+	enc := strings.ToLower(strings.TrimSpace(contentEncoding))
+	magic := len(body) >= 2 && body[0] == 0x1f && body[1] == 0x8b
+	if enc != "gzip" && enc != "x-gzip" && !magic {
+		return body, false
+	}
+	plain, err := decodeCatalogBody(body, contentEncoding)
+	if err != nil || bytes.Equal(plain, body) {
+		if err != nil {
+			bidiLog("gunzip-fail err=%v len=%d", err, len(body))
+		}
+		return body, false
+	}
+	return plain, true
+}
+
+func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, body []byte, plain bool) {
 	if body == nil {
 		b, err := io.ReadAll(io.LimitReader(r.Body, int64(maxCatalogBody)+1))
 		if err != nil || len(b) > maxCatalogBody {
@@ -441,8 +463,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, body []byte) {
 			return
 		}
 		body = b
+		plain = false
 	}
-	resp, err := p.do(r, body)
+	resp, err := p.do(r, body, plain)
 	if err != nil {
 		http.Error(w, "upstream", http.StatusBadGateway)
 		return
@@ -460,18 +483,31 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, body []byte) {
 	_, _ = io.Copy(w, resp.Body)
 }
 
-func (p *Proxy) do(r *http.Request, body []byte) (*http.Response, error) {
+func (p *Proxy) do(r *http.Request, body []byte, plain bool) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, p.origin(r), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
+	// body is what is sent. The client's Content-Length is the size before
+	// a gunzip, so it is not copied: the Transport writes this field.
+	req.ContentLength = int64(len(body))
 	for k, vs := range r.Header {
-		if hop(k) || strings.EqualFold(k, "Host") {
+		if hop(k) || strings.EqualFold(k, "Host") || strings.EqualFold(k, "Content-Length") {
+			continue
+		}
+		// plain means the body was gunzipped for inspection. Leaving
+		// Content-Encoding: gzip on those bytes is what Cursor logs as
+		// bidiAppend "decompression failed"; the stream then never ends.
+		if plain && strings.EqualFold(k, "Content-Encoding") {
 			continue
 		}
 		for _, v := range vs {
 			req.Header.Add(k, v)
 		}
+	}
+	req.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	if plain {
+		req.Header.Del("Content-Encoding")
 	}
 	return p.client.Do(req)
 }

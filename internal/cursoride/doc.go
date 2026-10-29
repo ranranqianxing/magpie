@@ -10,8 +10,10 @@
 //
 // Proxy listens on loopback and terminates TLS for Cursor's hosts. The
 // Agents-page Cursor row (internal/agent/cursoride.go) points the IDE's
-// http.proxy there and stashes the previous values. This package does not
+// http.proxy there, stashes the previous values, and installs this
+// package's CA into the user trust store when it is not already there
+// (TrustCA). A later connect that finds it skips the install. This package does not
 // write state.vscdb, Cursor's Open configuration, or the Private Inference
-// variables, and it does not install its CA into the system trust store.
+// variables, and it does not install that CA into the machine-wide store.
 // See docs/subsystems/cursor-ide.md.
 package cursoride
