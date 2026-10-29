@@ -105,10 +105,18 @@ settings stash, a second connect that does not rewrite, drift when the
 recorded gateway address is swapped, and a hidden model left out of the
 list. Neither opens Cursor.
 
-To try it in the IDE: connect Cursor on the Agents page, trust
-`cursor-ide/ca.crt` (the notice gives the path), quit Cursor and open it
-again, leave magpie running, and pick a magpie model in Cursor's model
-menu. A model hidden for this row on the Agents page is not in that menu.
+To try it in the IDE, connect the Cursor row on the Agents page (id
+`cursor-ide`). Cursor CLI is the row magpie cannot connect. Magpie writes
+a local CA to `cursor-ide/ca.crt` in its config directory
+(`appdir.Config`) and does not install it into the system trust store.
+Trust that file yourself. Installed, the file is
+`~/.config/magpie/cursor-ide/ca.crt`
+(`$XDG_CONFIG_HOME/magpie/cursor-ide/ca.crt` when that is set; the same
+path under the user's folder on Windows). The notice on the row names the
+path magpie wrote, including a portable run whose config directory is the
+`data` folder beside magpie. Fully quit and reopen Cursor, leave magpie
+running, and pick a magpie model in Cursor's model menu. A model hidden
+for this row on the Agents page is not in that menu.
 
 ## Not this slice
 
