@@ -36,8 +36,8 @@ func TestAgentRunRoutesPrefixedCatalogIDs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		body := agentRunBody(tc.id, "conv-1", tc.text, tc.params)
-		turn, ok := ReadAgentRun(body)
-		if !ok {
+		turn, ok, err := ReadAgentRun(body)
+		if err != nil || !ok {
 			t.Fatalf("ReadAgentRun(%q) not a run", tc.id)
 		}
 		if turn.Text != tc.text || turn.ConversationID != "conv-1" {
@@ -59,8 +59,8 @@ func TestAgentRunRoutesPrefixedCatalogIDs(t *testing.T) {
 
 func TestAgentRunModelDetailsFallsBackWhenRequestedModelIsAbsent(t *testing.T) {
 	body := frameOf(agentClient(agentRunDetailsOnly("codex/gpt-5.6-luna", "conv-9", "你好")))
-	turn, ok := ReadAgentRun(body)
-	if !ok || turn.ModelID != "codex/gpt-5.6-luna" || turn.Text != "你好" {
+	turn, ok, err := ReadAgentRun(body)
+	if err != nil || !ok || turn.ModelID != "codex/gpt-5.6-luna" || turn.Text != "你好" {
 		t.Fatalf("turn ok=%v %+v", ok, turn)
 	}
 }
@@ -79,16 +79,16 @@ func TestAgentRunGzipFrameAndCursorModelStayDistinct(t *testing.T) {
 	frame[0] = 0x01
 	binary.BigEndian.PutUint32(frame[1:5], uint32(buf.Len()))
 	copy(frame[5:], buf.Bytes())
-	turn, ok := ReadAgentRun(frame)
-	if !ok || turn.ModelID != "workbuddy/deepseek-v4.1-flash" {
+	turn, ok, err := ReadAgentRun(frame)
+	if err != nil || !ok || turn.ModelID != "workbuddy/deepseek-v4.1-flash" {
 		t.Fatalf("gzip turn ok=%v %+v", ok, turn)
 	}
 	own := frameOf(agentClient(agentRunMessage("grok-4.7", "c", "hi", nil)))
-	got, ok := ReadAgentRun(own)
-	if !ok || got.ModelID != "grok-4.7" {
+	got, ok, err := ReadAgentRun(own)
+	if err != nil || !ok || got.ModelID != "grok-4.7" {
 		t.Fatalf("cursor model ok=%v %+v", ok, got)
 	}
-	if _, ok := ReadAgentRun([]byte{0x0a, 0x00}); ok {
+	if _, ok, err := ReadAgentRun([]byte{0x0a, 0x00}); err != nil || ok {
 		t.Fatal("empty client message was a run")
 	}
 }

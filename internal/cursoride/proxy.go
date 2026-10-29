@@ -355,17 +355,9 @@ func (p *Proxy) runChat(s *sess, chat Chat) {
 		s.push(endFrame(chat.InvocationID, fmt.Sprintf("cursor ide: gateway status %d", resp.StatusCode)))
 		return
 	}
-	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
 	var sawText bool
-	for sc.Scan() {
-		piece, ok := chatPieces(sc.Text())
-		if !ok {
-			continue
-		}
-		if piece.done {
-			break
-		}
+	var asm toolAssembler
+	eachPiece(resp.Body, func(piece chatPiece) {
 		if piece.thinking != "" {
 			s.push(thinkingFrame(chat.InvocationID, piece.thinking))
 		}
@@ -375,7 +367,11 @@ func (p *Proxy) runChat(s *sess, chat Chat) {
 			sawText = true
 			s.push(textFrame(chat.InvocationID, piece.text, false))
 		}
-	}
+		emitInferenceTools(s, chat.InvocationID, &asm, piece)
+	})
+	// A body that ends without finish_reason or [DONE] still closes
+	// the call. A second seal is empty.
+	emitInferenceTools(s, chat.InvocationID, &asm, chatPiece{done: true})
 	if sawText {
 		s.push(textFrame(chat.InvocationID, "", true))
 	}
@@ -393,7 +389,12 @@ func (p *Proxy) agentRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, gunzipped := gunzipRequest(body, r.Header.Get("Content-Encoding"))
-	turn, ok := ReadAgentRun(body)
+	turn, ok, err := ReadAgentRun(body)
+	if err != nil {
+		Note("agent-run history fail")
+		http.Error(w, "history", http.StatusBadRequest)
+		return
+	}
 	if !ok {
 		Note("agent-run forward reason=not-a-run")
 		p.forward(w, r, body, gunzipped)
@@ -406,11 +407,11 @@ func (p *Proxy) agentRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ours {
-		Note(fmt.Sprintf("route miss model=%s path=AgentService/Run forward; Cursor would say Unknown model ID", turn.ModelID))
+		Note(fmt.Sprintf("route miss model=%s path=AgentService/Run forward", turn.ModelID))
 		p.forward(w, r, body, gunzipped)
 		return
 	}
-	Note(fmt.Sprintf("route ok model=%s path=AgentService/Run local", route.Model))
+	Note(fmt.Sprintf("route ok model=%s path=AgentService/Run local messages=%d tools=%d blobs-missing=%d", route.Model, len(turn.Messages), len(turn.Tools), turn.MissingBlobs))
 	w.Header().Set("Content-Type", "application/connect+proto")
 	w.WriteHeader(http.StatusOK)
 	fl, _ := w.(http.Flusher)
@@ -420,8 +421,7 @@ func (p *Proxy) agentRun(w http.ResponseWriter, r *http.Request) {
 			fl.Flush()
 		}
 	}
-	text := strings.TrimSpace(turn.Text)
-	if text == "" {
+	if len(turn.Messages) == 0 {
 		Note("chat done model=" + route.Model + " path=AgentService/Run reason=no-message")
 		write(agentTextFrame("cursor ide: agent run has no message"))
 		write(agentTurnEnded())
@@ -430,8 +430,8 @@ func (p *Proxy) agentRun(w http.ResponseWriter, r *http.Request) {
 	}
 	chat := Chat{
 		Model: route.Model, Effort: route.Effort, Session: turn.ConversationID,
-		Messages: []ChatMessage{{Role: "user", Content: text}},
-		Fast:     route.Fast, ContextTokens: route.ContextTokens,
+		Messages: turn.Messages, Tools: turn.Tools,
+		Fast: route.Fast, ContextTokens: route.ContextTokens,
 	}
 	p.streamAgent(r.Context(), chat, write)
 	write(connectEnd())
@@ -472,24 +472,76 @@ func (p *Proxy) streamAgent(ctx context.Context, chat Chat, write func([]byte)) 
 		write(agentTurnEnded())
 		return
 	}
-	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
-	for sc.Scan() {
-		piece, ok := chatPieces(sc.Text())
-		if !ok {
-			continue
-		}
-		if piece.done {
-			break
-		}
+	var asm toolAssembler
+	var execN uint32
+	eachPiece(resp.Body, func(piece chatPiece) {
 		if piece.thinking != "" {
 			write(agentThinkingFrame(piece.thinking))
 		}
 		if piece.text != "" {
 			write(agentTextFrame(piece.text))
 		}
-	}
+		for _, d := range piece.tools {
+			id, name, frag := asm.add(d)
+			if frag != "" {
+				write(agentPartialFrame(id, name, frag))
+			}
+		}
+		if piece.seal || piece.done {
+			writeSealedTools(&asm, &execN, write)
+		}
+	})
+	// A body that ends without finish_reason or [DONE] still closes
+	// the call. seal is empty when the stream already closed it.
+	writeSealedTools(&asm, &execN, write)
 	write(agentTurnEnded())
+}
+
+func writeSealedTools(asm *toolAssembler, execN *uint32, write func([]byte)) {
+	for _, t := range asm.seal() {
+		*execN++
+		frames, ok := agentToolFrames(t.id, t.name, t.args, *execN)
+		if !ok {
+			write(agentTextFrame("cursor ide: tool arguments are not json"))
+			continue
+		}
+		for _, frame := range frames {
+			write(frame)
+		}
+	}
+}
+
+func emitInferenceTools(s *sess, invocation string, asm *toolAssembler, piece chatPiece) {
+	for _, d := range piece.tools {
+		id, name, frag := asm.add(d)
+		if frag != "" {
+			s.push(toolCallFrame(invocation, id, name, frag, false))
+		}
+	}
+	if piece.seal || piece.done {
+		for _, t := range asm.seal() {
+			tail := ""
+			if t.emitted < len(t.args) {
+				tail = t.args[t.emitted:]
+			}
+			s.push(toolCallFrame(invocation, t.id, t.name, tail, true))
+		}
+	}
+}
+
+func eachPiece(r io.Reader, fn func(chatPiece)) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
+	for sc.Scan() {
+		piece, ok := chatPieces(sc.Text())
+		if !ok {
+			continue
+		}
+		fn(piece)
+		if piece.done {
+			return
+		}
+	}
 }
 
 func (p *Proxy) fetch(r *http.Request, body []byte) (int, []byte, string, error) {

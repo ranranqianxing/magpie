@@ -140,6 +140,8 @@ func endFrame(invocation, message string) []byte {
 // chatPiece is one delta of an OpenAI chat stream.
 type chatPiece struct {
 	text, thinking string
+	tools          []toolDelta
+	seal           bool
 	done           bool
 }
 
@@ -154,10 +156,19 @@ func chatPieces(line string) (chatPiece, bool) {
 	}
 	var body struct {
 		Choices []struct {
-			Delta struct {
+			FinishReason string `json:"finish_reason"`
+			Delta        struct {
 				Content          string `json:"content"`
 				ReasoningContent string `json:"reasoning_content"`
 				Reasoning        string `json:"reasoning"`
+				ToolCalls        []struct {
+					Index    *int   `json:"index"`
+					ID       string `json:"id"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"delta"`
 		} `json:"choices"`
 		Error struct {
@@ -178,8 +189,20 @@ func chatPieces(line string) (chatPiece, bool) {
 		} else {
 			p.thinking += c.Delta.Reasoning
 		}
+		if c.FinishReason != "" {
+			p.seal = true
+		}
+		for i, call := range c.Delta.ToolCalls {
+			idx := i
+			if call.Index != nil {
+				idx = *call.Index
+			}
+			p.tools = append(p.tools, toolDelta{
+				Index: idx, ID: call.ID, Name: call.Function.Name, Args: call.Function.Arguments,
+			})
+		}
 	}
-	if p.text == "" && p.thinking == "" {
+	if p.text == "" && p.thinking == "" && len(p.tools) == 0 && !p.seal {
 		return chatPiece{}, false
 	}
 	return p, true

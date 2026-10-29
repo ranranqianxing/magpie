@@ -69,6 +69,37 @@ func TestCatalogStandsAloneWhenCursorDoesNotAnswer(t *testing.T) {
 	}
 }
 
+func TestDefaultModelKeepsCursorsChoice(t *testing.T) {
+	var native wbuf
+	native.str(1, "composer-1")
+	h := &Handler{
+		Models: func() []Model { return []Model{deepseek()} },
+		Upstream: func(*http.Request, []byte) (int, []byte, string, error) {
+			return 200, []byte(native), "application/proto", nil
+		},
+	}
+	rec := post(t, h, PathDefaultModel, nil)
+	if rec.Code != 200 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "oppo/deepseek-flash") {
+		t.Fatal("replaced Cursor's default with a catalog id")
+	}
+	if !strings.Contains(rec.Body.String(), "composer-1") {
+		t.Fatalf("dropped Cursor's default: %q", rec.Body.Bytes())
+	}
+	failed := &Handler{
+		Models: func() []Model { return []Model{deepseek()} },
+		Upstream: func(*http.Request, []byte) (int, []byte, string, error) {
+			return 503, []byte("down"), "", nil
+		},
+	}
+	rec = post(t, failed, PathDefaultModel, nil)
+	if !strings.Contains(rec.Body.String(), "oppo/deepseek-flash") {
+		t.Fatal("a failed default call did not fall back to the catalog")
+	}
+}
+
 func TestCompressedCatalogIsNotMerged(t *testing.T) {
 	bad := frameOf([]byte("native"))
 	bad[0] = 1

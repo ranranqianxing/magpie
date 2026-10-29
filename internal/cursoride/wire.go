@@ -52,6 +52,13 @@ func (b *wbuf) u32(field int, v uint32) {
 	b.varint(uint64(v))
 }
 
+func (b *wbuf) fixed64(field int, v uint64) {
+	b.key(field, 1)
+	var raw [8]byte
+	binary.LittleEndian.PutUint64(raw[:], v)
+	*b = append(*b, raw[:]...)
+}
+
 func takeVarint(b []byte) (uint64, int) {
 	var x uint64
 	for i := 0; i < len(b) && i < 10; i++ {
@@ -93,6 +100,7 @@ func parseFields(b []byte) ([]field, error) {
 			if len(b) < 8 {
 				return nil, fmt.Errorf("cursor ide: truncated protobuf")
 			}
+			f.b = b[:8]
 			b = b[8:]
 		case 2:
 			ln, n := takeVarint(b)
