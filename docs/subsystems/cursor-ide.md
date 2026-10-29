@@ -23,7 +23,7 @@ is the other path: ordinary Cursor, magpie's existing models.
 | The gateway request | An invoke's messages become a `/v1/chat/completions` body: `model` is the route id, `reasoning_effort` is the level Cursor sent, `stream` is true. | [`compile.go`](../../internal/cursoride/compile.go) |
 | The catalog HTTP call | `Handler` answers the five paths above. When an upstream reply is supplied it appends magpie's rows; otherwise it answers with those rows alone. | [`handler.go`](../../internal/cursoride/handler.go) |
 | The proxy | Listens on `127.0.0.1:47331`. CONNECT to a `*.cursor.sh` host is terminated with a certificate this package's CA signed. Other CONNECT traffic is tunneled. A local run's text and thinking are streamed back as inference frames. | [`proxy.go`](../../internal/cursoride/proxy.go), [`reply.go`](../../internal/cursoride/reply.go), [`ca.go`](../../internal/cursoride/ca.go) |
-| The Agents row | Id `cursor-ide`, name Cursor. Connect writes Cursor's proxy settings and starts the proxy. Disconnect puts the previous settings back and stops the proxy. | [`cursoride.go`](../../internal/agent/cursoride.go) |
+| The Agents row | Id `cursor-ide`, name Cursor. Connect writes Cursor's proxy settings, starts the proxy, and installs the CA into the user trust store when that store does not already trust it. Disconnect puts the previous settings back and stops the proxy. It does not remove the CA. | [`cursoride.go`](../../internal/agent/cursoride.go) |
 
 `Handler` is not mounted on the gateway listener (`:3425`). The gateway
 speaks the agent APIs in [gateway routing](gateway-routing.md). Ordinary
@@ -31,7 +31,10 @@ Cursor does not call those. The proxy calls the gateway's
 `/v1/chat/completions` with `gateway.TokenFor("cursor-ide")`. Nothing here
 writes `state.vscdb`, Cursor's Open configuration, or
 `CURSOR_LOCAL_AGENT_BASE_URL`. The CA is written under magpie's config
-(`cursor-ide/ca.crt`) and is not installed into the system trust store.
+(`cursor-ide/ca.crt`). Connect installs that certificate into the user
+trust store (`TrustCA` in [`trust.go`](../../internal/cursoride/trust.go)).
+It does not write the machine-wide store and does not ask for an
+administrator.
 
 ## Field meanings
 
@@ -61,10 +64,10 @@ parameters, so a request that names either still resolves to the catalog id.
 ## Runtime path
 
 1. The Agents page's Cursor row (`cursor-ide`) is connectable the way Claude Desktop is: its provider field is magpie, and `ListsModels` gives the row the same model menu. Cursor CLI stays the row that cannot be connected. Its `cli-config.json` has no place for a magpie model.
-2. Connect writes `http.proxy`, `http.proxyKerberosServicePrincipal`, `http.proxySupport` (`on`), `cursor.general.disableHttp2` (`true`) and `http.experimental.systemCertificatesV2` (`true`) into Cursor's `settings.json`, and deletes `http.noProxy` while connected. The previous raw values are stashed and put back on disconnect, comments included. It then listens on `127.0.0.1:47331`. A second connect that already matches does not rewrite the file. `KeepCursorIDE` starts the proxy again when magpie serves and the settings already match, and does not write them.
+2. Connect writes `http.proxy`, `http.proxyKerberosServicePrincipal`, `http.proxySupport` (`on`), `cursor.general.disableHttp2` (`true`) and `http.experimental.systemCertificatesV2` (`true`) into Cursor's `settings.json`, and deletes `http.noProxy` while connected. The previous raw values are stashed and put back on disconnect, comments included. It then listens on `127.0.0.1:47331` and checks the user trust store for this CA. One that is already there is left alone: the log says the install was skipped, and the row's notice says the certificate is already trusted. One that is missing is installed for the user. A failure, or the Linux system-bundle command, is that same notice's one remaining step, and connect still succeeds. A second connect that already matches does not rewrite the file; it runs the same check again. Disconnect does not remove the CA. `KeepCursorIDE` starts the proxy again when magpie serves and the settings already match. It does not write settings and does not open a trust prompt.
 3. Cursor, restarted so it reads those settings, sends `CONNECT` for its hosts. The proxy terminates TLS for `*.cursor.sh` and tunnels anything else. `POST` `/aiserver.v1.AiService/AvailableModels` (and the usable-model and default-model paths) goes to `Handler`. `Models` is `ForAgent("cursor-ide")`, read on each request.
 4. `Handler` asks Cursor's own backend for the same call. A 2xx reply is decoded as a Connect unary frame when it is one, and magpie's protobuf is appended. A failed upstream answers with magpie's rows only. A compressed frame is a 502.
-5. `RunInferenceSSE` waits until `BidiAppend` for the same request id says whether the run is local. A run whose conversation id is a UUID and whose model is in the catalog is local: the proxy sends `run_ready` (`vendor` `unknown`, `prompt_version` `latest`) and answers the invoke from the gateway's chat stream (text and thinking frames, then an invocation end). `Finish` sends the Connect end-of-stream frame. Cursor's own model, a `data_binary` append, and a client message that is not this inference run are forwarded. The agent protocol's run request is not a UUID in that field, so it is forwarded.
+5. `RunInferenceSSE` waits until `BidiAppend` for the same request id says whether the run is local. A gzipped append (`Content-Encoding: gzip` or `x-gzip`, or a gzip body) is decompressed first so that decision can be read. A run whose conversation id is a UUID and whose model is in the catalog is local: the proxy sends `run_ready` (`vendor` `unknown`, `prompt_version` `latest`) and answers the invoke from the gateway's chat stream (text and thinking frames, then an invocation end). `Finish` sends the Connect end-of-stream frame. Cursor's own model, a `data_binary` append, and a client message that is not this inference run are forwarded. The forwarded body is the decompressed bytes: `Content-Encoding` is omitted and `Content-Length` is the length of those bytes. A request this package does not decompress, including a catalog call, is forwarded with the encoding the client sent. The agent protocol's run request is not a UUID in that field, so it is forwarded.
 6. The chat `POST` uses `Authorization: Bearer <gateway.TokenFor("cursor-ide")>` and `X-Magpie-Session` from `Chat.Header` when the run named a conversation. The token is not written into the protobuf or into Cursor's settings.
 
 A catalog request larger than 32 MiB is refused. It is not read as empty, which would replace Cursor's list with magpie's rows alone.
@@ -99,24 +102,29 @@ An empty catalog encodes no default model. Cursor is not given a stand-in.
 
 `go test ./internal/cursoride` covers the picker fields, the route ids, the
 chat body, the catalog HTTP replies, the CA files, a CONNECT that injects
-a catalog row, and a local run whose gateway stream comes back as text and
-thinking frames. `go test ./internal/agent -run CursorDesktop` covers the
-settings stash, a second connect that does not rewrite, drift when the
-recorded gateway address is swapped, and a hidden model left out of the
-list. Neither opens Cursor.
+a catalog row, a local run whose gateway stream comes back as text and
+thinking frames, a gzipped BidiAppend forwarded without `Content-Encoding`,
+and a gzipped catalog-model run that still finishes as text.
+`go test ./internal/agent -run CursorDesktop` covers the settings stash, a
+second connect that does not rewrite, drift when the recorded gateway
+address is swapped, a hidden model left out of the list, the notice for a
+trust step that is still left, and the notice when the certificate is
+already trusted. Neither opens Cursor or a trust store.
 
 To try it in the IDE, connect the Cursor row on the Agents page (id
 `cursor-ide`). Cursor CLI is the row magpie cannot connect. Magpie writes
 a local CA to `cursor-ide/ca.crt` in its config directory
-(`appdir.Config`) and does not install it into the system trust store.
-Trust that file yourself. Installed, the file is
+(`appdir.Config`). Installed, the file is
 `~/.config/magpie/cursor-ide/ca.crt`
 (`$XDG_CONFIG_HOME/magpie/cursor-ide/ca.crt` when that is set; the same
-path under the user's folder on Windows). The notice on the row names the
-path magpie wrote, including a portable run whose config directory is the
-`data` folder beside magpie. Fully quit and reopen Cursor, leave magpie
-running, and pick a magpie model in Cursor's model menu. A model hidden
-for this row on the Agents page is not in that menu.
+path under the user's folder on Windows; a portable run uses the `data`
+folder beside magpie). Connect then installs it for this user:
+
+- Windows: `certutil -user -addstore` into Current User\Root. Windows shows one consent dialog. It does not ask for an administrator. Approving it is the whole install.
+- macOS: `security add-trusted-cert` into the login keychain, user trust settings, not the System keychain. macOS asks for the login keychain password, not an administrator.
+- Linux: when `certutil` from libnss3-tools is installed, the user NSS database `~/.pki/nssdb` is updated with no prompt. Cursor's Node stack reads the system bundle, which this install does not write. The notice gives one command (`update-ca-certificates`, `update-ca-trust`, or `trust anchor`) for that bundle. magpie does not run it.
+
+If the prompt was dismissed, the notice on the row says so and names the certificate. Disconnect and connect the row again to show the prompt once more. A connect that finds the certificate already trusted skips the install and says so on the row. Disconnect does not remove the certificate. Fully quit and reopen Cursor, leave magpie running, and pick a magpie model in Cursor's model menu. A model hidden for this row on the Agents page is not in that menu. A chat on that model should finish: a gzipped append is no longer forwarded as gzip, which was the upstream `decompression failed` that left the stream reconnecting.
 
 ## Not this slice
 
@@ -126,4 +134,5 @@ of the chat body. Append sequence numbers are not reordered, and a run's
 session is not dropped when the stream ends. HTTP/2 is not intercepted;
 `cursor.general.disableHttp2` is set so Cursor uses HTTP/1.1 after it
 restarts. The gateway still does not speak Cursor's protocol on `:3425`.
-Trusting the CA is a step the user does; magpie does not install it.
+The machine-wide trust store is not written. On Linux the system bundle
+stays a command in the notice, because writing it needs root.

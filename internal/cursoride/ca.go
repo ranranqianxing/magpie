@@ -17,13 +17,14 @@ import (
 )
 
 // A local CA signs the certificates the proxy presents for Cursor's hosts.
-// Cursor accepts those only after this CA is trusted. magpie writes the
-// files and does not install them into the system trust store: that needs
-// an administrator, and a test must not touch the machine's store.
+// Cursor accepts those only after this CA is trusted. EnsureCA writes the
+// files. TrustCA installs the certificate into the user trust store;
+// neither writes the machine-wide store.
 
 const (
-	caCertName = "ca.crt"
-	caKeyName  = "ca.key"
+	caCertName   = "ca.crt"
+	caKeyName    = "ca.key"
+	caCommonName = "magpie Cursor IDE CA"
 )
 
 // CertFile is the CA certificate in dir.
@@ -54,7 +55,7 @@ func writeCA(dir string) (*x509.Certificate, crypto.Signer, error) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial(),
-		Subject:               pkix.Name{CommonName: "magpie Cursor IDE CA", Organization: []string{"magpie"}},
+		Subject:               pkix.Name{CommonName: caCommonName, Organization: []string{"magpie"}},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().AddDate(10, 0, 0),
 		IsCA:                  true,

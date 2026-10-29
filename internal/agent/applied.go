@@ -518,6 +518,11 @@ func (a *Agent) ConnectHow() (Connection, error) {
 		return Connection{How: "joined"}, a.Native.Connect()
 	}
 	if len(a.Fields) == 0 || a.Wired() {
+		if a.Wired() && a.OnKept != nil {
+			if err := a.OnKept(); err != nil {
+				return Connection{}, err
+			}
+		}
 		return Connection{How: "kept"}, nil
 	}
 	return a.connect()

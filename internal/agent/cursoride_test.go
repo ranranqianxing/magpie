@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -82,8 +84,8 @@ func TestCursorDesktopConnectsAndRestores(t *testing.T) {
 	if v, _ := edit.GetJSON(path, cursorIDEGatewayKey); v != gateway.URL() {
 		t.Fatalf("gateway record %q", v)
 	}
-	if !strings.Contains(a.Notice(), cursoride.CertFile(cursorIDECADir())) {
-		t.Fatalf("notice %q", a.Notice())
+	if n := a.Notice(); !strings.Contains(n, "quit and reopen") || strings.Contains(n, "certificate") {
+		t.Fatalf("notice %q", n)
 	}
 	old := time.Now().Add(-time.Hour)
 	if err := os.Chtimes(path, old, old); err != nil {
@@ -245,5 +247,92 @@ func TestCursorDesktopSyncKeepsHiddenModelsOut(t *testing.T) {
 	after, _ := os.Stat(a.Path)
 	if !before.ModTime().Equal(after.ModTime()) {
 		t.Fatal("a second sync wrote the model list again")
+	}
+}
+
+func TestCursorDesktopTrustNotice(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Cleanup(func() {
+		cursorIDEStop()
+		cursorIDETrustFn = nil
+		cursorIDETrustMu.Lock()
+		cursorIDETrustRes = cursoride.TrustResult{}
+		cursorIDETrustMu.Unlock()
+	})
+	cert := cursoride.CertFile(cursorIDECADir())
+	var calls int
+	cursorIDETrustFn = func(path string) cursoride.TrustResult {
+		calls++
+		if path != cert {
+			t.Errorf("trust path %q", path)
+		}
+		return cursoride.TrustResult{Step: cursoride.TrustStepWindows}
+	}
+	a := cursorIDE(home)
+	os.MkdirAll(filepath.Dir(a.Path), 0o755)
+	if err := a.Field("provider").Set(magpieID); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("connect trusted %d times", calls)
+	}
+	n := a.Notice()
+	if !strings.Contains(n, "quit and reopen") || !strings.Contains(n, cert) || !strings.Contains(n, "Current User") {
+		t.Fatalf("notice %q", n)
+	}
+	if _, err := a.ConnectHow(); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("a second connect did not retry trust: %d", calls)
+	}
+	cursorIDETrustFn = func(string) cursoride.TrustResult {
+		calls++
+		return cursoride.TrustResult{Step: cursoride.TrustStepDarwin}
+	}
+	if _, err := a.ConnectHow(); err != nil {
+		t.Fatal(err)
+	}
+	if n = a.Notice(); !strings.Contains(n, "keychain") || !strings.Contains(n, cert) {
+		t.Fatalf("mac notice %q", n)
+	}
+	cursorIDETrustFn = func(string) cursoride.TrustResult {
+		calls++
+		return cursoride.TrustResult{Step: cursoride.TrustStepLinux, Command: "sudo cp " + cert + " /usr/local/share/ca-certificates/magpie-cursor-ide.crt && sudo update-ca-certificates"}
+	}
+	if _, err := a.ConnectHow(); err != nil {
+		t.Fatal(err)
+	}
+	if n = a.Notice(); !strings.Contains(n, "sudo update-ca-certificates") || !strings.Contains(n, cert) {
+		t.Fatalf("linux notice %q", n)
+	}
+	cursorIDETrustFn = func(string) cursoride.TrustResult {
+		calls++
+		return cursoride.TrustResult{User: true}
+	}
+	if _, err := a.ConnectHow(); err != nil {
+		t.Fatal(err)
+	}
+	if n = a.Notice(); strings.Contains(n, "certificate") || strings.Contains(n, "sudo") || strings.Contains(n, "already trusted") {
+		t.Fatalf("fresh install notice %q", n)
+	}
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	cursorIDETrustFn = func(string) cursoride.TrustResult {
+		calls++
+		return cursoride.TrustResult{User: true, Already: true}
+	}
+	if _, err := a.ConnectHow(); err != nil {
+		t.Fatal(err)
+	}
+	if n = a.Notice(); !strings.Contains(n, "already trusted") || strings.Contains(n, "sudo") || strings.Contains(n, cert) {
+		t.Fatalf("already trusted notice %q", n)
+	}
+	if !strings.Contains(logged.String(), "already trusted") || !strings.Contains(logged.String(), "install skipped") {
+		t.Fatalf("log %q", logged.String())
 	}
 }

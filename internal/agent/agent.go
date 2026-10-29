@@ -131,6 +131,10 @@ type Agent struct {
 	// Notice, if set, is advice worth showing after a change: agents that
 	// read their config once at start-up need a restart to see it.
 	Notice func() string
+	// OnKept runs when Connect finds the agent already on magpie. Cursor
+	// retries certificate trust, which a dismissed prompt did not finish.
+	// An error fails that Connect.
+	OnKept func() error
 	// UA is what the agent's User-Agent begins with, lower-case: how the
 	// gateway tells its requests from others'
 	UA []string
