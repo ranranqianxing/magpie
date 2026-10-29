@@ -84,14 +84,42 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case PathUsableModels, PathUsableModelsAI:
 		h.merge(w, r, body, UsableModels(models))
 	case PathDefaultModel:
-		writeProto(w, DefaultModel(models), "application/proto")
+		h.keepDefault(w, r, body, DefaultModel(models))
 	case PathDefaultModelCLI:
-		writeProto(w, DefaultModelForCLI(models), "application/proto")
+		h.keepDefault(w, r, body, DefaultModelForCLI(models))
 	case PathDefaultModelNudge:
-		writeProto(w, DefaultModelNudge(models), "application/proto")
+		h.keepDefault(w, r, body, DefaultModelNudge(models))
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// keepDefault leaves Cursor's own default in place when the backend
+// answers. Injecting a catalog id there makes every later path that this
+// proxy does not answer (tab, cmd-k, apply) send that id and get
+// ERROR_BAD_MODEL_NAME. A failed or missing upstream still uses local,
+// which is the stand-in an empty Cursor reply would not have.
+func (h *Handler) keepDefault(w http.ResponseWriter, r *http.Request, body, local []byte) {
+	name := r.URL.Path
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	if h.Upstream == nil {
+		Note(fmt.Sprintf("catalog %s no-upstream", name))
+		writeProto(w, local, "application/proto")
+		return
+	}
+	status, up, ctype, err := h.Upstream(r, body)
+	if err != nil || status < 200 || status >= 300 || len(up) == 0 {
+		Note(fmt.Sprintf("catalog %s upstream-fail", name))
+		writeProto(w, local, "application/proto")
+		return
+	}
+	Note(fmt.Sprintf("catalog %s kept-upstream", name))
+	if ctype == "" {
+		ctype = "application/proto"
+	}
+	writeProto(w, up, ctype)
 }
 
 func (h *Handler) merge(w http.ResponseWriter, r *http.Request, body, extra []byte) {

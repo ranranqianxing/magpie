@@ -28,6 +28,8 @@ type Client struct {
 	ModelID        string
 	Params         []Parameter
 	Messages       []ChatMessage
+	Tools          []ToolSpec
+	MaxTokens      int
 }
 
 // ChatMessage is one turn in the gateway's chat body.
@@ -56,15 +58,20 @@ type ToolCall struct {
 // Chat is a gateway /v1/chat/completions request for one local run.
 //
 // JSON sets model, messages, stream, and reasoning_effort when the picker
-// named a level. It does not set a fast or context field: the gateway has
-// no single field for those, and this slice does not invent one. Session
-// is the conversation id, for the caller's X-Magpie-Session header.
+// named a level. Tools are set when the invoke or the agent run named
+// tools. MaxTokens is the inference model config's output cap, when that
+// request carried one. Fast and the context choice stay off the JSON: the
+// gateway's max_tokens is an output cap, not Cursor's context window, and
+// it has no field for the fast switch. Session is the conversation id,
+// for the caller's X-Magpie-Session header.
 type Chat struct {
 	Model         string
 	Effort        string
 	Session       string
 	InvocationID  string
 	Messages      []ChatMessage
+	Tools         []ToolSpec
+	MaxTokens     int
 	Fast          bool
 	ContextTokens int
 }
@@ -81,8 +88,21 @@ func (c Chat) Header() map[string]string {
 type chatBody struct {
 	Model           string       `json:"model"`
 	Messages        []outMessage `json:"messages"`
+	Tools           []outToolDef `json:"tools,omitempty"`
+	MaxTokens       int          `json:"max_tokens,omitempty"`
 	ReasoningEffort string       `json:"reasoning_effort,omitempty"`
 	Stream          bool         `json:"stream"`
+}
+
+type outToolDef struct {
+	Type     string      `json:"type"`
+	Function outToolFunc `json:"function"`
+}
+
+type outToolFunc struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters"`
 }
 
 type outMessage struct {
@@ -121,7 +141,19 @@ func (c Chat) JSON() ([]byte, error) {
 	if len(c.Messages) == 0 {
 		return nil, fmt.Errorf("cursor ide: chat has no messages")
 	}
-	body := chatBody{Model: c.Model, Stream: true, ReasoningEffort: c.Effort}
+	body := chatBody{Model: c.Model, Stream: true, ReasoningEffort: c.Effort, MaxTokens: c.MaxTokens}
+	for _, t := range c.Tools {
+		params := t.Parameters
+		if len(params) == 0 || !json.Valid(params) {
+			params = json.RawMessage(`{"type":"object","properties":{}}`)
+		}
+		body.Tools = append(body.Tools, outToolDef{
+			Type: "function",
+			Function: outToolFunc{
+				Name: t.Name, Description: t.Description, Parameters: params,
+			},
+		})
+	}
 	for _, m := range c.Messages {
 		om, err := marshalMessage(m)
 		if err != nil {
@@ -265,6 +297,20 @@ func readInvoke(c Client, body []byte) (Client, error) {
 			return Client{}, err
 		}
 		c.Messages = append(c.Messages, msgs...)
+	}
+	tools, err := inferenceTools(rf)
+	if err != nil {
+		return Client{}, err
+	}
+	c.Tools = tools
+	if cf := fieldBytes(rf, 4); len(cf) > 0 {
+		cfs, err := parseFields(cf[0])
+		if err != nil {
+			return Client{}, err
+		}
+		if n, ok := fieldUint(cfs, 1); ok && n > 0 && n < 1<<31 {
+			c.MaxTokens = int(n)
+		}
 	}
 	return c, nil
 }
@@ -503,8 +549,8 @@ func CompileChat(route Route, session string, payload []byte) (Chat, error) {
 	}
 	return Chat{
 		Model: route.Model, Effort: route.Effort, Session: session,
-		InvocationID: c.InvocationID, Messages: c.Messages,
-		Fast: route.Fast, ContextTokens: route.ContextTokens,
+		InvocationID: c.InvocationID, Messages: c.Messages, Tools: c.Tools,
+		MaxTokens: c.MaxTokens, Fast: route.Fast, ContextTokens: route.ContextTokens,
 	}, nil
 }
 

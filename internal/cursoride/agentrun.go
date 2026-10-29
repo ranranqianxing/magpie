@@ -13,13 +13,20 @@ import (
 // ModelID is RequestedModel.model_id (field 9), or ModelDetails.model_id
 // (field 3) when the run names no requested model. It is the catalog id
 // the picker stored, including a variant string. Params are the
-// RequestedModel parameters beside that id. Text is the user message.
-// ConversationID is the run's conversation, when it named one.
+// RequestedModel parameters beside that id. Text is the user message on
+// the action. Messages is that text plus the conversation_state prompt
+// (root_prompt_messages_json), resolved through pre_fetched_blobs.
+// Tools is the composer tool list. ConversationID is the run's
+// conversation, when it named one. MissingBlobs counts prompt ids the
+// request did not carry bytes for.
 type AgentTurn struct {
 	ModelID        string
 	Params         []Parameter
 	ConversationID string
 	Text           string
+	Messages       []ChatMessage
+	Tools          []ToolSpec
+	MissingBlobs   int
 }
 
 // ReadAgentRun reads an AgentService/Run body. ok is false when the body
@@ -28,31 +35,40 @@ type AgentTurn struct {
 // is one protobuf is read as that message. A gzipped connect frame (flag
 // bit 0) is decompressed. A trailer frame is skipped. A frame that does
 // not parse is unknown, so ok is false and the caller forwards the body.
-func ReadAgentRun(body []byte) (AgentTurn, bool) {
+func ReadAgentRun(body []byte) (AgentTurn, bool, error) {
 	payloads, framed := connectPayloads(body)
 	if !framed {
 		return readAgentClient(body)
 	}
+	var last error
 	for _, p := range payloads {
-		if turn, ok := readAgentClient(p); ok {
-			return turn, true
+		turn, ok, err := readAgentClient(p)
+		if err != nil {
+			last = err
+			continue
+		}
+		if ok {
+			return turn, true, nil
 		}
 	}
-	return AgentTurn{}, false
+	if last != nil {
+		return AgentTurn{}, false, last
+	}
+	return AgentTurn{}, false, nil
 }
 
-func readAgentClient(payload []byte) (AgentTurn, bool) {
+func readAgentClient(payload []byte) (AgentTurn, bool, error) {
 	fs, err := parseFields(payload)
 	if err != nil {
-		return AgentTurn{}, false
+		return AgentTurn{}, false, nil
 	}
 	runs := fieldBytes(fs, 1)
 	if len(runs) == 0 {
-		return AgentTurn{}, false
+		return AgentTurn{}, false, nil
 	}
 	rf, err := parseFields(runs[0])
 	if err != nil {
-		return AgentTurn{}, false
+		return AgentTurn{}, false, err
 	}
 	id, params := "", []Parameter(nil)
 	if ms := fieldBytes(rf, 9); len(ms) > 0 {
@@ -64,13 +80,24 @@ func readAgentClient(payload []byte) (AgentTurn, bool) {
 		}
 	}
 	if id == "" {
-		return AgentTurn{}, false
+		return AgentTurn{}, false, nil
 	}
 	conv, _ := fieldString(rf, 5)
+	text := readAgentText(rf)
+	blobs := blobIndex(fieldBytes(rf, 17))
+	var msgs []ChatMessage
+	var missing int
+	if states := fieldBytes(rf, 1); len(states) > 0 {
+		msgs, missing, err = replayConversation(states[0], blobs)
+		if err != nil {
+			return AgentTurn{}, false, err
+		}
+	}
 	return AgentTurn{
 		ModelID: id, Params: params, ConversationID: conv,
-		Text: readAgentText(rf),
-	}, true
+		Text: text, Messages: appendCurrent(msgs, text),
+		Tools: agentTools(rf), MissingBlobs: missing,
+	}, true, nil
 }
 
 func readRequestedModel(msg []byte) (string, []Parameter) {

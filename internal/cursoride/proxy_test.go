@@ -271,8 +271,8 @@ func TestProxyAgentRunAnswersCatalogModelsLocally(t *testing.T) {
 			t.Fatalf("log missing %s:\n%s", id, logText)
 		}
 	}
-	if !strings.Contains(logText, "route miss model=grok-4.7") || !strings.Contains(logText, "Unknown model ID") {
-		t.Fatalf("log missing the forwarded Cursor model:\n%s", logText)
+	if !strings.Contains(logText, "route miss model=grok-4.7") || strings.Contains(logText, "Unknown model ID") {
+		t.Fatalf("log should name the forward without claiming Unknown model ID:\n%s", logText)
 	}
 	if strings.Contains(logText, "你好") || strings.Contains(logText, token) {
 		t.Fatalf("log kept the user text or the gateway token:\n%s", logText)
@@ -598,4 +598,235 @@ func TestProxyDataBinaryBidiAppend(t *testing.T) {
 	default:
 		t.Fatal("gateway was not asked — data_binary path likely forwarded upstream")
 	}
+}
+
+func TestProxyAgentRunReplaysHistoryAndEmitsShell(t *testing.T) {
+	const conv = "33333333-3333-4333-8333-333333333333"
+	gotChat := make(chan []byte, 1)
+	gw := localHTTP(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"Shell","arguments":"{\"command\":\"ls\"}"}}]}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+		gotChat <- b
+	})
+	up := localHTTP(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("forwarded %s", r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	})
+	dir := t.TempDir()
+	p := &Proxy{
+		Addr: "127.0.0.1:0", CADir: dir, Upstream: up.URL,
+		Gateway: func() (string, string) { return gw.URL, "tok" },
+		Models:  func() []Model { return agentCatalog() },
+	}
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	client := cursorClient(t, strings.TrimPrefix(addr, "http://"), dir, "api2.cursor.sh")
+	body := postCursor(t, client, PathAgentRun, agentRunWithHistory("codex/gpt-5.6-luna", conv, "second"))
+	if !bytes.Contains(body, []byte("call_1")) || !agentExecRan(body, "ls") {
+		t.Fatalf("stream did not exec the shell: %q", body)
+	}
+	select {
+	case chat := <-gotChat:
+		var got struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+			Tools []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
+		}
+		if json.Unmarshal(chat, &got) != nil {
+			t.Fatalf("chat %s", chat)
+		}
+		if len(got.Messages) != 3 || got.Messages[0].Content == "" || !strings.Contains(got.Messages[0].Content, "first") || got.Messages[1].Role != "assistant" || got.Messages[1].Content != "earlier" || got.Messages[2].Content != "second" {
+			t.Fatalf("messages %+v", got.Messages)
+		}
+		var shell bool
+		for _, tool := range got.Tools {
+			if tool.Function.Name == "Shell" {
+				shell = true
+			}
+		}
+		if !shell {
+			t.Fatal("agent chat offered no Shell tool")
+		}
+	default:
+		t.Fatal("gateway was not asked")
+	}
+}
+
+func TestProxyAgentRunClosesAToolCallWhenTheStreamEnds(t *testing.T) {
+	gotChat := make(chan struct{}, 1)
+	gw := localHTTP(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_2","function":{"name":"Shell","arguments":"{\"command\":\"pwd\"}"}}]}}]}`+"\n\n")
+		gotChat <- struct{}{}
+	})
+	dir := t.TempDir()
+	p := &Proxy{
+		Addr: "127.0.0.1:0", CADir: dir,
+		Upstream: localHTTP(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }).URL,
+		Gateway:  func() (string, string) { return gw.URL, "tok" },
+		Models:   func() []Model { return agentCatalog() },
+	}
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	client := cursorClient(t, strings.TrimPrefix(addr, "http://"), dir, "api2.cursor.sh")
+	body := postCursor(t, client, PathAgentRun, agentRunWithHistory("codex/gpt-5.6-luna", "55555555-5555-4555-8555-555555555555", "second"))
+	select {
+	case <-gotChat:
+	default:
+		t.Fatal("gateway was not asked")
+	}
+	if !agentExecRan(body, "pwd") {
+		t.Fatalf("stream did not exec the shell: %q", body)
+	}
+}
+
+// agentExecRan reports whether body carries an exec_server_message whose
+// shell command is cmd. A partial_tool_call names the command too; this
+// looks only at the exec the IDE runs.
+func agentExecRan(body []byte, cmd string) bool {
+	payloads, framed := connectPayloads(body)
+	if !framed {
+		return false
+	}
+	for _, p := range payloads {
+		fs, err := parseFields(p)
+		if err != nil {
+			continue
+		}
+		execs := fieldBytes(fs, 2)
+		if len(execs) == 0 {
+			continue
+		}
+		msg, err := parseFields(execs[0])
+		if err != nil {
+			continue
+		}
+		shells := fieldBytes(msg, 2)
+		if len(shells) == 0 {
+			continue
+		}
+		shell, err := parseFields(shells[0])
+		if err != nil {
+			continue
+		}
+		if got, _ := fieldString(shell, 1); got == cmd {
+			return true
+		}
+	}
+	return false
+}
+
+func TestProxyInferenceEmitsToolCall(t *testing.T) {
+	const conv = "44444444-4444-4444-8444-444444444444"
+	gw := localHTTP(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_9","function":{"name":"Read","arguments":"{\"path\":\"a.go\"}"}}]}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	})
+	dir := t.TempDir()
+	p := &Proxy{
+		Addr: "127.0.0.1:0", CADir: dir, Upstream: localHTTP(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }).URL,
+		Gateway: func() (string, string) { return gw.URL, "tok" },
+		Models:  func() []Model { return []Model{{ID: "deepseek/pro", Name: "DeepSeek Pro"}} },
+	}
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	client := cursorClient(t, strings.TrimPrefix(addr, "http://"), dir, "api2.cursor.sh")
+	reqID := "req-tool"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api2.cursor.sh/aiserver.v1.InferenceService/RunInferenceSSE", bytes.NewReader(sseRequest(reqID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/proto")
+	sseResp := make(chan *http.Response, 1)
+	sseErr := make(chan error, 1)
+	go func() {
+		resp, err := client.Do(req)
+		if err != nil {
+			sseErr <- err
+			return
+		}
+		sseResp <- resp
+	}()
+	postCursor(t, client, "/aiserver.v1.BidiService/BidiAppend", bidiAppend(reqID, runRequest(conv, "deepseek/pro", nil)))
+	postCursor(t, client, "/aiserver.v1.BidiService/BidiAppend", bidiAppend(reqID, invoke("inv-1", textMsg(1, "hi"))))
+	var resp *http.Response
+	select {
+	case resp = <-sseResp:
+	case err := <-sseErr:
+		t.Fatal(err)
+	case <-ctx.Done():
+		t.Fatal("stream did not start")
+	}
+	defer resp.Body.Close()
+	var stream bytes.Buffer
+	tmp := make([]byte, 512)
+	finished := false
+	for {
+		n, rerr := resp.Body.Read(tmp)
+		stream.Write(tmp[:n])
+		if !finished && bytes.Contains(stream.Bytes(), []byte("a.go")) {
+			finished = true
+			postCursor(t, client, "/aiserver.v1.BidiService/BidiAppend", bidiAppend(reqID, finishMsg()))
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			if ctx.Err() != nil {
+				t.Fatalf("stream ended without the tool call: %q (%v)", stream.Bytes(), ctx.Err())
+			}
+			t.Fatalf("read: %v; stream=%q", rerr, stream.Bytes())
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("stream ended without the tool call: %q (%v)", stream.Bytes(), ctx.Err())
+		}
+	}
+	b := stream.Bytes()
+	if !bytes.Contains(b, []byte("call_9")) || !bytes.Contains(b, []byte("Read")) || !bytes.Contains(b, []byte("a.go")) {
+		t.Fatalf("stream = %q", b)
+	}
+}
+
+func agentRunWithHistory(model, conv, text string) []byte {
+	user := []byte(`{"role":"user","content":"<user_query>\nfirst\n</user_query>"}`)
+	asst := []byte(`{"role":"assistant","content":"earlier"}`)
+	var state wbuf
+	state.msg(1, user)
+	state.msg(1, asst)
+	var requested wbuf
+	requested.str(1, model)
+	var msg wbuf
+	msg.str(1, text)
+	var action wbuf
+	action.msg(1, []byte(msg))
+	var uma wbuf
+	uma.msg(1, []byte(action))
+	var run wbuf
+	run.msg(1, []byte(state))
+	run.msg(2, []byte(uma))
+	run.str(5, conv)
+	run.msg(9, []byte(requested))
+	return frameOf(agentClient([]byte(run)))
 }
