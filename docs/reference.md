@@ -106,6 +106,7 @@ line; agents connected to magpie lose it when it quits.
 | Prime Agent  | `~/.prime/agent/settings.json` (+ `models.json`; `$PRIME_AGENT_CODING_AGENT_DIR`) | model, thinking (Pi's fields; its key `magpie-prime-agent` names it, since its requests carry no User-Agent; the global settings alone, `allowedModels` and `subagentDefaultModel` left as they are) |
 | Goose        | `~/.config/goose/config.yaml`     | model           |
 | Cursor CLI   | `~/.cursor/cli-config.json`       | model           |
+| Cursor (desktop IDE) | `settings.json` in Cursor's User folder (`~/Library/Application Support/Cursor/User` on macOS, `~/.config/Cursor/User` on Linux, `$XDG_CONFIG_HOME/Cursor/User` when set, `%APPDATA%\Cursor\User` on Windows) | provider (Agents id `cursor-ide`; trust `cursor-ide/ca.crt` in magpie's config, [Cursor](#cursor)) |
 | Zed          | `~/.config/zed/settings.json` (`$XDG_CONFIG_HOME` on Linux, `%APPDATA%\Zed` on Windows) | model (a `magpie` OpenAI-compatible provider; its catalog in Zed's picker) |
 | VS Code (Chat) | `~/Library/Application Support/Code/User/settings.json` + `chatLanguageModels.json` (`~/.config/Code/User` on Linux, `%APPDATA%\Code\User` on Windows) | model (`chat.defaultModel`; a `magpie` Custom Endpoint group, its catalog in Chat's model picker; VS Code 1.122+, no Copilot sign-in or key needed). Each profile's own pair under `User/profiles/<id>/` (listed in `globalStorage/storage.json`) gets the same, unless the profile uses the default's |
 | VS Code Insiders (Chat) | the same files under `Code - Insiders/User` in place of `Code/User` | as VS Code, a row of its own; its models send the token `magpie-vscode-insiders`, since its chat's User-Agent is VS Code's |
@@ -156,6 +157,12 @@ Provider-scoped agents (OpenCode, MiMo Code, DevEco Code, Pi, OmO, StepCode, Mot
 Only agents that are installed or configured are shown.
 
 ### Notes on some agents
+
+#### Cursor
+
+Cursor on the Agents page is the ordinary desktop IDE (id `cursor-ide`, name Cursor). Connect that row. Cursor CLI stays the row magpie cannot connect: `~/.cursor/cli-config.json` has no place for a magpie model. Cursor Private Inference is a different row. It reads `CURSOR_LOCAL_AGENT_BASE_URL` and `CURSOR_LOCAL_AGENT_API_KEY`, and magpie writes none of ordinary Cursor's settings for it.
+
+Connect writes Cursor's proxy settings and starts a local proxy. Magpie writes a local MITM CA to `cursor-ide/ca.crt` in its config directory and uses it to sign the certificates the proxy presents for `*.cursor.sh`. It does not install that CA into the system trust store. Trust the file yourself. Installed, it is `~/.config/magpie/cursor-ide/ca.crt` (`$XDG_CONFIG_HOME/magpie/cursor-ide/ca.crt` when that is set; the same path under the user's folder on Windows). The notice on the Agents row names the path magpie wrote. Then fully quit and reopen Cursor, leave magpie running, and pick a magpie model in Cursor's model menu. A model hidden for this row is not in that menu. The design is in [Cursor IDE model injection](subsystems/cursor-ide.md).
 
 #### StepCode
 
