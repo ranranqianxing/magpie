@@ -13,7 +13,7 @@ These pages describe current responsibilities, runtime paths, state, and contrac
 | How the gateway picks a provider, key or account, and falls back | [Gateway routing and fallback](gateway-routing.md) |
 | Gateway Session Aggregation | [Gateway Session Aggregation](gateway-sessions.md) |
 | Connecting an agent's config to the gateway, drift, disconnect, WSL twins | [Agent wiring](agent-wiring.md) |
-| Ordinary Cursor's model list and inference ids for magpie's catalog | [Cursor IDE model injection](cursor-ide.md) |
+| Ordinary Cursor's Agents-page connection, model list and inference proxy | [Cursor IDE model injection](cursor-ide.md) |
 | Providers, keys, subscription accounts, refresh and allowance | [Providers and accounts](providers-accounts.md) |
 | Instructions, MCP servers, skills and RTK written into agents | [Library](library.md) |
 | Tray, panel, window, `magpie web` and the page's JSON API | [GUI app shell](gui-shell.md) |

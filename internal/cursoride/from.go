@@ -9,6 +9,14 @@ import (
 // LiveCatalog is magpie's current agent catalog as Cursor rows.
 func LiveCatalog() []Model { return FromEntries(provider.Catalog()) }
 
+// ForAgent is the catalog that agent is allowed to show: provider.CatalogFor,
+// so a model hidden on the Agents page is not injected. The provider's key
+// and base URL are not read.
+func ForAgent(id string) []Model {
+	shown, _ := provider.CatalogFor(id)
+	return FromEntries(shown)
+}
+
 // FromEntries copies catalog entries into Cursor rows.
 //
 // The display name is the model's own name (the user's rename when they

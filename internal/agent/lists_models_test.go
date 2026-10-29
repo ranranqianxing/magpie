@@ -7,6 +7,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/yetone/magpie/internal/cursoride"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -61,7 +62,7 @@ func TestEveryPickerOfMagpiesModelsCanBeNarrowed(t *testing.T) {
 	if len(bare) > 0 {
 		t.Errorf("magpie's models are put in these agents' pickers with no way to pick which: %v", bare)
 	}
-	for _, id := range []string{"zcode", "pencil", "openpencil", "newmax", "t3code", "workbuddy", "workbuddy-ai", copilotJBID, CursorLocalID} {
+	for _, id := range []string{"zcode", "pencil", "openpencil", "newmax", "t3code", "workbuddy", "workbuddy-ai", copilotJBID, CursorLocalID, cursoride.AgentID} {
 		if !slices.Contains(menus, id) {
 			t.Errorf("%s's row has no model list to pick in (ListsModels): %v", id, menus)
 		}
