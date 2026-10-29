@@ -63,12 +63,13 @@ type cursorIDESaved struct {
 }
 
 var (
-	noticeCursorIDE       = newNotice("Cursor reads its proxy settings when it starts — quit and reopen Cursor to use magpie's models, and leave magpie running, then pick a magpie model in Cursor's model menu.")
-	noticeCursorIDEKept   = newNotice("magpie's certificate is already trusted for your user, so this connect did not install it again.")
-	noticeCursorIDEWin    = newNotice("Approve the one Windows prompt to trust magpie's certificate for your user (it is not installed for the whole machine). If you dismissed it, disconnect and connect Cursor on the Agents page again, or open {cert} and install it under Current User → Trusted Root Certification Authorities.")
-	noticeCursorIDEMac    = newNotice("Enter your login keychain password when macOS asks, to trust magpie's certificate for your user (no administrator password). If you dismissed it, disconnect and connect Cursor on the Agents page again, or open {cert} in Keychain Access and set When using this certificate to Always Trust.")
-	noticeCursorIDELinux  = newNotice("Cursor on Linux also reads the system trust store, which still needs magpie's certificate. Run {command} once, then quit and reopen Cursor.")
-	noticeCursorIDEManual = newNotice("Trust magpie's certificate ({cert}) so Cursor accepts the proxy.")
+	noticeCursorIDE          = newNotice("Cursor reads its proxy settings when it starts — quit and reopen Cursor to use magpie's models, and leave magpie running, then pick a magpie model in Cursor's model menu.")
+	noticeCursorIDERestarted = newNotice("Cursor was quit and opened again so it reads these proxy settings. Leave magpie running, then pick a magpie model in Cursor's model menu.")
+	noticeCursorIDEKept      = newNotice("magpie's certificate is already trusted for your user, so this connect did not install it again.")
+	noticeCursorIDEWin       = newNotice("Approve the one Windows prompt to trust magpie's certificate for your user (it is not installed for the whole machine). If you dismissed it, disconnect and connect Cursor on the Agents page again, or open {cert} and install it under Current User → Trusted Root Certification Authorities.")
+	noticeCursorIDEMac       = newNotice("Enter your login keychain password when macOS asks, to trust magpie's certificate for your user (no administrator password). If you dismissed it, disconnect and connect Cursor on the Agents page again, or open {cert} in Keychain Access and set When using this certificate to Always Trust.")
+	noticeCursorIDELinux     = newNotice("Cursor on Linux also reads the system trust store, which still needs magpie's certificate. Run {command} once, then quit and reopen Cursor.")
+	noticeCursorIDEManual    = newNotice("Trust magpie's certificate ({cert}) so Cursor accepts the proxy.")
 )
 
 // cursorIDETrustFn replaces TrustCA in tests. Production leaves it nil.
@@ -161,13 +162,17 @@ func cursorIDEApplyTrust() {
 }
 
 func cursorIDENotice(settingsPath string) string {
-	base := noticeCursorIDE.String()
-	if !cursorIDEProxySet(settingsPath) {
-		return base
-	}
 	cursorIDETrustMu.Lock()
 	res := cursorIDETrustRes
+	restarted := cursorIDERestarted
 	cursorIDETrustMu.Unlock()
+	base := noticeCursorIDE.String()
+	if restarted && cursorIDEProxySet(settingsPath) {
+		base = noticeCursorIDERestarted.String()
+	}
+	if !cursorIDEProxySet(settingsPath) {
+		return noticeCursorIDE.String()
+	}
 	cert := cursoride.CertFile(cursorIDECADir())
 	var extra string
 	switch res.Step {
@@ -261,11 +266,15 @@ func cursorIDESet(path, v string) error {
 			return err
 		}
 		cursorIDEApplyTrust()
+		cursorIDEAfterWrite()
 		return nil
 	case "":
 		// Disconnect puts Cursor's settings back and stops the proxy.
 		// The CA stays trusted: the next connect checks and skips the
-		// install when it is still there.
+		// install when it is still there. Cursor is not quit.
+		cursorIDETrustMu.Lock()
+		cursorIDERestarted = false
+		cursorIDETrustMu.Unlock()
 		if err := cursorIDERestore(path); err != nil {
 			return err
 		}

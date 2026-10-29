@@ -2136,6 +2136,25 @@ function connectPanel(a, { fields, fieldBtn }) {
       loadSettings().then(() => { list.hidden = false; }, (e) => status(e.message, "err"));
     }
   }
+  if (a.id === "cursor-ide") {
+    const pre = el("pre", "ag-diag");
+    const path = el("code", "ag-path", "");
+    let text = "";
+    const load = () => fetch("/api/agents/cursor-ide/log").then((r) => r.ok ? r.json() : Promise.reject()).then((body) => {
+      text = body.text || "";
+      path.textContent = body.path || "";
+      pre.textContent = text || t("No cursor-ide lines yet.");
+    }).catch(() => { pre.textContent = t("The log could not be read."); });
+    pre.textContent = t("Reading the log…");
+    const refresh = el("button", "ag-quiet", t("Refresh"));
+    refresh.type = "button";
+    refresh.onclick = (ev) => { ev.stopPropagation(); load(); };
+    const copyAll = el("button", "ag-quiet", t("Copy all"));
+    copyAll.type = "button";
+    copyAll.onclick = (ev) => { ev.stopPropagation(); copy(text, t("Diagnostics")); };
+    kv(t("Diagnostics"), line(refresh, copyAll, path), line(el("span", "ag-hint", t("Same lines as this file, for a terminal. A photo of the box is enough to share."))), pre);
+    load();
+  }
   if (a.launch) {
     const cp = el("button", "ag-quiet", t("Copy"));
     cp.type = "button";

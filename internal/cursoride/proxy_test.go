@@ -157,6 +157,128 @@ func TestProxyInjectsTheCatalogAndStreamsAMagpieModel(t *testing.T) {
 	}
 }
 
+func TestProxyAgentRunAnswersCatalogModelsLocally(t *testing.T) {
+	const token = "gateway-token-for-cursor-ide"
+	const conv = "22222222-2222-4222-8222-222222222222"
+	gotChat := make(chan []byte, 4)
+	gw := localHTTP(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			t.Errorf("authorization %q", r.Header.Get("Authorization"))
+		}
+		if r.Header.Get("X-Magpie-Session") != conv {
+			t.Errorf("session %q", r.Header.Get("X-Magpie-Session"))
+		}
+		b, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"ponder\",\"content\":\"Hello\"}}]}\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+		gotChat <- b
+	})
+	var forwarded []string
+	up := localHTTP(t, func(w http.ResponseWriter, r *http.Request) {
+		forwarded = append(forwarded, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	})
+	dir := t.TempDir()
+	p := &Proxy{
+		Addr:     "127.0.0.1:0",
+		CADir:    dir,
+		Upstream: up.URL,
+		Gateway:  func() (string, string) { return gw.URL, token },
+		Models:   func() []Model { return agentCatalog() },
+	}
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	client := cursorClient(t, strings.TrimPrefix(addr, "http://"), dir, "api2.cursor.sh")
+
+	ids := []string{
+		"aicodings-openai/gpt-6-astra",
+		"codex/gpt-5.6-luna",
+		"workbuddy/deepseek-v4.1-flash",
+	}
+	for _, id := range ids {
+		var params []Parameter
+		if id == "aicodings-openai/gpt-6-astra" {
+			params = []Parameter{{ID: "reasoning", Value: "high"}}
+		}
+		body := postCursor(t, client, PathAgentRun, agentRunBody(id, conv, "你好", params))
+		if !bytes.Contains(body, []byte("Hello")) || !bytes.Contains(body, []byte("ponder")) {
+			t.Fatalf("%s was not answered from the gateway (stream %q, forwarded %v)", id, body, forwarded)
+		}
+		if bytes.Contains(body, []byte(token)) {
+			t.Fatalf("%s stream contains the gateway token", id)
+		}
+		if !bytes.Contains(body, []byte{0x02, 0, 0, 0, 0x02, '{', '}'}) {
+			t.Fatalf("%s stream has no end frame", id)
+		}
+	}
+	if len(forwarded) != 0 {
+		t.Fatalf("catalog models were forwarded: %v", forwarded)
+	}
+	for i, id := range ids {
+		select {
+		case chat := <-gotChat:
+			if bytes.Contains(chat, []byte(token)) {
+				t.Fatalf("chat body contains the token: %s", chat)
+			}
+			var got struct {
+				Model    string `json:"model"`
+				Messages []struct {
+					Content string `json:"content"`
+				} `json:"messages"`
+				Effort string `json:"reasoning_effort"`
+				Stream bool   `json:"stream"`
+			}
+			if json.Unmarshal(chat, &got) != nil || got.Model != id || !got.Stream {
+				t.Fatalf("chat %d %s", i, chat)
+			}
+			if len(got.Messages) != 1 || got.Messages[0].Content != "你好" {
+				t.Fatalf("messages %s", chat)
+			}
+			if id == "aicodings-openai/gpt-6-astra" && got.Effort != "high" {
+				t.Fatalf("effort %q", got.Effort)
+			}
+			if id != "aicodings-openai/gpt-6-astra" && got.Effort != "" {
+				t.Fatalf("effort %q on %s", got.Effort, id)
+			}
+		default:
+			t.Fatalf("gateway was not asked for %s", id)
+		}
+	}
+
+	empty := postCursor(t, client, PathAgentRun, agentRunBody("codex/gpt-5.6-luna", conv, "  ", nil))
+	if !bytes.Contains(empty, []byte("cursor ide: agent run has no message")) {
+		t.Fatalf("empty run = %q", empty)
+	}
+	if len(forwarded) != 0 {
+		t.Fatalf("empty catalog run was forwarded: %v", forwarded)
+	}
+
+	postCursor(t, client, PathAgentRun, agentRunBody("grok-4.7", conv, "hi", nil))
+	if !strings.Contains(strings.Join(forwarded, " "), PathAgentRun) {
+		t.Fatalf("Cursor's own model was not forwarded: %v", forwarded)
+	}
+	logText := Recent()
+	for _, id := range ids {
+		if !strings.Contains(logText, "route ok model="+id) || !strings.Contains(logText, "chat start model="+id) || !strings.Contains(logText, "chat done model="+id) {
+			t.Fatalf("log missing %s:\n%s", id, logText)
+		}
+	}
+	if !strings.Contains(logText, "route miss model=grok-4.7") || !strings.Contains(logText, "Unknown model ID") {
+		t.Fatalf("log missing the forwarded Cursor model:\n%s", logText)
+	}
+	if strings.Contains(logText, "你好") || strings.Contains(logText, token) {
+		t.Fatalf("log kept the user text or the gateway token:\n%s", logText)
+	}
+}
+
 func TestProxyTunnelsWhatIsNotCursor(t *testing.T) {
 	hit := false
 	up := localHTTP(t, func(w http.ResponseWriter, r *http.Request) {
@@ -237,6 +359,24 @@ func TestCAIsReusedAndAMismatchedKeyIsKept(t *testing.T) {
 	os.Remove(dir + "/ca.key")
 	if _, _, err := EnsureCA(dir); err == nil {
 		t.Fatal("a certificate without its key was replaced")
+	}
+}
+
+func TestEnsureCAReplacesAnExpiredCertificate(t *testing.T) {
+	dir := t.TempDir()
+	old, _, err := mintCA(dir, time.Now().Add(-48*time.Hour), time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if certUsable(old) {
+		t.Fatal("fixture certificate is still valid")
+	}
+	fresh, _, err := EnsureCA(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !certUsable(fresh) || fresh.Equal(old) {
+		t.Fatal("an expired CA was kept")
 	}
 }
 
@@ -370,7 +510,6 @@ func finishMsg() []byte {
 	client.msg(4, nil)
 	return []byte(client)
 }
-
 
 func TestProxyDataBinaryBidiAppend(t *testing.T) {
 	const token = "gateway-token-bin"
