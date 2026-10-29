@@ -81,6 +81,75 @@ func TestInferenceToolFrameAndAgentExecCarryTheCommand(t *testing.T) {
 	}
 }
 
+func TestAgentWriteFramesUseTheWriteArm(t *testing.T) {
+	frames, ok := agentToolFrames("call_w", "Write", `{"path":"a.go","file_text":"package a"}`, 4)
+	if !ok || len(frames) != 2 {
+		t.Fatalf("frames %d ok=%v", len(frames), ok)
+	}
+	started := connectPayloadsMust(t, frames[0])
+	top, err := parseFields(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upd, err := parseFields(fieldBytes(top, 1)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err := parseFields(fieldBytes(upd, 2)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := parseFields(fieldBytes(call, 2)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fieldBytes(tool, 15)) != 0 {
+		t.Fatal("Write started as MCP")
+	}
+	arms := fieldBytes(tool, 64)
+	if len(arms) != 1 {
+		t.Fatalf("write arm %d", len(arms))
+	}
+	writeCall, err := parseFields(arms[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := parseFields(fieldBytes(writeCall, 1)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := fieldString(args, 1); got != "a.go" {
+		t.Fatalf("started path %q", got)
+	}
+	if got, _ := fieldString(args, 2); got != "package a" {
+		t.Fatalf("started content %q", got)
+	}
+
+	exec := connectPayloadsMust(t, frames[1])
+	msgTop, err := parseFields(exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := parseFields(fieldBytes(msgTop, 2)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	writes := fieldBytes(msg, 3)
+	if len(writes) != 1 {
+		t.Fatalf("exec write %d", len(writes))
+	}
+	body, err := parseFields(writes[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := fieldString(body, 1); got != "a.go" {
+		t.Fatalf("exec path %q", got)
+	}
+	if got, _ := fieldString(body, 2); got != "package a" {
+		t.Fatalf("exec file_text %q", got)
+	}
+}
+
 func TestCompileChatForwardsInvokeToolsAndOutputCap(t *testing.T) {
 	var schema wbuf
 	schema.msg(1, protoEntry("type", protoString("object")))

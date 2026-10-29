@@ -374,6 +374,20 @@ func toolBody(id, name, args string, full bool) (int, []byte) {
 		var call wbuf
 		call.msg(1, []byte(edit))
 		return 12, []byte(call)
+	case "write":
+		// PiWriteToolCall is ToolCall oneof field 64. That oneof is the
+		// same list as the arms above (shell 1, delete 3, grep 5, read 8,
+		// edit 12, ls 13, mcp 15) and it has no WriteToolCall slot.
+		// Field 1 is the args: path = 1, content = 2. content is the same
+		// string the exec writes as WriteArgs.file_text.
+		var args wbuf
+		args.str(1, argString(obj, "path", "file_path"))
+		if s := argString(obj, "file_text", "contents", "content", "stream_content"); s != "" {
+			args.str(2, s)
+		}
+		var call wbuf
+		call.msg(1, []byte(args))
+		return 64, []byte(call)
 	default:
 		var mcp wbuf
 		mcp.str(1, name)
