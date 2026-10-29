@@ -31,8 +31,9 @@ const (
 func CertFile(dir string) string { return filepath.Join(dir, caCertName) }
 
 // EnsureCA writes a CA into dir when one is not already there, and returns
-// the certificate and its key. A key that does not match the certificate
-// is an error, not a new CA written over the old files.
+// the certificate and its key. A file outside its validity window is
+// replaced. A key that does not match the certificate is an error, not a
+// new CA written over the old files.
 func EnsureCA(dir string) (*x509.Certificate, crypto.Signer, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, nil, err
@@ -40,7 +41,17 @@ func EnsureCA(dir string) (*x509.Certificate, crypto.Signer, error) {
 	certPEM, certErr := os.ReadFile(CertFile(dir))
 	keyPEM, keyErr := os.ReadFile(filepath.Join(dir, caKeyName))
 	if certErr == nil && keyErr == nil {
-		return parseCA(certPEM, keyPEM)
+		cert, key, err := parseCA(certPEM, keyPEM)
+		if err != nil {
+			return nil, nil, err
+		}
+		// An expired file is replaced so the next trust install is this
+		// CA, not a sibling that only shares the common name. A key that
+		// does not match is still an error: that file is not overwritten.
+		if certUsable(cert) {
+			return cert, key, nil
+		}
+		return writeCA(dir)
 	}
 	if (certErr == nil) != (keyErr == nil) {
 		return nil, nil, errf("CA files are incomplete")
@@ -48,7 +59,20 @@ func EnsureCA(dir string) (*x509.Certificate, crypto.Signer, error) {
 	return writeCA(dir)
 }
 
+// certUsable reports whether now sits inside the certificate's window.
+func certUsable(cert *x509.Certificate) bool {
+	if cert == nil {
+		return false
+	}
+	now := time.Now()
+	return !now.Before(cert.NotBefore) && now.Before(cert.NotAfter)
+}
+
 func writeCA(dir string) (*x509.Certificate, crypto.Signer, error) {
+	return mintCA(dir, time.Now().Add(-time.Hour), time.Now().AddDate(10, 0, 0))
+}
+
+func mintCA(dir string, notBefore, notAfter time.Time) (*x509.Certificate, crypto.Signer, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, err
@@ -56,8 +80,8 @@ func writeCA(dir string) (*x509.Certificate, crypto.Signer, error) {
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial(),
 		Subject:               pkix.Name{CommonName: caCommonName, Organization: []string{"magpie"}},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().AddDate(10, 0, 0),
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		IsCA:                  true,
 		BasicConstraintsValid: true,
 		MaxPathLen:            0,

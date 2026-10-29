@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -137,6 +136,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		tunnel(client, r.Host)
 		return
 	}
+	noteTLS(host)
 	leaf, err := p.leaf(host)
 	if err != nil {
 		client.Close()
@@ -165,10 +165,7 @@ func (p *Proxy) leaf(host string) (*tls.Certificate, error) {
 }
 
 func (p *Proxy) mitm(w http.ResponseWriter, r *http.Request) {
-	if f, err := os.OpenFile("/tmp/magpie-mitm.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-		fmt.Fprintf(f, "%s %s %s models=%d\n", time.Now().Format(time.RFC3339), r.Method, r.URL.Path, len(p.Models()))
-		f.Close()
-	}
+	Note(fmt.Sprintf("proxy %s %s models=%d", r.Method, r.URL.Path, len(p.Models())))
 	switch r.URL.Path {
 	case PathAvailableModels, PathUsableModels, PathUsableModelsAI, PathDefaultModel, PathDefaultModelCLI, PathDefaultModelNudge:
 		(&Handler{Models: p.Models, Upstream: p.fetch}).ServeHTTP(w, r)
@@ -178,6 +175,8 @@ func (p *Proxy) mitm(w http.ResponseWriter, r *http.Request) {
 		p.inferenceSSE(w, r)
 	case "/aiserver.v1.BidiService/BidiAppend":
 		p.bidi(w, r)
+	case PathAgentRun:
+		p.agentRun(w, r)
 	default:
 		p.forward(w, r, nil, false)
 	}
@@ -230,15 +229,13 @@ func (p *Proxy) bidi(w http.ResponseWriter, r *http.Request) {
 	}
 	plain, _, err := UnwrapUnary(body)
 	if err != nil {
-		bidiLog("unwrap-fail err=%v len=%d head=%x", err, len(body), headHex(body, 16))
-		_ = os.WriteFile("/tmp/magpie-bidi-fail.bin", body, 0644)
+		bidiLog("unwrap-fail err=%v len=%d", err, len(body))
 		http.Error(w, "append", http.StatusBadRequest)
 		return
 	}
 	id, data, blob, err := decodeAppend(plain)
 	if err != nil {
-		bidiLog("decodeAppend-fail err=%v plain=%d head=%x", err, len(plain), headHex(plain, 16))
-		_ = os.WriteFile("/tmp/magpie-bidi-fail.bin", plain, 0644)
+		bidiLog("decodeAppend-fail err=%v plain=%d", err, len(plain))
 		http.Error(w, "append", http.StatusBadRequest)
 		return
 	}
@@ -277,12 +274,13 @@ func (p *Proxy) bidi(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "model", http.StatusBadRequest)
 			return
 		}
-		bidiLog("run model=%q ours=%v route=%q", run.ModelID, ours, route.Model)
 		if !ours {
+			Note(fmt.Sprintf("route miss model=%s path=BidiAppend forward", run.ModelID))
 			p.hub.mark(id, false, Route{}, "")
 			p.forward(w, r, body, gunzipped)
 			return
 		}
+		Note(fmt.Sprintf("route ok model=%s path=BidiAppend local", route.Model))
 		s := p.hub.mark(id, true, route, run.ConversationID)
 		s.push(runReady(route.Model, route.Effort, route.ContextTokens))
 		writeProto(w, nil, "application/proto")
@@ -299,14 +297,9 @@ func (p *Proxy) localAppend(w http.ResponseWriter, s *sess, raw []byte) {
 	}
 	c, err := ReadClient(raw)
 	if err != nil {
-		bidiLog("ReadClient-fail n=%d head=%x err=%v", len(raw), headHex(raw, 24), err)
-		_ = os.WriteFile("/tmp/magpie-invoke-fail.bin", raw, 0644)
+		bidiLog("ReadClient-fail n=%d err=%v", len(raw), err)
 		http.Error(w, "append", http.StatusBadRequest)
 		return
-	}
-	bidiLog("localAppend kind=%d inv=%q msgs=%d n=%d head=%x", c.Kind, c.InvocationID, len(c.Messages), len(raw), headHex(raw, 24))
-	if c.Kind == KindInvoke {
-		_ = os.WriteFile("/tmp/magpie-last-invoke.bin", raw, 0644)
 	}
 	switch c.Kind {
 	case KindInvoke:
@@ -320,7 +313,6 @@ func (p *Proxy) localAppend(w http.ResponseWriter, s *sess, raw []byte) {
 			s.push(invocationIdFrame(id))
 			s.push(endFrame(id, err.Error()))
 		} else {
-			bidiLog("runChat inv=%q model=%q msgs=%d effort=%q", chat.InvocationID, chat.Model, len(chat.Messages), chat.Effort)
 			go p.runChat(s, chat)
 		}
 	case KindCancel:
@@ -332,6 +324,8 @@ func (p *Proxy) localAppend(w http.ResponseWriter, s *sess, raw []byte) {
 }
 
 func (p *Proxy) runChat(s *sess, chat Chat) {
+	Note("chat start model=" + chat.Model + " path=BidiAppend")
+	defer Note("chat done model=" + chat.Model + " path=BidiAppend")
 	s.push(invocationIdFrame(chat.InvocationID))
 	body, err := chat.JSON()
 	if err != nil {
@@ -363,7 +357,6 @@ func (p *Proxy) runChat(s *sess, chat Chat) {
 	}
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
-	var nThink, nText int
 	var sawText bool
 	for sc.Scan() {
 		piece, ok := chatPieces(sc.Text())
@@ -374,22 +367,129 @@ func (p *Proxy) runChat(s *sess, chat Chat) {
 			break
 		}
 		if piece.thinking != "" {
-			nThink += len(piece.thinking)
 			s.push(thinkingFrame(chat.InvocationID, piece.thinking))
 		}
 		// Cursor drops text on is_final and only emits finish; content
 		// must ride non-final text_part frames (#Cursor 3.27 local loop).
 		if piece.text != "" {
 			sawText = true
-			nText += len(piece.text)
 			s.push(textFrame(chat.InvocationID, piece.text, false))
 		}
 	}
 	if sawText {
 		s.push(textFrame(chat.InvocationID, "", true))
 	}
-	bidiLog("runChat-done inv=%q thinkChars=%d textChars=%d", chat.InvocationID, nThink, nText)
 	s.push(endFrame(chat.InvocationID, ""))
+}
+
+// agentRun answers AgentService/Run when the model is in the catalog.
+// Cursor's backend is what returns ERROR_BAD_MODEL_NAME / Unknown model
+// ID for a provider/model id, so that run is not forwarded. A model
+// Cursor itself lists is forwarded unchanged.
+func (p *Proxy) agentRun(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, int64(maxCatalogBody)+1))
+	if err != nil || len(body) > maxCatalogBody {
+		http.Error(w, "read", http.StatusBadRequest)
+		return
+	}
+	body, gunzipped := gunzipRequest(body, r.Header.Get("Content-Encoding"))
+	turn, ok := ReadAgentRun(body)
+	if !ok {
+		Note("agent-run forward reason=not-a-run")
+		p.forward(w, r, body, gunzipped)
+		return
+	}
+	route, ours, err := RouteModel(p.Models(), turn.ModelID, turn.Params)
+	if err != nil {
+		Note(fmt.Sprintf("route fail model=%s path=AgentService/Run", turn.ModelID))
+		http.Error(w, "model", http.StatusBadRequest)
+		return
+	}
+	if !ours {
+		Note(fmt.Sprintf("route miss model=%s path=AgentService/Run forward; Cursor would say Unknown model ID", turn.ModelID))
+		p.forward(w, r, body, gunzipped)
+		return
+	}
+	Note(fmt.Sprintf("route ok model=%s path=AgentService/Run local", route.Model))
+	w.Header().Set("Content-Type", "application/connect+proto")
+	w.WriteHeader(http.StatusOK)
+	fl, _ := w.(http.Flusher)
+	write := func(frame []byte) {
+		_, _ = w.Write(frame)
+		if fl != nil {
+			fl.Flush()
+		}
+	}
+	text := strings.TrimSpace(turn.Text)
+	if text == "" {
+		Note("chat done model=" + route.Model + " path=AgentService/Run reason=no-message")
+		write(agentTextFrame("cursor ide: agent run has no message"))
+		write(agentTurnEnded())
+		write(connectEnd())
+		return
+	}
+	chat := Chat{
+		Model: route.Model, Effort: route.Effort, Session: turn.ConversationID,
+		Messages: []ChatMessage{{Role: "user", Content: text}},
+		Fast:     route.Fast, ContextTokens: route.ContextTokens,
+	}
+	p.streamAgent(r.Context(), chat, write)
+	write(connectEnd())
+}
+
+func (p *Proxy) streamAgent(ctx context.Context, chat Chat, write func([]byte)) {
+	Note("chat start model=" + chat.Model + " path=AgentService/Run")
+	defer Note("chat done model=" + chat.Model + " path=AgentService/Run")
+	body, err := chat.JSON()
+	if err != nil {
+		write(agentTextFrame("cursor ide: chat"))
+		write(agentTurnEnded())
+		return
+	}
+	base, token := p.Gateway()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		write(agentTextFrame("cursor ide: gateway"))
+		write(agentTurnEnded())
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	for k, v := range chat.Header() {
+		req.Header.Set(k, v)
+	}
+	resp, err := p.client.Do(req)
+	if err != nil {
+		write(agentTextFrame("cursor ide: gateway"))
+		write(agentTurnEnded())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		write(agentTextFrame(fmt.Sprintf("cursor ide: gateway status %d", resp.StatusCode)))
+		write(agentTurnEnded())
+		return
+	}
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
+	for sc.Scan() {
+		piece, ok := chatPieces(sc.Text())
+		if !ok {
+			continue
+		}
+		if piece.done {
+			break
+		}
+		if piece.thinking != "" {
+			write(agentThinkingFrame(piece.thinking))
+		}
+		if piece.text != "" {
+			write(agentTextFrame(piece.text))
+		}
+	}
+	write(agentTurnEnded())
 }
 
 func (p *Proxy) fetch(r *http.Request, body []byte) (int, []byte, string, error) {
@@ -812,15 +912,24 @@ func (s *sess) finish() {
 }
 
 func bidiLog(format string, args ...any) {
-	if f, err := os.OpenFile("/tmp/magpie-bidi.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-		fmt.Fprintf(f, time.Now().Format(time.RFC3339)+" "+format+"\n", args...)
-		f.Close()
-	}
+	Note(fmt.Sprintf(format, args...))
 }
 
-func headHex(b []byte, n int) []byte {
-	if len(b) < n {
-		return b
+var tlsNoted struct {
+	mu sync.Mutex
+	at map[string]time.Time
+}
+
+func noteTLS(host string) {
+	tlsNoted.mu.Lock()
+	if tlsNoted.at == nil {
+		tlsNoted.at = map[string]time.Time{}
 	}
-	return b[:n]
+	if time.Since(tlsNoted.at[host]) < time.Minute {
+		tlsNoted.mu.Unlock()
+		return
+	}
+	tlsNoted.at[host] = time.Now()
+	tlsNoted.mu.Unlock()
+	Note("tls host=" + host)
 }

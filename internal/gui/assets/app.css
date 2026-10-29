@@ -4287,6 +4287,7 @@ body.window .row + .row.agent.conn > .who { min-height: 41px; } /* the line abov
 .ag-code, .ag-diff code, .ag-path { font-family: var(--code-font, var(--code)); font-size: 11.5px; }
 :where(html[data-fonts]) .ag-code, :where(html[data-fonts]) .ag-diff code, :where(html[data-fonts]) .ag-path { font-style: var(--code-style, inherit); font-weight: var(--code-weight, inherit); font-stretch: var(--code-stretch, 100%); }
 .ag-code { padding: 1px 5px; border-radius: 4px; background: var(--pill); color: var(--fg); }
+.ag-diag { margin: 0; max-height: 220px; overflow: auto; white-space: pre; font-family: var(--code-font, var(--code)); font-size: 11.5px; line-height: 1.45; padding: 8px 10px; border-radius: 6px; background: var(--pill); color: var(--fg); }
 .ag-warn { gap: 8px; font-size: 12px; }
 /* a note of several lines: its dot stays by the first line, the words wrap beside it */
 .ag-vl.ag-menu-cap { flex-wrap: nowrap; align-items: flex-start; line-height: 1.6; }

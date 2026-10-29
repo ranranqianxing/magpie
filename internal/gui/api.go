@@ -33,6 +33,7 @@ import (
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/autostart"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/cursoride"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/fonts"
 	"github.com/yetone/magpie/internal/fx"
@@ -1044,6 +1045,13 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			return
 		}
 		writeJSON(rw, c)
+	})
+	// the cursor-ide diagnostic lines, the same text as the config file
+	mux.HandleFunc("GET /api/agents/cursor-ide/log", func(rw http.ResponseWriter, r *http.Request) {
+		writeJSON(rw, map[string]string{
+			"path": cursoride.DiagPath(),
+			"text": cursoride.Recent(),
+		})
 	})
 	// quits the agent's desktop app and opens it again, so it reads what
 	// magpie wrote: the row's Restart, after the user said yes to it

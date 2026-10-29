@@ -3,10 +3,8 @@ package cursoride
 import (
 	"fmt"
 	"io"
-	"strings"
-	"bytes"
-	"os"
 	"net/http"
+	"strings"
 )
 
 // Cursor's catalog paths. Inference streams are not served here: the proxy
@@ -18,6 +16,11 @@ const (
 	PathDefaultModel      = "/aiserver.v1.AiService/GetDefaultModel"
 	PathDefaultModelCLI   = "/aiserver.v1.AiService/GetDefaultModelForCli"
 	PathDefaultModelNudge = "/aiserver.v1.AiService/GetDefaultModelNudgeData"
+	// PathAgentRun is the Agent composer. Windows Cursor sends the
+	// catalog id here. Cursor's backend answers ERROR_BAD_MODEL_NAME
+	// for every id it did not register, so a catalog model is answered
+	// by the proxy instead of being forwarded.
+	PathAgentRun = "/agent.v1.AgentService/Run"
 )
 
 // maxCatalogBody is how much of a catalog request is read. Past that the
@@ -92,37 +95,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) merge(w http.ResponseWriter, r *http.Request, body, extra []byte) {
-	logf := func(format string, args ...any) {
-		if f, err := os.OpenFile("/tmp/magpie-merge.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-			fmt.Fprintf(f, format, args...)
-			f.Close()
+	note := func(branch string) {
+		name := r.URL.Path
+		if i := strings.LastIndex(name, "/"); i >= 0 {
+			name = name[i+1:]
 		}
+		Note(fmt.Sprintf("catalog %s %s injected=%d", name, branch, len(h.models())))
 	}
 	if h.Upstream == nil {
-		logf("path=%s branch=no-upstream extra=%d hasDS=%v\n", r.URL.Path, len(extra), bytes.Contains(extra, []byte("deepseek/")))
+		note("no-upstream")
 		writeProto(w, extra, "application/proto")
 		return
 	}
 	status, up, ctype, err := h.Upstream(r, body)
 	if err != nil || status < 200 || status >= 300 {
-		logf("path=%s branch=upstream-fail status=%d err=%v up=%d extra=%d hasDS=%v\n", r.URL.Path, status, err, len(up), len(extra), bytes.Contains(extra, []byte("deepseek/")))
-		_ = os.WriteFile("/tmp/magpie-up-fail-"+strings.ReplaceAll(r.URL.Path, "/", "_")+".bin", extra, 0644)
+		note("upstream-fail")
 		writeProto(w, extra, "application/proto")
 		return
 	}
 	merged, err := MergeUnary(up, extra)
 	if err != nil {
-		logf("path=%s branch=merge-fail err=%v up=%d extra=%d\n", r.URL.Path, err, len(up), len(extra))
-		_ = os.WriteFile("/tmp/magpie-merge-fail-up.bin", up, 0644)
-		_ = os.WriteFile("/tmp/magpie-merge-fail-extra.bin", extra, 0644)
+		note("merge-fail")
 		http.Error(w, "catalog", http.StatusBadGateway)
 		return
 	}
-	logf("path=%s branch=merged status=%d up=%d extra=%d merged=%d hasDS=%v ctype=%s\n", r.URL.Path, status, len(up), len(extra), len(merged), bytes.Contains(merged, []byte("deepseek/")), ctype)
-	if strings.Contains(r.URL.Path, "AvailableModels") {
-		_ = os.WriteFile("/tmp/magpie-merged-available.bin", merged, 0644)
-		_ = os.WriteFile("/tmp/magpie-up-available.bin", up, 0644)
-	}
+	note("merged")
 	if ctype == "" {
 		ctype = "application/proto"
 	}

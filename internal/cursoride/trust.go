@@ -109,13 +109,14 @@ func trustInstall(certPath string) TrustResult {
 	}
 	sum := sha1.Sum(cert.Raw)
 	fp := strings.ToUpper(hex.EncodeToString(sum[:]))
+	usable := certUsable(cert)
 	switch runtime.GOOS {
 	case "windows":
-		return trustWindows(certPath, fp)
+		return trustWindows(certPath, fp, usable)
 	case "darwin":
-		return trustDarwin(certPath, fp)
+		return trustDarwin(certPath, fp, usable)
 	case "linux":
-		return trustLinux(certPath, pemBytes, fp)
+		return trustLinux(certPath, pemBytes, fp, usable)
 	default:
 		return trustFailed(certPath)
 	}
@@ -151,26 +152,148 @@ func runOut(timeout time.Duration, name string, args ...string) ([]byte, error) 
 // trustWindows adds the CA to Current User\Root. certutil shows one
 // consent dialog for that store; it does not ask for an administrator.
 // The machine Root store is not used: that needs elevation.
-func trustWindows(certPath, fp string) TrustResult {
-	out, err := runOut(trustProbe, "certutil", "-user", "-verifystore", "Root", fp)
-	if certutilHas(out, err) {
+//
+// Already means this file's fingerprint is in that store and the file is
+// inside its validity window. A magpie CA with another fingerprint (an
+// older file, or one that has expired) is removed first. The store listing
+// is parsed for the hash and the common name, so a localized certutil
+// still matches.
+func trustWindows(certPath, fp string, usable bool) TrustResult {
+	out, _ := runOut(trustProbe, "certutil", "-user", "-store", "Root")
+	present, stale := rootCerts(string(out), fp, !usable)
+	for _, h := range stale {
+		if _, err := runOut(trustProbe, "certutil", "-user", "-delstore", "Root", h); err == nil {
+			Note("ca stale removed hash=" + shortHash(h))
+		}
+	}
+	if !usable {
+		Note("ca file is outside its validity window")
+		return TrustResult{Step: TrustStepWindows}
+	}
+	if present {
+		Note("ca match hash=" + shortHash(fp) + " install skipped")
 		return TrustResult{User: true, Already: true}
 	}
-	out, err = runOut(trustPrompt, "certutil", "-user", "-addstore", "-f", "Root", certPath)
+	out, err := runOut(trustPrompt, "certutil", "-user", "-addstore", "-f", "Root", certPath)
 	if err != nil || strings.Contains(strings.ToLower(string(out)), "failed") {
 		log.Printf("cursor ide: user root store: %v", err)
 		return TrustResult{Step: TrustStepWindows}
 	}
+	Note("ca installed user root")
 	return TrustResult{User: true}
 }
 
-func certutilHas(out []byte, err error) bool {
-	if err != nil {
+func shortHash(fp string) string {
+	fp = strings.ToUpper(strings.ReplaceAll(fp, " ", ""))
+	if len(fp) > 8 {
+		return fp[:8]
+	}
+	return fp
+}
+
+// rootCerts reads a certutil -store listing. present is true when fp is
+// in the listing. stale is every other magpie CA hash, plus fp itself when
+// dropCurrent is set (the file is outside its validity window).
+func rootCerts(out, fp string, dropCurrent bool) (present bool, stale []string) {
+	want := strings.ToUpper(strings.ReplaceAll(fp, " ", ""))
+	blocks := splitCertBlocks(out)
+	if len(blocks) == 0 && strings.TrimSpace(out) != "" {
+		blocks = []string{out}
+	}
+	seen := map[string]bool{}
+	for _, b := range blocks {
+		magpie := strings.Contains(b, caCommonName)
+		var hashes []string
+		if h := sha1Continuous(b); h != "" {
+			hashes = append(hashes, h)
+		}
+		for _, h := range sha1Runs(b) {
+			hashes = append(hashes, h)
+		}
+		for _, h := range hashes {
+			if h == want {
+				present = true
+				if dropCurrent && magpie && !seen[h] {
+					stale = append(stale, h)
+					seen[h] = true
+					present = false
+				}
+				continue
+			}
+			if magpie && !seen[h] {
+				stale = append(stale, h)
+				seen[h] = true
+			}
+		}
+	}
+	return present, stale
+}
+
+func splitCertBlocks(out string) []string {
+	var blocks []string
+	var cur strings.Builder
+	for _, line := range strings.Split(out, "\n") {
+		trim := strings.TrimSpace(line)
+		if strings.HasPrefix(trim, "====") {
+			if cur.Len() > 0 {
+				blocks = append(blocks, cur.String())
+				cur.Reset()
+			}
+			continue
+		}
+		cur.WriteString(line)
+		cur.WriteByte('\n')
+	}
+	if cur.Len() > 0 {
+		blocks = append(blocks, cur.String())
+	}
+	return blocks
+}
+
+func sha1Runs(s string) []string {
+	var run []string
+	var out []string
+	flush := func() {
+		if len(run) == 20 {
+			out = append(out, strings.ToUpper(strings.Join(run, "")))
+		}
+		run = nil
+	}
+	for _, f := range strings.Fields(s) {
+		f = strings.Trim(f, ":;,")
+		if isHex(f) && len(f) == 2 {
+			run = append(run, f)
+			if len(run) == 20 {
+				flush()
+			}
+			continue
+		}
+		flush()
+	}
+	flush()
+	return out
+}
+
+func sha1Continuous(s string) string {
+	for _, f := range strings.Fields(s) {
+		f = strings.Trim(f, ":;,")
+		if len(f) == 40 && isHex(f) {
+			return strings.ToUpper(f)
+		}
+	}
+	return ""
+}
+
+func isHex(s string) bool {
+	if s == "" {
 		return false
 	}
-	s := strings.ToLower(string(out))
-	if strings.Contains(s, "cannot find") || strings.Contains(s, "not found") || strings.Contains(s, "failed") {
-		return false
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
 	}
 	return true
 }
@@ -178,19 +301,30 @@ func certutilHas(out []byte, err error) bool {
 // trustDarwin adds the CA to the login keychain as a user trust root.
 // add-trusted-cert without -d changes the user trust settings and asks
 // for the login keychain password, not an administrator.
-func trustDarwin(certPath, fp string) TrustResult {
+func trustDarwin(certPath, fp string, usable bool) TrustResult {
 	kc := loginKeychain()
 	if kc == "" {
 		return TrustResult{Step: TrustStepDarwin}
 	}
 	out, err := runOut(trustProbe, "security", "dump-trust-settings")
+	for _, h := range darwinStale(out, fp, !usable) {
+		if _, delErr := runOut(trustProbe, "security", "delete-certificate", "-Z", h, "-t"); delErr == nil {
+			Note("ca stale removed hash=" + shortHash(h))
+		}
+	}
+	if !usable {
+		Note("ca file is outside its validity window")
+		return TrustResult{Step: TrustStepDarwin}
+	}
 	if err == nil && darwinUserTrusted(out, fp) {
+		Note("ca match hash=" + shortHash(fp) + " install skipped")
 		return TrustResult{User: true, Already: true}
 	}
 	if _, err = runOut(trustPrompt, "security", "add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k", kc, certPath); err != nil {
 		log.Printf("cursor ide: login keychain: %v", err)
 		return TrustResult{Step: TrustStepDarwin}
 	}
+	Note("ca installed login keychain")
 	return TrustResult{User: true}
 }
 
@@ -212,10 +346,10 @@ func loginKeychain() string {
 
 func darwinUserTrusted(out []byte, fp string) bool {
 	parts := strings.Split(string(out), "Cert ")
-	want := strings.ToUpper(fp)
+	want := strings.ToUpper(strings.ReplaceAll(fp, " ", ""))
 	for _, p := range parts[1:] {
 		flat := strings.ToUpper(strings.ReplaceAll(p, " ", ""))
-		if !strings.Contains(flat, want) && !strings.Contains(p, caCommonName) {
+		if !strings.Contains(flat, want) {
 			continue
 		}
 		if strings.Contains(p, "TrustRoot") || strings.Contains(p, "TrustAsRoot") {
@@ -225,18 +359,48 @@ func darwinUserTrusted(out []byte, fp string) bool {
 	return false
 }
 
+// darwinStale is every magpie CA hash in the dump that is not this file's
+// fingerprint. dropCurrent includes this file's hash too, which is how an
+// expired certificate leaves the login keychain.
+func darwinStale(out []byte, fp string, dropCurrent bool) []string {
+	parts := strings.Split(string(out), "Cert ")
+	want := strings.ToUpper(strings.ReplaceAll(fp, " ", ""))
+	var stale []string
+	for _, p := range parts[1:] {
+		if !strings.Contains(p, caCommonName) {
+			continue
+		}
+		h := sha1Continuous(p)
+		if h == "" {
+			continue
+		}
+		if h == want {
+			if dropCurrent {
+				stale = append(stale, h)
+			}
+			continue
+		}
+		stale = append(stale, h)
+	}
+	return stale
+}
+
 // trustLinux updates the user NSS database when certutil (libnss3-tools)
 // is installed, which Chromium consults. Cursor's Node stack reads the
 // system bundle instead, and writing that needs root, so the one command
 // is returned and not run.
-func trustLinux(certPath string, pemBytes []byte, _ string) TrustResult {
-	if bundleHas(pemBytes) {
+func trustLinux(certPath string, pemBytes []byte, _ string, usable bool) TrustResult {
+	if usable && bundleHas(pemBytes) {
+		Note("ca match system bundle install skipped")
 		return TrustResult{User: true, Already: true}
 	}
 	if trustHasCmd("certutil") {
-		if err := nssTrust(certPath); err != nil {
+		if err := nssTrust(certPath, pemBytes, usable); err != nil {
 			log.Printf("cursor ide: nss db: %v", err)
 		}
+	}
+	if !usable {
+		Note("ca file is outside its validity window")
 	}
 	return TrustResult{User: false, Step: TrustStepLinux, Command: linuxTrustCommand(certPath)}
 }
@@ -276,7 +440,7 @@ func bytesContainsPEM(bundle []byte, body string) bool {
 	return strings.Contains(flat, body)
 }
 
-func nssTrust(certPath string) error {
+func nssTrust(certPath string, pemBytes []byte, usable bool) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -296,12 +460,25 @@ func nssTrust(certPath string) error {
 		}
 		out = nil
 	}
-	if nssHasCA(out) {
+	if usable && nssHasCA(out) && nssSame(sql, pemBytes) {
+		Note("ca match nss install skipped")
 		return nil
 	}
 	_, _ = runOut(trustProbe, "certutil", "-d", sql, "-D", "-n", caCommonName)
 	_, err = runOut(trustProbe, "certutil", "-d", sql, "-A", "-n", caCommonName, "-t", "C,,", "-i", certPath)
+	if err == nil {
+		Note("ca installed nss")
+	}
 	return err
+}
+
+func nssSame(sql string, pemBytes []byte) bool {
+	out, err := runOut(trustProbe, "certutil", "-d", sql, "-L", "-n", caCommonName, "-a")
+	if err != nil {
+		return false
+	}
+	got, want := pemBody(out), pemBody(pemBytes)
+	return got != "" && got == want
 }
 
 func nssInitDB(sql string) error {
