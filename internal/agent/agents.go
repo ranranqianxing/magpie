@@ -172,6 +172,7 @@ func onMachine(home, cfg string) []*Agent {
 		goose(home, cfg),
 		cursor(home),
 		cursorLocal(),
+		cursorIDE(home),
 		zed(home, cfg),
 		vscode(home, cfg),
 		vscodeInsidersAgent(home, cfg),

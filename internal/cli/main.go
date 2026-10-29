@@ -357,6 +357,9 @@ func run(args []string) error {
 	// and Cursor Private Inference's variables, which the Mac's launchd
 	// forgets at a restart, for the gateway's address now
 	gateway.WhileServing = append(gateway.WhileServing, agent.KeepCursorLocalEnv)
+	// and ordinary Cursor's proxy, which a restart of magpie would
+	// otherwise leave Cursor pointed at with nothing listening
+	gateway.WhileServing = append(gateway.WhileServing, agent.KeepCursorIDE)
 	// and Claude Science's daemon, which a restart of the computer ends,
 	// started on the gateway again while it is connected
 	gateway.WhileServing = append(gateway.WhileServing, agent.KeepClaudeScience)
