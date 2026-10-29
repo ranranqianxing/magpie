@@ -356,8 +356,107 @@ func bidiAppend(id string, payload []byte) []byte {
 	return frameOf(msg)
 }
 
+func bidiAppendBinary(id string, payload []byte) []byte {
+	var rid wbuf
+	rid.str(1, id)
+	var msg wbuf
+	msg.msg(4, payload)
+	msg.msg(2, rid)
+	return frameOf(msg)
+}
+
 func finishMsg() []byte {
 	var client wbuf
 	client.msg(4, nil)
 	return []byte(client)
+}
+
+
+func TestProxyDataBinaryBidiAppend(t *testing.T) {
+	const token = "gateway-token-bin"
+	const conv = "11111111-1111-4111-8111-111111111111"
+	gotChat := make(chan []byte, 1)
+	gw := localHTTP(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+		gotChat <- b
+	})
+	up := localHTTP(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusBadRequest)
+	})
+	dir := t.TempDir()
+	p := &Proxy{
+		Addr: "127.0.0.1:0", CADir: dir, Upstream: up.URL,
+		Gateway: func() (string, string) { return gw.URL, token },
+		Models: func() []Model {
+			return []Model{{ID: "deepseek/deepseek-flash", Name: "Flash"}}
+		},
+	}
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	host := strings.TrimPrefix(addr, "http://")
+	client := cursorClient(t, host, dir, "api2.cursor.sh")
+
+	reqID := "req-bin"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api2.cursor.sh/aiserver.v1.InferenceService/RunInferenceSSE", bytes.NewReader(sseRequest(reqID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/proto")
+	sseResp := make(chan *http.Response, 1)
+	sseErr := make(chan error, 1)
+	go func() {
+		resp, err := client.Do(req)
+		if err != nil {
+			sseErr <- err
+			return
+		}
+		sseResp <- resp
+	}()
+	postCursor(t, client, "/aiserver.v1.BidiService/BidiAppend", bidiAppendBinary(reqID, runRequest(conv, "deepseek/deepseek-flash", nil)))
+	postCursor(t, client, "/aiserver.v1.BidiService/BidiAppend", bidiAppendBinary(reqID, invoke("inv-1", textMsg(1, "hi"))))
+	var resp *http.Response
+	select {
+	case resp = <-sseResp:
+	case err := <-sseErr:
+		t.Fatal(err)
+	case <-ctx.Done():
+		t.Fatal("stream did not start")
+	}
+	defer resp.Body.Close()
+	var stream bytes.Buffer
+	tmp := make([]byte, 512)
+	finished := false
+	for {
+		n, rerr := resp.Body.Read(tmp)
+		stream.Write(tmp[:n])
+		if !finished && bytes.Contains(stream.Bytes(), []byte("OK")) {
+			finished = true
+			postCursor(t, client, "/aiserver.v1.BidiService/BidiAppend", bidiAppendBinary(reqID, finishMsg()))
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if ctx.Err() != nil {
+			t.Fatal(ctx.Err())
+		}
+	}
+	if !bytes.Contains(stream.Bytes(), []byte("OK")) {
+		t.Fatalf("stream = %q", stream.Bytes())
+	}
+	select {
+	case <-gotChat:
+	default:
+		t.Fatal("gateway was not asked — data_binary path likely forwarded upstream")
+	}
 }

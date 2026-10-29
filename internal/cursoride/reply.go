@@ -81,6 +81,20 @@ func runReady(modelID, effort string, context int) []byte {
 	return connectFrame([]byte(server))
 }
 
+// invocationIdFrame is InferenceStreamResponse.invocation_id. Cursor's
+// local loop resolves O.invocationId from this arm; without it it invents
+// a random UUID and then logs Invocation ID mismatch / empty response.
+func invocationIdFrame(invocation string) []byte {
+	var info wbuf
+	info.str(1, invocation)
+	var stream wbuf
+	stream.msg(7, []byte(info))
+	return invocationFrame(invocation, []byte(stream))
+}
+
+// textFrame is InferenceStreamResponse.text_part. When final is true Cursor
+// only emits a stream finish and ignores text, so callers put content on
+// final=false frames and send one empty final=true frame afterward.
 func textFrame(invocation, text string, final bool) []byte {
 	var part wbuf
 	part.str(1, text)

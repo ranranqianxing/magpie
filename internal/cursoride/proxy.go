@@ -3,6 +3,7 @@ package cursoride
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto"
 	"crypto/tls"
@@ -13,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -159,6 +161,10 @@ func (p *Proxy) leaf(host string) (*tls.Certificate, error) {
 }
 
 func (p *Proxy) mitm(w http.ResponseWriter, r *http.Request) {
+	if f, err := os.OpenFile("/tmp/magpie-mitm.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+		fmt.Fprintf(f, "%s %s %s models=%d\n", time.Now().Format(time.RFC3339), r.Method, r.URL.Path, len(p.Models()))
+		f.Close()
+	}
 	switch r.URL.Path {
 	case PathAvailableModels, PathUsableModels, PathUsableModelsAI, PathDefaultModel, PathDefaultModelCLI, PathDefaultModelNudge:
 		(&Handler{Models: p.Models, Upstream: p.fetch}).ServeHTTP(w, r)
@@ -210,26 +216,53 @@ func (p *Proxy) inferenceSSE(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) bidi(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, int64(maxCatalogBody)+1))
 	if err != nil || len(body) > maxCatalogBody {
+		bidiLog("read-fail err=%v len=%d enc=%q", err, len(body), r.Header.Get("Content-Encoding"))
 		http.Error(w, "read", http.StatusBadRequest)
 		return
 	}
+	if enc := strings.ToLower(r.Header.Get("Content-Encoding")); enc == "gzip" || len(body) >= 2 && body[0] == 0x1f && body[1] == 0x8b {
+		if plain, zerr := decodeCatalogBody(body, r.Header.Get("Content-Encoding")); zerr == nil {
+			body = plain
+		} else {
+			bidiLog("gunzip-fail err=%v len=%d", zerr, len(body))
+		}
+	}
 	plain, _, err := UnwrapUnary(body)
 	if err != nil {
+		bidiLog("unwrap-fail err=%v len=%d head=%x", err, len(body), headHex(body, 16))
+		_ = os.WriteFile("/tmp/magpie-bidi-fail.bin", body, 0644)
 		http.Error(w, "append", http.StatusBadRequest)
 		return
 	}
 	id, data, blob, err := decodeAppend(plain)
 	if err != nil {
+		bidiLog("decodeAppend-fail err=%v plain=%d head=%x", err, len(plain), headHex(plain, 16))
+		_ = os.WriteFile("/tmp/magpie-bidi-fail.bin", plain, 0644)
 		http.Error(w, "append", http.StatusBadRequest)
 		return
 	}
-	if len(blob) > 0 || data == "" || id == "" {
+	if id == "" {
+		bidiLog("forward no-id dataLen=%d blobLen=%d", len(data), len(blob))
 		p.forward(w, r, body)
 		return
 	}
-	raw, err := hex.DecodeString(data)
-	if err != nil {
-		http.Error(w, "append", http.StatusBadRequest)
+	var raw []byte
+	switch {
+	case len(blob) > 0:
+		// Cursor 3.x may send data_binary instead of hex data.
+		raw = blob
+		bidiLog("append id=%s via=data_binary n=%d", id, len(raw))
+	case data != "":
+		raw, err = hex.DecodeString(data)
+		if err != nil {
+			bidiLog("hex-fail err=%v dataLen=%d", err, len(data))
+			http.Error(w, "append", http.StatusBadRequest)
+			return
+		}
+		bidiLog("append id=%s via=hex n=%d", id, len(raw))
+	default:
+		bidiLog("forward empty-payload id=%s", id)
+		p.forward(w, r, body)
 		return
 	}
 	if s := p.hub.localOf(id); s != nil {
@@ -239,9 +272,11 @@ func (p *Proxy) bidi(w http.ResponseWriter, r *http.Request) {
 	if run, ok := inferenceRun(raw); ok {
 		route, ours, err := RouteModel(p.Models(), run.ModelID, run.Params)
 		if err != nil {
+			bidiLog("route-fail model=%q err=%v", run.ModelID, err)
 			http.Error(w, "model", http.StatusBadRequest)
 			return
 		}
+		bidiLog("run model=%q ours=%v route=%q", run.ModelID, ours, route.Model)
 		if !ours {
 			p.hub.mark(id, false, Route{}, "")
 			p.forward(w, r, body)
@@ -256,10 +291,21 @@ func (p *Proxy) bidi(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) localAppend(w http.ResponseWriter, s *sess, raw []byte) {
+	// Cursor 3.x sometimes nests a Connect frame inside BidiAppend data.
+	if plain, framed, uerr := UnwrapUnary(raw); uerr == nil && framed && len(plain) > 0 {
+		bidiLog("localAppend unwrap nested connect n=%d->%d", len(raw), len(plain))
+		raw = plain
+	}
 	c, err := ReadClient(raw)
 	if err != nil {
+		bidiLog("ReadClient-fail n=%d head=%x err=%v", len(raw), headHex(raw, 24), err)
+		_ = os.WriteFile("/tmp/magpie-invoke-fail.bin", raw, 0644)
 		http.Error(w, "append", http.StatusBadRequest)
 		return
+	}
+	bidiLog("localAppend kind=%d inv=%q msgs=%d n=%d head=%x", c.Kind, c.InvocationID, len(c.Messages), len(raw), headHex(raw, 24))
+	if c.Kind == KindInvoke {
+		_ = os.WriteFile("/tmp/magpie-last-invoke.bin", raw, 0644)
 	}
 	switch c.Kind {
 	case KindInvoke:
@@ -269,8 +315,11 @@ func (p *Proxy) localAppend(w http.ResponseWriter, s *sess, raw []byte) {
 			if id == "" {
 				id = "invoke"
 			}
+			bidiLog("CompileChat-fail inv=%q err=%v", id, err)
+			s.push(invocationIdFrame(id))
 			s.push(endFrame(id, err.Error()))
 		} else {
+			bidiLog("runChat inv=%q model=%q msgs=%d effort=%q", chat.InvocationID, chat.Model, len(chat.Messages), chat.Effort)
 			go p.runChat(s, chat)
 		}
 	case KindCancel:
@@ -282,6 +331,7 @@ func (p *Proxy) localAppend(w http.ResponseWriter, s *sess, raw []byte) {
 }
 
 func (p *Proxy) runChat(s *sess, chat Chat) {
+	s.push(invocationIdFrame(chat.InvocationID))
 	body, err := chat.JSON()
 	if err != nil {
 		s.push(endFrame(chat.InvocationID, "cursor ide: chat"))
@@ -312,7 +362,8 @@ func (p *Proxy) runChat(s *sess, chat Chat) {
 	}
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
-	var held string
+	var nThink, nText int
+	var sawText bool
 	for sc.Scan() {
 		piece, ok := chatPieces(sc.Text())
 		if !ok {
@@ -322,18 +373,21 @@ func (p *Proxy) runChat(s *sess, chat Chat) {
 			break
 		}
 		if piece.thinking != "" {
+			nThink += len(piece.thinking)
 			s.push(thinkingFrame(chat.InvocationID, piece.thinking))
 		}
+		// Cursor drops text on is_final and only emits finish; content
+		// must ride non-final text_part frames (#Cursor 3.27 local loop).
 		if piece.text != "" {
-			if held != "" {
-				s.push(textFrame(chat.InvocationID, held, false))
-			}
-			held = piece.text
+			sawText = true
+			nText += len(piece.text)
+			s.push(textFrame(chat.InvocationID, piece.text, false))
 		}
 	}
-	if held != "" {
-		s.push(textFrame(chat.InvocationID, held, true))
+	if sawText {
+		s.push(textFrame(chat.InvocationID, "", true))
 	}
+	bidiLog("runChat-done inv=%q thinkChars=%d textChars=%d", chat.InvocationID, nThink, nText)
 	s.push(endFrame(chat.InvocationID, ""))
 }
 
@@ -350,7 +404,33 @@ func (p *Proxy) fetch(r *http.Request, body []byte) (int, []byte, string, error)
 	if len(b) > maxCatalogBody {
 		return 0, nil, "", errf("upstream catalog too large")
 	}
+	b, err = decodeCatalogBody(b, resp.Header.Get("Content-Encoding"))
+	if err != nil {
+		return 0, nil, "", err
+	}
 	return resp.StatusCode, b, resp.Header.Get("Content-Type"), nil
+}
+
+// decodeCatalogBody gunzips a catalog reply when Cursor's Accept-Encoding
+// left the upstream body compressed. MergeUnary needs raw protobuf.
+func decodeCatalogBody(b []byte, contentEncoding string) ([]byte, error) {
+	enc := strings.ToLower(contentEncoding)
+	if enc != "gzip" && !(len(b) >= 2 && b[0] == 0x1f && b[1] == 0x8b) {
+		return b, nil
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	plain, err := io.ReadAll(io.LimitReader(zr, int64(maxCatalogBody)+1))
+	_ = zr.Close()
+	if err != nil {
+		return nil, err
+	}
+	if len(plain) > maxCatalogBody {
+		return nil, errf("upstream catalog too large")
+	}
+	return plain, nil
 }
 
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, body []byte) {
@@ -693,4 +773,18 @@ func (s *sess) finish() {
 	if cancel != nil {
 		cancel()
 	}
+}
+
+func bidiLog(format string, args ...any) {
+	if f, err := os.OpenFile("/tmp/magpie-bidi.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+		fmt.Fprintf(f, time.Now().Format(time.RFC3339)+" "+format+"\n", args...)
+		f.Close()
+	}
+}
+
+func headHex(b []byte, n int) []byte {
+	if len(b) < n {
+		return b
+	}
+	return b[:n]
 }
