@@ -22,12 +22,16 @@ import (
 // ---- OpenAI Chat Completions --------------------------------------------------
 
 type cToolCall struct {
-	Index    *int   `json:"index,omitempty"`
-	ID       string `json:"id,omitempty"`
-	Type     string `json:"type,omitempty"`
+	// Index is a float so 0.0 is this call. A *int rejects 0.0 and the
+	// whole chunk, arguments included, was dropped.
+	Index    *float64 `json:"index,omitempty"`
+	ID       string   `json:"id,omitempty"`
+	Type     string   `json:"type,omitempty"`
 	Function struct {
-		Name      string `json:"name,omitempty"`
-		Arguments string `json:"arguments,omitempty"`
+		Name string `json:"name,omitempty"`
+		// Arguments is raw so an object is kept. A string field rejects
+		// one, and the chunk — the call with it — was dropped.
+		Arguments json.RawMessage `json:"arguments,omitempty"`
 	} `json:"function"`
 	// Gemini's OpenAI-compatible API gives a call's thought signature
 	// here, and wants it back (gemini_signature.go)
@@ -132,7 +136,7 @@ func readChat(body []byte, facts bool) (*Request, error) {
 			}
 			msg.Parts = append(msg.Parts, chatParts(m.Content)...)
 			for _, tc := range m.ToolCalls {
-				msg.Parts = append(msg.Parts, Part{Kind: ToolCall, ID: tc.ID, Name: tc.Function.Name, Args: parseArgs(tc.Function.Arguments),
+				msg.Parts = append(msg.Parts, Part{Kind: ToolCall, ID: tc.ID, Name: tc.Function.Name, Args: parseArgs(toolArgText(tc.Function.Arguments)),
 					Signature: googleSignature(tc.ExtraContent)})
 			}
 			r.Messages = append(r.Messages, msg)
@@ -1370,9 +1374,9 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 			d.end(emit)
 		}
 		for i, tc := range c.Delta.ToolCalls {
-			idx := i
-			if tc.Index != nil {
-				idx = *tc.Index
+			idx, ok := wholeIndex(tc.Index, i)
+			if !ok {
+				continue
 			}
 			d.toolCall(idx, tc, emit)
 		}
@@ -1397,13 +1401,48 @@ type heldCall struct {
 	args     strings.Builder
 }
 
+// toolArgText is a tool call's arguments as text. A JSON string is the
+// fragments a stream sends. An object is the call in one piece (DeepSeek
+// sends both). null and a blank are no arguments. Anything else is left
+// out: a failed read is not an empty call.
+func toolArgText(raw json.RawMessage) string {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text
+	}
+	if json.Valid(raw) {
+		return s
+	}
+	return ""
+}
+
+// wholeIndex is a tool-call index. A missing one is fallback. 0.0 is 0.
+// A fraction is not an index: it must not land on another call.
+func wholeIndex(n *float64, fallback int) (int, bool) {
+	if n == nil {
+		return fallback, true
+	}
+	if *n < 0 || *n > 1<<20 {
+		return 0, false
+	}
+	i := int(*n)
+	if float64(i) != *n {
+		return 0, false
+	}
+	return i, true
+}
+
 // toolCall reads one fragment of a tool call, the call at index idx. A
 // fragment carrying the id its call already goes by (some relays repeat it
 // on every fragment, where the spec sends it only on the first) or none
 // continues the latest call of its index; a new id or a new index starts
 // the next one.
 func (d *chatDecoder) toolCall(idx int, tc cToolCall, emit func(Event)) {
-	args := tc.Function.Arguments
+	args := toolArgText(tc.Function.Arguments)
 	newID := func(id string) bool { return tc.ID != "" && tc.ID != id }
 	for _, h := range slices.Backward(d.held) {
 		if h.index == idx {
