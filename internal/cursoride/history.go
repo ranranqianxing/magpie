@@ -164,8 +164,16 @@ type sdkMessage struct {
 }
 
 type sdkPart struct {
-	Type       string          `json:"type"`
-	Text       string          `json:"text"`
+	Type      string          `json:"type"`
+	Text      string          `json:"text"`
+	Image     json.RawMessage `json:"image"`
+	MediaType string          `json:"mediaType"`
+	MimeType  string          `json:"mimeType"`
+	Data      string          `json:"data"`
+	URL       string          `json:"url"`
+	ImageURL  *struct {
+		URL string `json:"url"`
+	} `json:"image_url"`
 	ToolCallID string          `json:"toolCallId"`
 	ToolName   string          `json:"toolName"`
 	Args       json.RawMessage `json:"args"`
@@ -205,6 +213,7 @@ func oneSDKMessage(raw []byte) ([]ChatMessage, error) {
 
 func partsToMessages(role string, parts []sdkPart) ([]ChatMessage, error) {
 	var text strings.Builder
+	var images []ContentPart
 	var calls []ToolCall
 	var tools []ChatMessage
 	for _, p := range parts {
@@ -217,6 +226,25 @@ func partsToMessages(role string, parts []sdkPart) ([]ChatMessage, error) {
 				text.WriteString(p.Text)
 			}
 		case "reasoning", "redacted-reasoning":
+		case "image", "image_url", "input_image":
+			if img, ok := sdkImage(p); ok {
+				images = append(images, img)
+			}
+		case "file":
+			if img, ok := sdkImage(p); ok {
+				images = append(images, img)
+				break
+			}
+			s := p.Text
+			if s == "" {
+				s = strings.TrimSpace(p.Data)
+			}
+			if s != "" && utf8.ValidString(s) && !strings.ContainsRune(s, 0) {
+				if text.Len() > 0 {
+					text.WriteByte('\n')
+				}
+				text.WriteString(s)
+			}
 		case "tool-call":
 			args := strings.TrimSpace(string(p.Args))
 			if args == "" || args == "null" {
@@ -235,15 +263,98 @@ func partsToMessages(role string, parts []sdkPart) ([]ChatMessage, error) {
 	}
 	var out []ChatMessage
 	body := presentText(role, text.String())
-	if body != "" || len(calls) > 0 {
+	if body != "" || len(calls) > 0 || len(images) > 0 {
 		msg := ChatMessage{Role: chatRole(role), ToolCalls: calls}
-		if body != "" {
-			msg.Content = body
-		}
+		msg.Content = messageContent(body, images)
 		out = append(out, msg)
 	}
 	out = append(out, tools...)
 	return out, nil
+}
+
+// sdkImage reads one AI SDK image part. Cursor stores a data URL on
+// image, with mediaType beside it. A bare base64 string is wrapped.
+// A part with no image bytes is skipped.
+func sdkImage(p sdkPart) (ContentPart, bool) {
+	mime := p.MediaType
+	if mime == "" {
+		mime = p.MimeType
+	}
+	ref := ""
+	switch {
+	case p.ImageURL != nil && strings.TrimSpace(p.ImageURL.URL) != "":
+		ref = strings.TrimSpace(p.ImageURL.URL)
+	case strings.TrimSpace(p.URL) != "":
+		ref = strings.TrimSpace(p.URL)
+	default:
+		ref = rawURL(p.Image)
+		if ref == "" {
+			ref = strings.TrimSpace(p.Data)
+		}
+	}
+	if ref == "" {
+		return ContentPart{}, false
+	}
+	// A file part is an image only when it says so. imageRef would
+	// otherwise stamp an empty media type as image/png.
+	if p.Type == "file" && !strings.HasPrefix(strings.ToLower(mime), "image/") && !strings.HasPrefix(ref, "data:image") {
+		return ContentPart{}, false
+	}
+	ref = imageRef(ref, mime)
+	if ref == "" {
+		return ContentPart{}, false
+	}
+	return ContentPart{Type: "image_url", ImageURL: ref}, true
+}
+
+func rawURL(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	if raw[0] == '"' {
+		var s string
+		if json.Unmarshal(raw, &s) != nil {
+			return ""
+		}
+		return strings.TrimSpace(s)
+	}
+	if raw[0] == '{' {
+		var obj struct {
+			URL string `json:"url"`
+		}
+		if json.Unmarshal(raw, &obj) != nil {
+			return ""
+		}
+		return strings.TrimSpace(obj.URL)
+	}
+	return ""
+}
+
+func imageRef(data, mime string) string {
+	data = strings.TrimSpace(data)
+	if data == "" {
+		return ""
+	}
+	if strings.HasPrefix(data, "data:") || strings.HasPrefix(data, "http://") || strings.HasPrefix(data, "https://") {
+		return data
+	}
+	return imageDataURL(data, mime)
+}
+
+func messageContent(text string, images []ContentPart) any {
+	if len(images) == 0 {
+		if text == "" {
+			return nil
+		}
+		return text
+	}
+	parts := make([]ContentPart, 0, 1+len(images))
+	if text != "" {
+		parts = append(parts, ContentPart{Type: "text", Text: text})
+	}
+	parts = append(parts, images...)
+	return parts
 }
 
 func presentText(role, s string) string {
@@ -290,20 +401,85 @@ func toolResultString(raw json.RawMessage, isError bool) string {
 // current prompt on the action and often repeats it as the last user
 // turn, wrapped in user_info. The stored turn keeps that context; the
 // action is only what was typed.
-func appendCurrent(msgs []ChatMessage, text string) []ChatMessage {
+func appendCurrent(msgs []ChatMessage, text string, attach userAttach) []ChatMessage {
 	text = typedPrompt(text)
-	if text == "" {
+	if text == "" && attach.empty() {
 		return msgs
 	}
 	if len(msgs) > 0 {
-		last := msgs[len(msgs)-1]
+		last := &msgs[len(msgs)-1]
 		if last.Role == "user" {
-			if s, ok := last.Content.(string); ok && typedPrompt(s) == text {
+			if s, ok := messageText(*last); ok && text != "" && typedPrompt(s) == text {
+				*last = mergeAttach(*last, attach)
 				return msgs
 			}
 		}
 	}
-	return append(msgs, ChatMessage{Role: "user", Content: text})
+	content := messageContent(joinNote(text, attach.noteFor(text)), attach.images)
+	if content == nil {
+		return msgs
+	}
+	return append(msgs, ChatMessage{Role: "user", Content: content})
+}
+
+func messageText(m ChatMessage) (string, bool) {
+	switch c := m.Content.(type) {
+	case string:
+		return c, true
+	case []ContentPart:
+		var b strings.Builder
+		for _, p := range c {
+			if p.Type != "text" || p.Text == "" {
+				continue
+			}
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(p.Text)
+		}
+		return b.String(), true
+	default:
+		return "", false
+	}
+}
+
+func mergeAttach(m ChatMessage, attach userAttach) ChatMessage {
+	if attach.empty() {
+		return m
+	}
+	text, _ := messageText(m)
+	body := joinNote(text, attach.noteFor(text))
+	images := messageImages(m)
+	for _, img := range attach.images {
+		if !hasImage(images, img.ImageURL) {
+			images = append(images, img)
+		}
+	}
+	m.Content = messageContent(body, images)
+	return m
+}
+
+func messageImages(m ChatMessage) []ContentPart {
+	parts, ok := m.Content.([]ContentPart)
+	if !ok {
+		return nil
+	}
+	var out []ContentPart
+	for _, p := range parts {
+		if p.Type == "image_url" && p.ImageURL != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func hasImage(parts []ContentPart, url string) bool {
+	for _, p := range parts {
+		if p.ImageURL == url {
+			return true
+		}
+	}
+	return false
 }
 
 // typedPrompt is the text the user typed. A stored user turn keeps

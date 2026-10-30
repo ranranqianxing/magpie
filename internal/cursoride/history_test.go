@@ -17,7 +17,7 @@ func TestReplayConversationRestoresTurnsAndSkipsTheCurrentDuplicate(t *testing.T
 	if err != nil || missing != 0 {
 		t.Fatalf("replay err=%v missing=%d", err, missing)
 	}
-	msgs = appendCurrent(msgs, "second")
+	msgs = appendCurrent(msgs, "second", userAttach{})
 	if len(msgs) != 4 {
 		t.Fatalf("messages %d %+v", len(msgs), msgs)
 	}
@@ -33,7 +33,7 @@ func TestReplayConversationRestoresTurnsAndSkipsTheCurrentDuplicate(t *testing.T
 	if msgs[3].Role != "user" || msgs[3].Content.(string) != "second" {
 		t.Fatalf("current %+v", msgs[3])
 	}
-	again := appendCurrent(msgs[:1], "first")
+	again := appendCurrent(msgs[:1], "first", userAttach{})
 	if len(again) != 1 {
 		t.Fatalf("duplicated the current prompt: %+v", again)
 	}
