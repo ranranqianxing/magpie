@@ -45,8 +45,14 @@ func (t *toolBuf) take() string {
 // appendArgs folds one arguments chunk. A later chunk that already starts
 // with the buffer is the aggregated JSON so far (some streams resend it);
 // anything else is the next fragment.
+//
+// "{}" is a placeholder some relays send with the tool name, before the
+// real JSON. It is not a finished call: the next chunk replaces it, and
+// later fragments concatenate onto that replacement. A finished object
+// that already has fields stays as it is unless a later chunk is a longer
+// complete object.
 func (t *toolBuf) appendArgs(s string) {
-	if s == "" {
+	if strings.TrimSpace(s) == "" {
 		return
 	}
 	if t.args != "" && strings.HasPrefix(s, t.args) {
@@ -56,9 +62,13 @@ func (t *toolBuf) appendArgs(s string) {
 		}
 		return
 	}
-	// The arguments are already one JSON object. A later longer object
-	// replaces it ({} then the real call). Anything else, including a
-	// resend of the opening bytes, would glue on and fail json.Valid.
+	if emptyJSONObject(t.args) {
+		t.args = s
+		t.emitted = 0
+		return
+	}
+	// The arguments are already one JSON object with fields. A later
+	// longer object replaces it. A fragment glued on would no longer parse.
 	if argsReady(t.args) {
 		if argsReady(s) && len(s) > len(t.args) {
 			t.args = s
@@ -67,6 +77,20 @@ func (t *toolBuf) appendArgs(s string) {
 		return
 	}
 	t.args += s
+}
+
+// emptyJSONObject reports whether s is a JSON object with no fields.
+// "{" and a non-object are not: those are still being written.
+func emptyJSONObject(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) == 0 || s[0] != '{' {
+		return false
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal([]byte(s), &m) != nil {
+		return false
+	}
+	return len(m) == 0
 }
 
 // toolAssembler folds streaming tool deltas and closes them once.
@@ -97,7 +121,15 @@ func (a *toolAssembler) add(d toolDelta) (id, name, frag string) {
 	if t.id == "" {
 		t.id = "call-" + itoa(d.Index+1)
 	}
-	return t.id, t.name, t.take()
+	frag = t.take()
+	// A placeholder is not a delta Cursor should validate. Leaving it
+	// unsent means a later replacement is the first fragment the client
+	// concatenates, and the Pi card waits until the real strings exist.
+	if emptyJSONObject(t.args) {
+		t.emitted = 0
+		frag = ""
+	}
+	return t.id, t.name, frag
 }
 
 // agentPartialFromDelta records one gateway fragment and returns the
