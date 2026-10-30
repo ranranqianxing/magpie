@@ -129,6 +129,15 @@ tool-call index is not an integer, is still folded into that call.
 A first arguments chunk of `{}` is a placeholder, not a finished call.
 Later fragments of that call replace it, and a sibling `parameters`,
 `args`, or `input` object is kept when `arguments` is that placeholder.
+A choice that carries the call twice keeps the arguments that have
+fields: the delta's `""` or `{}` loses to the same choice's `message`
+tool call when that one names the path (or the other string that tool
+validates), whether that value is a JSON object or a string. Two
+message calls that disagree are left as the delta had them. A later
+complete object replaces an unfinished fragment that is not its
+prefix, which a duplicate completion does when it resends the object
+with different spacing. A finished object is not replaced by a shorter
+one.
 No partial frame is sent for the placeholder, so Cursor does not validate
 the Pi strings until the real JSON is there. A call that is still empty
 when the stream ends is filled from the same reply when that reply names
@@ -141,10 +150,16 @@ Cursor does not run `Read {}` and loop. LS may omit its path. An MCP
 tool's JSON object, including `{}`, is still executed. One diagnostic
 line per sealed call records the tool name, argument-fragment count, how
 many of those fragments were `{}`, whether the sealed object is empty,
-the argument key names, which markup form filled it, which of those forms
-appeared in the text, and whether the exec ran. A gateway request that
+the argument key names, which markup form filled it (`message` when the
+choice's message supplied the arguments), which of those forms
+appeared in the text, and whether the exec ran. A second line, `where=frames`, has `exec=written` when the Pi
+exec frames go out and `exec=skipped` when they do not. A round logs `where=round` with how many
+calls were sealed and how many will run, including a round that sealed
+none. A gateway request that
 already carries assistant tool calls records how many of those arguments
-are `{}`. Values are not logged.
+are `{}`. Values are not logged. The same lines are the Cursor row's
+Diagnostics and, when `MAGPIE_DEBUG=1`, the process log, each prefixed
+`cursor-ide:`.
 
 An empty catalog encodes no default model. Cursor is not given a stand-in.
 
@@ -167,7 +182,10 @@ started card is `ToolCall` field 64 and whose exec is Pi field 48
 with path and content, a Read exec on field 45 whose offset and limit
 are fields 2 and 3 when the call names them, a shell exec on
 field 46, a placeholder `{}` followed by argument fragments that still
-execs the path, a native `{}` filled from a DSML invoke of the same tool,
+execs the path, a Read whose arguments are a JSON object or a string
+and whose Pi exec carries the path, a delta `{}` whose same choice's
+message holds that object (sent twice) and which still execs the path,
+a native `{}` filled from a DSML invoke of the same tool,
 a native `{}` filled from `<parameter name="path">` after `{"name":"Read">`,
 a Read whose history part stores the path on `input` rather than `args`,
 a native `{}` whose only path is a sentence and which therefore does not exec,

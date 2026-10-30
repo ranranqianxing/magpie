@@ -18,11 +18,14 @@ type ToolSpec struct {
 }
 
 // toolDelta is one streamed tool_calls fragment from a chat completion.
+// from names where Args came from when it was not the delta's own
+// arguments: "message" when the choice's message tool_calls supplied them.
 type toolDelta struct {
 	Index int
 	ID    string
 	Name  string
 	Args  string
+	from  string
 }
 
 // toolBuf accumulates one call. emitted is how much of Args was already
@@ -77,6 +80,15 @@ func (t *toolBuf) appendArgs(s string) {
 		t.emitted = 0
 		return
 	}
+	// A complete object is the call. An unfinished buffer is replaced by
+	// it, including when the fragment is not a prefix: a duplicate
+	// completion often resends the whole object with different spacing.
+	// "{}" is not that object.
+	if argsReady(s) && !emptyJSONObject(s) && !argsReady(t.args) {
+		t.args = s
+		t.emitted = 0
+		return
+	}
 	// The arguments are already one JSON object with fields. A later
 	// longer object replaces it. A fragment glued on would no longer parse.
 	if argsReady(t.args) {
@@ -127,6 +139,9 @@ func (a *toolAssembler) add(d toolDelta) (id, name, frag string) {
 	}
 	if d.Args != "" {
 		t.appendArgs(d.Args)
+	}
+	if d.from != "" && t.fill == "" {
+		t.fill = d.from
 	}
 	if t.id == "" {
 		t.id = "call-" + itoa(d.Index+1)

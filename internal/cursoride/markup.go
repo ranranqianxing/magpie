@@ -124,6 +124,13 @@ func noteToolTrace(where string, name, args string, frags, placeholders int, fil
 	))
 }
 
+// noteRound is one line for a gateway round, including one that sealed
+// nothing. A stream whose tool calls never parsed otherwise leaves no
+// trace, and the turn ends with no Pi frames.
+func noteRound(sealed, exec int) {
+	Note(fmt.Sprintf("agent tool trace where=round sealed=%d exec=%d", sealed, exec))
+}
+
 func safeToolName(name string) string {
 	name = strings.TrimSpace(name)
 	if name == "" {

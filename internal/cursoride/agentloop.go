@@ -252,20 +252,27 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 			write(agentTextFrame("cursor ide: tool arguments are not json"))
 		}
 		noteToolTrace("seal", t.name, t.args, t.frags, t.placeholders, t.fill, markers, state)
+		if !ready {
+			noteToolTrace("frames", t.name, t.args, t.frags, t.placeholders, t.fill, markers, "skipped")
+		}
 	}
+	noteRound(len(sealed), len(run))
 	if len(run) == 0 {
 		return nil, true, nil
 	}
 	for _, t := range run {
 		*execN++
 		frames, ok := agentToolFrames(t.id, t.name, t.args, *execN)
+		frameState := "skipped"
 		if !ok {
 			write(agentTextFrame("cursor ide: tool arguments are not json"))
-			continue
+		} else {
+			frameState = "written"
+			for _, frame := range frames {
+				write(frame)
+			}
 		}
-		for _, frame := range frames {
-			write(frame)
-		}
+		noteToolTrace("frames", t.name, t.args, t.frags, t.placeholders, t.fill, markers, frameState)
 	}
 	// Any run call needs follow-up frames (or ends one-shot when none arrive).
 	return run, false, nil
