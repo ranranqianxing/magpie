@@ -92,7 +92,14 @@ inference invoke path, is a note that names its media type, not the
 bytes. An Agent image is the data URL, not that note. Tool calls keep their
 id, name and raw arguments. `tools` is set when the invoke named tools, and
 on every Agent run (the built-in composer tools, plus MCP tools the run
-defined). `max_tokens` is set when the invoke's model config named an output
+defined). Read's schema offers `path`, `offset`, and `limit`. `offset` is
+the 1-indexed line to start at and `limit` is how many lines to return;
+either may be omitted, and a read with neither is the whole file. On the
+Pi read exec those are `PiReadExecArgs` field 2 and field 3, both optional
+int32 (card 61, exec 45). Cursor 3.27.22's `cursor-agent-exec` declares
+the same message as `PiReadExecArgs|1 path 9|2 offset 5?|3 limit 5?`, and
+its `LocalPiReadExecutor` slices lines from `offset-1` for `limit` lines. Edit stays
+`path`, `old_string`, and `new_string`. `max_tokens` is set when the invoke's model config named an output
 cap. `reasoning_effort` is set when the picker named a level, including
 `none`. `stream` is true.
 
@@ -143,7 +150,8 @@ text are on that chat body, a history image part that stays an image
 URL, a gateway tool-call delta that comes back as an Agent
 exec frame and as an inference `tool_call_part`, a Write call whose
 started card is `ToolCall` field 64 and whose exec is Pi field 48
-with path and content, a Read exec on field 45 and a shell exec on
+with path and content, a Read exec on field 45 whose offset and limit
+are fields 2 and 3 when the call names them, a shell exec on
 field 46, a placeholder `{}` followed by argument fragments that still
 execs the path, a native `{}` filled from a DSML invoke of the same tool,
 an Agent stream
@@ -201,9 +209,11 @@ equivalent of Cursor's fast switch, and its `max_tokens` is an output cap,
 so those two picker axes are not invented as JSON. `RequestContext`
 (always-on rules, env, the `file_contents` map) is not copied; a rule
 the user attached on `selected_context` is. Blob ids that the run
-did not prefetch are not fetched from Cursor's KV store. The composer
-tool schemas still omit Read `offset`/`limit` and Edit `replace_all`,
-even where the Pi exec already carries offset and limit. Tool results that
+did not prefetch are not fetched from Cursor's KV store. Edit
+`replace_all` is not offered and not encoded. Cursor 3.27.22's Pi edit
+arm, in `cursor-agent-exec/dist/main.js`, is `PiEditExecArgs|1 path 9|2 edits`
+and `PiEditReplacement|1 old_text 9|2 new_text 9`. That replacement has
+no bool, so a field number for `replace_all` would be a guess. Tool results that
 never arrive on the run body still leave the turn after the exec; the model
 sees them only on a later run's `conversation_state`. Append
 sequence numbers are not reordered, and a run's session is not dropped

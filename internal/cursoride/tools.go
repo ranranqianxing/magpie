@@ -195,7 +195,7 @@ func agentTools(run []field) []ToolSpec {
 func builtinAgentTools() []ToolSpec {
 	return []ToolSpec{
 		{Name: "Shell", Description: "Run a shell command in the workspace.", Parameters: schema(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`)},
-		{Name: "Read", Description: "Read a file.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
+		{Name: "Read", Description: "Read a file. offset is the 1-indexed line to start at; limit is how many lines to return. Omit either to read from the start or through the end.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"]}`)},
 		{Name: "Grep", Description: "Search files for a pattern.", Parameters: schema(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"}},"required":["pattern"]}`)},
 		{Name: "Delete", Description: "Delete a file.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
 		{Name: "Glob", Description: "Find files by a glob pattern.", Parameters: schema(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}`)},
@@ -544,6 +544,10 @@ func bashPi(obj map[string]any) []byte {
 	return []byte(b)
 }
 
+// readPi is PiReadExecArgs. Cursor 3.27.22's cursor-agent-exec declares
+// "PiReadExecArgs|1 path 9|2 offset 5?|3 limit 5?": path, then an optional
+// int32 offset and limit. The executor treats offset as a 1-indexed line
+// and limit as a line count (slice from offset-1, length limit).
 func readPi(obj map[string]any) []byte {
 	var b wbuf
 	putArg(&b, 1, obj, "path", "file_path", "target_file")
@@ -580,6 +584,11 @@ func writePi(obj map[string]any) []byte {
 	return []byte(b)
 }
 
+// editPi is PiEditExecArgs: path (field 1) and repeated PiEditReplacement
+// (field 2). Cursor 3.27.22's cursor-agent-exec declares
+// "PiEditReplacement|1 old_text 9|2 new_text 9" and
+// "PiEditExecArgs|1 path 9|2 edits". That replacement has no replace_all
+// field, so a bool under that name is not encoded.
 func editPi(obj map[string]any) []byte {
 	var rep wbuf
 	putArg(&rep, 1, obj, "old_string", "oldText", "old_str")
@@ -620,6 +629,16 @@ func argPresent(obj map[string]any, keys ...string) (string, bool) {
 }
 
 func putI32(b *wbuf, field int, obj map[string]any, keys ...string) {
+	if n, ok := argI32(obj, keys...); ok {
+		b.u32(field, n)
+	}
+}
+
+// argI32 is the first present key that is a non-negative int32.
+// A present number that is negative, fractional, or out of range stops
+// the search. A present value of some other type is skipped, and a
+// later key can still match.
+func argI32(obj map[string]any, keys ...string) (uint32, bool) {
 	for _, k := range keys {
 		v, ok := obj[k]
 		if !ok || v == nil {
@@ -628,25 +647,23 @@ func putI32(b *wbuf, field int, obj map[string]any, keys ...string) {
 		switch n := v.(type) {
 		case float64:
 			if n < 0 || n > math.MaxInt32 || n != math.Trunc(n) {
-				return
+				return 0, false
 			}
-			b.u32(field, uint32(n))
-			return
+			return uint32(n), true
 		case int:
 			if n < 0 || n > math.MaxInt32 {
-				return
+				return 0, false
 			}
-			b.u32(field, uint32(n))
-			return
+			return uint32(n), true
 		case json.Number:
 			i, err := n.Int64()
 			if err != nil || i < 0 || i > math.MaxInt32 {
-				return
+				return 0, false
 			}
-			b.u32(field, uint32(i))
-			return
+			return uint32(i), true
 		}
 	}
+	return 0, false
 }
 
 func argsReady(s string) bool {
@@ -655,8 +672,8 @@ func argsReady(s string) bool {
 }
 
 // displayArgs rewrites a finished arguments object onto the names the Pi
-// tools validate (content, pattern, path). An unfinished fragment is
-// returned as itself.
+// tools validate (content, pattern, path, and Read's offset and limit).
+// An unfinished fragment is returned as itself.
 func displayArgs(name, raw string) string {
 	if !argsReady(raw) {
 		return raw
@@ -674,6 +691,12 @@ func displayArgs(name, raw string) string {
 	case "read":
 		if s, ok := argPresent(obj, "path", "file_path", "target_file"); ok {
 			out["path"] = s
+		}
+		if n, ok := argI32(obj, "offset"); ok {
+			out["offset"] = n
+		}
+		if n, ok := argI32(obj, "limit"); ok {
+			out["limit"] = n
 		}
 	case "write":
 		if s, ok := argPresent(obj, "path", "file_path"); ok {
