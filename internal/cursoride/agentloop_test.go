@@ -27,6 +27,27 @@ func TestAgentToolResultsFromPayloadFindsCallID(t *testing.T) {
 	}
 }
 
+func TestAgentGatewayRoundWaitsWhenStreamEndsWithToolsOnly(t *testing.T) {
+	dir := t.TempDir()
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","function":{"name":"Shell","arguments":"{\"command\":\"pwd\"}"}}]}}]}`+"\n\n")
+	}))
+	defer gw.Close()
+	p := &Proxy{
+		CADir:   dir,
+		Gateway: func() (string, string) { return gw.URL, "tok" },
+		client:  http.DefaultClient,
+	}
+	var execN uint32
+	sealed, done, err := p.agentGatewayRound(context.Background(), Chat{
+		Model: "codex/gpt-5.6-luna", Messages: []ChatMessage{{Role: "user", Content: "go"}},
+	}, func([]byte) {}, &execN)
+	if err != nil || done || len(sealed) != 1 || sealed[0].id != "call_x" {
+		t.Fatalf("sealed=%+v done=%v err=%v", sealed, done, err)
+	}
+}
+
 func TestRunAgentLoopContinuesAfterToolResults(t *testing.T) {
 	const conv = "66666666-6666-4666-8666-666666666666"
 	var mu sync.Mutex

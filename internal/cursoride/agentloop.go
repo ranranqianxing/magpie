@@ -18,6 +18,16 @@ type connectFrameReader struct {
 	err error
 }
 
+// readRemainder is the request body after the last frame read. Used to
+// forward a streaming run without a follow-up pump eating the tail.
+func (fr *connectFrameReader) readRemainder() []byte {
+	if fr == nil || fr.r == nil {
+		return nil
+	}
+	b, _ := io.ReadAll(io.LimitReader(fr.r, int64(maxCatalogBody)+1))
+	return b
+}
+
 func newConnectFrameReader(r io.Reader) *connectFrameReader {
 	return &connectFrameReader{r: r}
 }
@@ -166,6 +176,14 @@ func (p *Proxy) runAgentLoop(ctx context.Context, followups <-chan []byte, turn 
 	write(connectEnd())
 }
 
+func drainFollowups(ch <-chan []byte) {
+	if ch == nil {
+		return
+	}
+	for range ch {
+	}
+}
+
 // agentGatewayRound runs one gateway chat completion. When the model ends
 // with tool calls, it emits composer tool frames and returns those calls.
 // done is true when the model finished without further tools.
@@ -195,7 +213,6 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 		return nil, false, fmt.Errorf("gateway status %d", resp.StatusCode)
 	}
 	var asm toolAssembler
-	var finishReason string
 	eachPiece(resp.Body, func(piece chatPiece) {
 		if piece.thinking != "" {
 			write(agentThinkingFrame(piece.thinking))
@@ -208,12 +225,6 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 			if frag != "" {
 				write(agentPartialFrame(id, name, frag))
 			}
-		}
-		if piece.seal {
-			finishReason = "tool_calls"
-		}
-		if piece.done && finishReason == "" {
-			finishReason = "stop"
 		}
 	})
 	sealed = asm.seal()
@@ -231,8 +242,6 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 			write(frame)
 		}
 	}
-	if finishReason == "stop" {
-		return sealed, true, nil
-	}
+	// Any sealed call needs follow-up frames (or ends one-shot when none arrive).
 	return sealed, false, nil
 }

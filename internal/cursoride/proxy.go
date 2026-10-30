@@ -417,7 +417,7 @@ func (p *Proxy) agentRun(w http.ResponseWriter, r *http.Request) {
 		}
 		close(followups)
 	}
-	p.finishAgentRun(w, r, turn, body, gunzipped, followups)
+	p.finishAgentRun(w, r, turn, body, gunzipped, followups, nil)
 }
 
 func (p *Proxy) agentRunStreaming(w http.ResponseWriter, r *http.Request) {
@@ -440,6 +440,9 @@ func (p *Proxy) agentRunStreaming(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "run", http.StatusBadRequest)
 		return
 	}
+	forwardStreaming := func() {
+		p.forward(w, r, streamingAgentForwardBody(first, fr), gunzipped)
+	}
 	turn, ok, err := readAgentClient(first)
 	if err != nil {
 		Note("agent-run history fail")
@@ -448,26 +451,9 @@ func (p *Proxy) agentRunStreaming(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		Note("agent-run forward reason=not-a-run")
-		p.forward(w, r, connectFrame(first), gunzipped)
+		forwardStreaming()
 		return
 	}
-	followups := make(chan []byte, 8)
-	go pumpConnectFrames(fr, followups)
-	p.finishAgentRun(w, r, turn, connectFrame(first), gunzipped, followups)
-}
-
-func pumpConnectFrames(fr *connectFrameReader, out chan<- []byte) {
-	defer close(out)
-	for {
-		payload, err := fr.next()
-		if err != nil {
-			return
-		}
-		out <- payload
-	}
-}
-
-func (p *Proxy) finishAgentRun(w http.ResponseWriter, r *http.Request, turn AgentTurn, forwardBody []byte, gunzipped bool, followups <-chan []byte) {
 	route, ours, err := RouteModel(p.Models(), turn.ModelID, turn.Params)
 	if err != nil {
 		Note(fmt.Sprintf("route fail model=%s path=AgentService/Run", turn.ModelID))
@@ -476,9 +462,57 @@ func (p *Proxy) finishAgentRun(w http.ResponseWriter, r *http.Request, turn Agen
 	}
 	if !ours {
 		Note(fmt.Sprintf("route miss model=%s path=AgentService/Run forward", turn.ModelID))
+		forwardStreaming()
+		return
+	}
+	pumpCtx, stopPump := context.WithCancel(r.Context())
+	followups := make(chan []byte, 8)
+	go pumpConnectFrames(pumpCtx, fr, followups)
+	p.serveLocalAgentRun(w, r, turn, route, followups, stopPump)
+}
+
+func streamingAgentForwardBody(first []byte, fr *connectFrameReader) []byte {
+	return append(connectFrame(first), fr.readRemainder()...)
+}
+
+func pumpConnectFrames(ctx context.Context, fr *connectFrameReader, out chan<- []byte) {
+	defer close(out)
+	for {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		payload, err := fr.next()
+		if err != nil {
+			return
+		}
+		select {
+		case out <- payload:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (p *Proxy) finishAgentRun(w http.ResponseWriter, r *http.Request, turn AgentTurn, forwardBody []byte, gunzipped bool, followups <-chan []byte, stopPump context.CancelFunc) {
+	route, ours, err := RouteModel(p.Models(), turn.ModelID, turn.Params)
+	if err != nil {
+		Note(fmt.Sprintf("route fail model=%s path=AgentService/Run", turn.ModelID))
+		http.Error(w, "model", http.StatusBadRequest)
+		return
+	}
+	if !ours {
+		Note(fmt.Sprintf("route miss model=%s path=AgentService/Run forward", turn.ModelID))
+		if stopPump != nil {
+			stopPump()
+			drainFollowups(followups)
+		}
 		p.forward(w, r, forwardBody, gunzipped)
 		return
 	}
+	p.serveLocalAgentRun(w, r, turn, route, followups, stopPump)
+}
+
+func (p *Proxy) serveLocalAgentRun(w http.ResponseWriter, r *http.Request, turn AgentTurn, route Route, followups <-chan []byte, stopPump context.CancelFunc) {
 	Note(fmt.Sprintf("route ok model=%s path=AgentService/Run local messages=%d tools=%d blobs-missing=%d", route.Model, len(turn.Messages), len(turn.Tools), turn.MissingBlobs))
 	w.Header().Set("Content-Type", "application/connect+proto")
 	w.WriteHeader(http.StatusOK)
@@ -494,7 +528,17 @@ func (p *Proxy) finishAgentRun(w http.ResponseWriter, r *http.Request, turn Agen
 		write(agentTextFrame("cursor ide: agent run has no message"))
 		write(agentTurnEnded())
 		write(connectEnd())
+		if stopPump != nil {
+			stopPump()
+			drainFollowups(followups)
+		}
 		return
+	}
+	if stopPump != nil {
+		defer func() {
+			stopPump()
+			drainFollowups(followups)
+		}()
 	}
 	Note("chat start model=" + route.Model + " path=AgentService/Run")
 	defer Note("chat done model=" + route.Model + " path=AgentService/Run")
