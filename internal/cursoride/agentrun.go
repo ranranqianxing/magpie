@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
+	"fmt"
 	"io"
 )
 
@@ -15,7 +16,8 @@ import (
 // the picker stored, including a variant string. Params are the
 // RequestedModel parameters beside that id. Text is the user message on
 // the action. Messages is that text plus the conversation_state prompt
-// (root_prompt_messages_json), resolved through pre_fetched_blobs.
+// (root_prompt_messages_json) and the action's selected_context, resolved
+// through pre_fetched_blobs.
 // Tools is the composer tool list. ConversationID is the run's
 // conversation, when it named one. MissingBlobs counts prompt ids the
 // request did not carry bytes for.
@@ -93,9 +95,16 @@ func readAgentClient(payload []byte) (AgentTurn, bool, error) {
 			return AgentTurn{}, false, err
 		}
 	}
+	attach := readUserAttach(rf, blobs)
+	missing += attach.missing
+	if attach.skipped {
+		Note("agent attach skipped reason=context")
+	} else if n := len(attach.images); n > 0 || len(attach.pieces) > 0 {
+		Note(fmt.Sprintf("agent attach offered images=%d texts=%d", n, len(attach.pieces)))
+	}
 	return AgentTurn{
 		ModelID: id, Params: params, ConversationID: conv,
-		Text: text, Messages: appendCurrent(msgs, text),
+		Text: text, Messages: appendCurrent(msgs, text, attach),
 		Tools: agentTools(rf), MissingBlobs: missing,
 	}, true, nil
 }
@@ -123,32 +132,43 @@ func readRequestedModel(msg []byte) (string, []Parameter) {
 }
 
 func readAgentText(run []field) string {
-	actions := fieldBytes(run, 2)
-	if len(actions) == 0 {
-		return ""
-	}
-	af, err := parseFields(actions[0])
-	if err != nil {
-		return ""
-	}
-	umas := fieldBytes(af, 1)
-	if len(umas) == 0 {
-		return ""
-	}
-	uf, err := parseFields(umas[0])
-	if err != nil {
-		return ""
-	}
-	ums := fieldBytes(uf, 1)
-	if len(ums) == 0 {
-		return ""
-	}
-	mf, err := parseFields(ums[0])
-	if err != nil {
+	mf, ok := readUserMessage(run)
+	if !ok {
 		return ""
 	}
 	text, _ := fieldString(mf, 1)
 	return text
+}
+
+// readUserMessage is AgentRunRequest.action.user_message. The action is
+// field 2, UserMessageAction.user_message is field 1, and that message's
+// text is field 1. A missing or truncated step is no message.
+func readUserMessage(run []field) ([]field, bool) {
+	actions := fieldBytes(run, 2)
+	if len(actions) == 0 {
+		return nil, false
+	}
+	af, err := parseFields(actions[0])
+	if err != nil {
+		return nil, false
+	}
+	umas := fieldBytes(af, 1)
+	if len(umas) == 0 {
+		return nil, false
+	}
+	uf, err := parseFields(umas[0])
+	if err != nil {
+		return nil, false
+	}
+	ums := fieldBytes(uf, 1)
+	if len(ums) == 0 {
+		return nil, false
+	}
+	mf, err := parseFields(ums[0])
+	if err != nil {
+		return nil, false
+	}
+	return mf, true
 }
 
 // connectPayloads is the protobuf inside each connect data frame. framed
