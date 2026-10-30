@@ -253,6 +253,131 @@ func TestFinishedArgsIgnoreALaterShorterCopy(t *testing.T) {
 	}
 }
 
+func TestPlaceholderObjectDoesNotSwallowLaterFragments(t *testing.T) {
+	// A relay sends "{}" with the tool name, then the real JSON as
+	// fragments. Treating that object as finished drops the fragments,
+	// and the Pi exec Cursor runs is Read {}.
+	lines := []string{
+		`data: {"choices":[{"delta":{"content":null,"tool_calls":[{"index":0,"id":"call_r","type":"function","function":{"name":"Read","arguments":"{}"}}]}}]}`,
+		`data: {"choices":[{"delta":{"content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"/tmp/magpie-p0-verify/README.md\"}"}}]}}]}`,
+	}
+	var asm toolAssembler
+	var partials int
+	for _, line := range lines {
+		p, ok := chatPieces(line)
+		if !ok || len(p.tools) != 1 {
+			t.Fatalf("dropped %s", line)
+		}
+		if frame := agentPartialFromDelta(&asm, p.tools[0]); frame != nil {
+			partials++
+			if strings.TrimSpace(partialArgsText(t, frame)) == "{}" {
+				t.Fatal("placeholder {} was published as a partial")
+			}
+		}
+	}
+	if partials == 0 {
+		t.Fatal("no partial carried the real arguments")
+	}
+	sealed := asm.seal()
+	if len(sealed) != 1 || sealed[0].args != `{"path":"/tmp/magpie-p0-verify/README.md"}` {
+		t.Fatalf("sealed %+v", sealed)
+	}
+	frames, ok := agentToolFrames(sealed[0].id, sealed[0].name, sealed[0].args, 1)
+	if !ok || len(frames) != 2 {
+		t.Fatalf("frames %d ok=%v", len(frames), ok)
+	}
+	body := nested(t, execMessage(t, frames[1]), 45)
+	if got, _ := fieldString(body, 1); got != "/tmp/magpie-p0-verify/README.md" {
+		t.Fatalf("path %q", got)
+	}
+}
+
+func TestPlaceholderFragmentsForComposerTools(t *testing.T) {
+	cases := []struct {
+		name, args string
+		exec       int
+		field      int
+		want       string
+	}{
+		{"Shell", `{"command":"printf hi > notes.txt"}`, 46, 1, "printf hi > notes.txt"},
+		{"Grep", `{"pattern":"foo","path":"src"}`, 49, 1, "foo"},
+		{"Glob", `{"pattern":"*.md","path":"/tmp"}`, 50, 1, "*.md"},
+		{"Write", `{"path":"notes.txt","content":"hello"}`, 48, 2, "hello"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mid := len(tc.args) / 2
+			sealed := sealArgChunks(t, tc.name, "{}", tc.args[:mid], tc.args[mid:])
+			if sealed.args != tc.args {
+				t.Fatalf("sealed %s", sealed.args)
+			}
+			frames, ok := agentToolFrames(sealed.id, sealed.name, sealed.args, 1)
+			if !ok || len(frames) != 2 {
+				t.Fatalf("frames %d ok=%v", len(frames), ok)
+			}
+			body := nested(t, execMessage(t, frames[1]), tc.exec)
+			if got, _ := fieldString(body, tc.field); got != tc.want {
+				t.Fatalf("field %d %q", tc.field, got)
+			}
+		})
+	}
+}
+
+func sealArgChunks(t *testing.T, name string, chunks ...string) toolBuf {
+	t.Helper()
+	var asm toolAssembler
+	for _, args := range chunks {
+		line := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"` + name + `","arguments":` + jsonQuote(args) + `}}]}}]}`
+		p, ok := chatPieces(line)
+		if !ok || len(p.tools) != 1 {
+			t.Fatalf("dropped %s", line)
+		}
+		agentPartialFromDelta(&asm, p.tools[0])
+	}
+	sealed := asm.seal()
+	if len(sealed) != 1 {
+		t.Fatalf("%+v", sealed)
+	}
+	return sealed[0]
+}
+
+func TestFillEmptyToolArgsFromToolCallTag(t *testing.T) {
+	calls := []toolBuf{{id: "c", name: "Shell", args: "{}"}}
+	fillEmptyToolArgs(calls, `<tool_call>{"name":"Shell","arguments":{"command":"printf hi > notes.txt"}}</tool_call>`)
+	if calls[0].args != `{"command":"printf hi > notes.txt"}` {
+		t.Fatalf("%s", calls[0].args)
+	}
+	kept := []toolBuf{{name: "Read", args: `{"path":"a"}`}}
+	fillEmptyToolArgs(kept, `<tool_call>{"name":"Read","arguments":{"path":"b"}}</tool_call>`)
+	if kept[0].args != `{"path":"a"}` {
+		t.Fatalf("overwrote %s", kept[0].args)
+	}
+	other := []toolBuf{{name: "Read", args: "{}"}}
+	fillEmptyToolArgs(other, `<tool_call>{"name":"Shell","arguments":{"command":"ls"}}</tool_call>`)
+	if other[0].args != "{}" {
+		t.Fatalf("filled from another tool %s", other[0].args)
+	}
+	prose := []toolBuf{{name: "Read", args: "{}"}}
+	fillEmptyToolArgs(prose, "I'll read /tmp/magpie-p0-verify/README.md")
+	if prose[0].args != "{}" {
+		t.Fatalf("prose became %s", prose[0].args)
+	}
+	alias := []toolBuf{{name: "Shell", args: "{}"}}
+	fillEmptyToolArgs(alias, `<tool_call>{"name":"bash","arguments":{"command":"pwd"}}</tool_call>`)
+	if alias[0].args != `{"command":"pwd"}` {
+		t.Fatalf("alias %s", alias[0].args)
+	}
+}
+
+func TestEmptyArgumentsObjectDoesNotHideInput(t *testing.T) {
+	line := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"Read","arguments":"{}","input":{"path":"notes.txt"}}}]}}]}`
+	p, ok := chatPieces(line)
+	if !ok || len(p.tools) != 1 || p.tools[0].Args != `{"path":"notes.txt"}` {
+		t.Fatalf("%+v ok=%v", p, ok)
+	}
+}
+
 func TestEmptyObjectIsReplacedByTheRealArguments(t *testing.T) {
 	var asm toolAssembler
 	for _, args := range []string{`{}`, `{"path":"notes.txt"}`} {

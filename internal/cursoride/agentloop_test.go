@@ -48,6 +48,75 @@ func TestAgentGatewayRoundWaitsWhenStreamEndsWithToolsOnly(t *testing.T) {
 	}
 }
 
+func TestAgentGatewayRoundFillsEmptyCallFromDSML(t *testing.T) {
+	// DeepSeek V4 writes the call as DSML and the relay also emits a
+	// native tool_call whose arguments are {}. The path is in the text
+	// the UI shows; the Pi exec has to carry it.
+	const path = "/tmp/magpie-p0-verify/README.md"
+	dsml := "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"Read\">\n<｜DSML｜parameter name=\"path\" string=\"true\">" + path + "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"choices":[{"delta":{"content":`+jsonQuote(dsml)+`}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_r","function":{"name":"Read","arguments":"{}"}}]}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer gw.Close()
+	p := &Proxy{
+		CADir:   t.TempDir(),
+		Gateway: func() (string, string) { return gw.URL, "tok" },
+		client:  http.DefaultClient,
+	}
+	var frames [][]byte
+	sealed, done, err := p.agentGatewayRound(context.Background(), Chat{
+		Model: "deepseek/deepseek-v4.1-flash", Messages: []ChatMessage{{Role: "user", Content: "read it"}},
+	}, func(b []byte) { frames = append(frames, append([]byte(nil), b...)) }, new(uint32))
+	if err != nil || done || len(sealed) != 1 || sealed[0].name != "Read" || sealed[0].args != `{"path":"`+path+`"}` {
+		t.Fatalf("sealed=%+v done=%v err=%v", sealed, done, err)
+	}
+	var saw bool
+	for _, frame := range frames {
+		msg, ok := readExec(frame)
+		if !ok {
+			continue
+		}
+		reads := fieldBytes(msg, 45)
+		if len(reads) != 1 {
+			continue
+		}
+		body, err := parseFields(reads[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := fieldString(body, 1); got == path {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatal("Pi read exec had no path")
+	}
+}
+
+func readExec(frame []byte) ([]field, bool) {
+	payloads, framed := connectPayloads(frame)
+	if !framed || len(payloads) != 1 {
+		return nil, false
+	}
+	top, err := parseFields(payloads[0])
+	if err != nil {
+		return nil, false
+	}
+	execs := fieldBytes(top, 2)
+	if len(execs) != 1 {
+		return nil, false
+	}
+	msg, err := parseFields(execs[0])
+	if err != nil {
+		return nil, false
+	}
+	return msg, true
+}
+
 func TestRunAgentLoopContinuesAfterToolResults(t *testing.T) {
 	const conv = "66666666-6666-4666-8666-666666666666"
 	var mu sync.Mutex

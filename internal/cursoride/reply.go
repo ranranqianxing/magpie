@@ -270,14 +270,24 @@ func indexOf(raw json.RawMessage, fallback int) (int, bool) {
 }
 
 func firstArgText(raws ...json.RawMessage) string {
+	hold := ""
 	for _, raw := range raws {
 		text, ok := argText(raw)
-		if !ok || text == "" {
+		if !ok || strings.TrimSpace(text) == "" {
+			continue
+		}
+		// "{}" beside a sibling input object is the placeholder, not the
+		// call. An empty string was already skipped; this is the same case
+		// when the relay wrote the empty object out.
+		if emptyJSONObject(text) {
+			if hold == "" {
+				hold = strings.TrimSpace(text)
+			}
 			continue
 		}
 		return text
 	}
-	return ""
+	return hold
 }
 
 func argText(raw json.RawMessage) (string, bool) {

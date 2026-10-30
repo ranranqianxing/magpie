@@ -213,12 +213,17 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 		return nil, false, fmt.Errorf("gateway status %d", resp.StatusCode)
 	}
 	var asm toolAssembler
+	var said strings.Builder
 	eachPiece(resp.Body, func(piece chatPiece) {
 		if piece.thinking != "" {
 			write(agentThinkingFrame(piece.thinking))
+			said.WriteString(piece.thinking)
+			said.WriteByte('\n')
 		}
 		if piece.text != "" {
 			write(agentTextFrame(piece.text))
+			said.WriteString(piece.text)
+			said.WriteByte('\n')
 		}
 		for _, d := range piece.tools {
 			if frame := agentPartialFromDelta(&asm, d); frame != nil {
@@ -227,6 +232,10 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 		}
 	})
 	sealed = asm.seal()
+	// A native call whose arguments stayed "{}" often has the real
+	// parameters in the same reply, as DSML or a <tool_call> block.
+	// The Pi exec and the next gateway turn both read what is sealed.
+	fillEmptyToolArgs(sealed, said.String())
 	if len(sealed) == 0 {
 		return nil, true, nil
 	}

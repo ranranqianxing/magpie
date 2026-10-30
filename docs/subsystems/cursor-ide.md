@@ -111,8 +111,15 @@ inference path refuses it. Tool arguments that are not JSON are not sent
 as an exec. The composer is told, in a text frame, that the arguments
 did not parse. A chunk whose arguments are a JSON object, or whose
 tool-call index is not an integer, is still folded into that call.
-An arguments object the model actually left empty is still empty on
-the exec: Cursor then reports the missing string itself.
+A first arguments chunk of `{}` is a placeholder, not a finished call.
+Later fragments of that call replace it, and a sibling `input` object is
+kept when `arguments` is that placeholder. No partial frame is sent for
+the placeholder, so Cursor does not validate the Pi strings until the
+real JSON is there. A call that is still empty when the stream ends is
+filled from a DSML invoke or a `<tool_call>` block in the same reply
+when that block names the tool and has parameters. Free prose is not
+read. A call the model actually left empty stays empty on the exec, and
+one diagnostic line records the tool name and the argument length.
 
 An empty catalog encodes no default model. Cursor is not given a stand-in.
 
@@ -131,7 +138,9 @@ chat messages, a gateway tool-call delta that comes back as an Agent
 exec frame and as an inference `tool_call_part`, a Write call whose
 started card is `ToolCall` field 64 and whose exec is Pi field 48
 with path and content, a Read exec on field 45 and a shell exec on
-field 46, an Agent stream
+field 46, a placeholder `{}` followed by argument fragments that still
+execs the path, a native `{}` filled from a DSML invoke of the same tool,
+an Agent stream
 that ends without `finish_reason` and still execs the call, a same-turn
 tool loop when a second Connect request frame carries the tool result, and a
 default-model reply that keeps Cursor's own id when the backend answered.
