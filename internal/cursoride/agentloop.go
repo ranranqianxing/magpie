@@ -221,9 +221,8 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 			write(agentTextFrame(piece.text))
 		}
 		for _, d := range piece.tools {
-			id, name, frag := asm.add(d)
-			if frag != "" {
-				write(agentPartialFrame(id, name, frag))
+			if frame := agentPartialFromDelta(&asm, d); frame != nil {
+				write(frame)
 			}
 		}
 	})
