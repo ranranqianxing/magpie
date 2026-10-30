@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -28,6 +30,7 @@ func replayConversation(state []byte, prefetched map[string][]byte) (msgs []Chat
 	if err != nil {
 		return nil, 0, err
 	}
+	noted := 0
 	for _, raw := range fieldBytes(fs, 1) {
 		body, miss := resolveBlob(raw, prefetched)
 		missing += miss
@@ -38,11 +41,14 @@ func replayConversation(state []byte, prefetched map[string][]byte) (msgs []Chat
 			missing++
 			continue
 		}
-		one, err := messagesFromJSON(body)
+		one, err := messagesFromJSONNoted(body, &noted)
 		if err != nil {
 			return nil, missing, err
 		}
 		msgs = append(msgs, one...)
+	}
+	if noted > historyEmptyNotes {
+		Note(fmt.Sprintf("agent history tools empty=%d logged=%d", noted, historyEmptyNotes))
 	}
 	if summary := summaryText(fs, prefetched); summary != "" {
 		msgs = append([]ChatMessage{{Role: "system", Content: summary}}, msgs...)
@@ -135,7 +141,16 @@ func summaryText(fs []field, prefetched map[string][]byte) string {
 // messagesFromJSON reads one AI SDK message, or a JSON array of them.
 // Tool calls and tool results become the gateway's tool messages.
 // A body that is not JSON is an error: it was addressed as a message.
+// historyEmptyNotes is how many empty tool-call parts one replay writes.
+// The rest are counted. A long chain of Read {} would otherwise be the
+// whole diagnostic file.
+const historyEmptyNotes = 8
+
 func messagesFromJSON(body []byte) ([]ChatMessage, error) {
+	return messagesFromJSONNoted(body, nil)
+}
+
+func messagesFromJSONNoted(body []byte, noted *int) ([]ChatMessage, error) {
 	body = bytes.TrimSpace(body)
 	if len(body) == 0 {
 		return nil, nil
@@ -147,7 +162,7 @@ func messagesFromJSON(body []byte) ([]ChatMessage, error) {
 		}
 		var out []ChatMessage
 		for _, raw := range raws {
-			msgs, err := oneSDKMessage(raw)
+			msgs, err := oneSDKMessage(raw, noted)
 			if err != nil {
 				return nil, err
 			}
@@ -155,7 +170,7 @@ func messagesFromJSON(body []byte) ([]ChatMessage, error) {
 		}
 		return out, nil
 	}
-	return oneSDKMessage(body)
+	return oneSDKMessage(body, noted)
 }
 
 type sdkMessage struct {
@@ -177,11 +192,15 @@ type sdkPart struct {
 	ToolCallID string          `json:"toolCallId"`
 	ToolName   string          `json:"toolName"`
 	Args       json.RawMessage `json:"args"`
+	Input      json.RawMessage `json:"input"`
+	Arguments  json.RawMessage `json:"arguments"`
+	Parameters json.RawMessage `json:"parameters"`
 	Result     json.RawMessage `json:"result"`
 	IsError    bool            `json:"isError"`
+	raw        json.RawMessage
 }
 
-func oneSDKMessage(raw []byte) ([]ChatMessage, error) {
+func oneSDKMessage(raw []byte, noted *int) ([]ChatMessage, error) {
 	var m sdkMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, errf("history: %v", err)
@@ -204,14 +223,23 @@ func oneSDKMessage(raw []byte) ([]ChatMessage, error) {
 		}
 		return []ChatMessage{{Role: chatRole(role), Content: s}}, nil
 	}
-	var parts []sdkPart
-	if err := json.Unmarshal(m.Content, &parts); err != nil {
+	var raws []json.RawMessage
+	if err := json.Unmarshal(m.Content, &raws); err != nil {
 		return nil, errf("history: %v", err)
 	}
-	return partsToMessages(role, parts)
+	parts := make([]sdkPart, 0, len(raws))
+	for _, raw := range raws {
+		var p sdkPart
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, errf("history: %v", err)
+		}
+		p.raw = raw
+		parts = append(parts, p)
+	}
+	return partsToMessages(role, parts, noted)
 }
 
-func partsToMessages(role string, parts []sdkPart) ([]ChatMessage, error) {
+func partsToMessages(role string, parts []sdkPart, noted *int) ([]ChatMessage, error) {
 	var text strings.Builder
 	var images []ContentPart
 	var calls []ToolCall
@@ -246,9 +274,14 @@ func partsToMessages(role string, parts []sdkPart) ([]ChatMessage, error) {
 				text.WriteString(s)
 			}
 		case "tool-call":
-			args := strings.TrimSpace(string(p.Args))
-			if args == "" || args == "null" {
-				args = "{}"
+			args, from := toolPartArgs(p)
+			if callArgsEmpty(args) {
+				if noted == nil || *noted < historyEmptyNotes {
+					Note(fmt.Sprintf("agent history tool name=%s empty=true from=%s keys=%s", safeToolName(p.ToolName), from, partKeyList(p.raw)))
+				}
+				if noted != nil {
+					*noted++
+				}
 			}
 			id := p.ToolCallID
 			if id == "" {
@@ -375,6 +408,74 @@ func chatRole(role string) string {
 	default:
 		return "user"
 	}
+}
+
+// toolPartArgs is the JSON object for one tool-call part. Cursor's
+// stored messages use args. A part that only has input (or arguments,
+// or parameters), or whose args object is {}, keeps that object instead
+// of being replayed as an empty call. from is which field supplied it,
+// or "none" when every one of them was missing or empty.
+func toolPartArgs(p sdkPart) (args, from string) {
+	for _, one := range []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"args", p.Args},
+		{"input", p.Input},
+		{"arguments", p.Arguments},
+		{"parameters", p.Parameters},
+	} {
+		s, ok := historyArgJSON(one.raw)
+		if !ok || callArgsEmpty(s) {
+			continue
+		}
+		return s, one.name
+	}
+	return "{}", "none"
+}
+
+func historyArgJSON(raw json.RawMessage) (string, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", false
+	}
+	if raw[0] == '"' {
+		var s string
+		if json.Unmarshal(raw, &s) != nil {
+			return "", false
+		}
+		s = strings.TrimSpace(s)
+		if s == "" || !json.Valid([]byte(s)) || !strings.HasPrefix(s, "{") {
+			return "", false
+		}
+		return s, true
+	}
+	if raw[0] == '{' && json.Valid(raw) {
+		return string(raw), true
+	}
+	return "", false
+}
+
+func partKeyList(raw json.RawMessage) string {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil || len(obj) == 0 {
+		return "-"
+	}
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		if !safeKey(k) {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if len(keys) > 12 {
+		keys = keys[:12]
+	}
+	if len(keys) == 0 {
+		return "-"
+	}
+	return strings.Join(keys, ",")
 }
 
 func toolResultString(raw json.RawMessage, isError bool) string {

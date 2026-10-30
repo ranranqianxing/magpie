@@ -90,7 +90,11 @@ A text turn is a string. A turn with an image is an OpenAI content
 array; the image is a data URL. A file that is not text, on the
 inference invoke path, is a note that names its media type, not the
 bytes. An Agent image is the data URL, not that note. Tool calls keep their
-id, name and raw arguments. `tools` is set when the invoke named tools, and
+id, name and raw arguments. A history `tool-call` part stores those
+arguments on `args`. When that object is missing or `{}`, the same part's
+`input`, `arguments`, or `parameters` object is used. A part with none of
+those is replayed as `{}`. The first eight such parts in a replay each
+log the tool name and the part's keys, and a further line counts the rest. `tools` is set when the invoke named tools, and
 on every Agent run (the built-in composer tools, plus MCP tools the run
 defined). Read's schema offers `path`, `offset`, and `limit`. `offset` is
 the 1-indexed line to start at and `limit` is how many lines to return;
@@ -123,14 +127,24 @@ as an exec. The composer is told, in a text frame, that the arguments
 did not parse. A chunk whose arguments are a JSON object, or whose
 tool-call index is not an integer, is still folded into that call.
 A first arguments chunk of `{}` is a placeholder, not a finished call.
-Later fragments of that call replace it, and a sibling `input` object is
-kept when `arguments` is that placeholder. No partial frame is sent for
-the placeholder, so Cursor does not validate the Pi strings until the
-real JSON is there. A call that is still empty when the stream ends is
-filled from a DSML invoke or a `<tool_call>` block in the same reply
-when that block names the tool and has parameters. Free prose is not
-read. A call the model actually left empty stays empty on the exec, and
-one diagnostic line records the tool name and the argument length.
+Later fragments of that call replace it, and a sibling `parameters`,
+`args`, or `input` object is kept when `arguments` is that placeholder.
+No partial frame is sent for the placeholder, so Cursor does not validate
+the Pi strings until the real JSON is there. A call that is still empty
+when the stream ends is filled from the same reply when that reply names
+the tool: a DSML invoke, a `<tool_call>` JSON object, DeepSeek's
+`{"name":…}` followed by `<parameter>` tags, or GLM's `<arg_key>` pairs.
+`bash` fills `Shell`. Free prose is not read. A Pi call that is still
+missing the strings that tool validates (Read's path, Shell's command,
+and the same for Grep, Glob, Delete, Write, and Edit) is not executed, so
+Cursor does not run `Read {}` and loop. LS may omit its path. An MCP
+tool's JSON object, including `{}`, is still executed. One diagnostic
+line per sealed call records the tool name, argument-fragment count, how
+many of those fragments were `{}`, whether the sealed object is empty,
+the argument key names, which markup form filled it, which of those forms
+appeared in the text, and whether the exec ran. A gateway request that
+already carries assistant tool calls records how many of those arguments
+are `{}`. Values are not logged.
 
 An empty catalog encodes no default model. Cursor is not given a stand-in.
 
@@ -154,6 +168,9 @@ with path and content, a Read exec on field 45 whose offset and limit
 are fields 2 and 3 when the call names them, a shell exec on
 field 46, a placeholder `{}` followed by argument fragments that still
 execs the path, a native `{}` filled from a DSML invoke of the same tool,
+a native `{}` filled from `<parameter name="path">` after `{"name":"Read">`,
+a Read whose history part stores the path on `input` rather than `args`,
+a native `{}` whose only path is a sentence and which therefore does not exec,
 an Agent stream
 that ends without `finish_reason` and still execs the call, a same-turn
 tool loop when a second Connect request frame carries the tool result, and a

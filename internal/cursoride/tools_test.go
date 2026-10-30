@@ -536,6 +536,80 @@ func TestFillEmptyToolArgsFromToolCallTag(t *testing.T) {
 	}
 }
 
+func TestFillEmptyToolArgsFromParameterTags(t *testing.T) {
+	const path = "/tmp/magpie-p0-verify/README.md"
+	calls := []toolBuf{{name: "Read", args: "{}"}}
+	fillEmptyToolArgs(calls, "I'll read it.\n<tool_call>{\"name\":\"Read\">\n<parameter name=\"path\">"+path+"</parameter>")
+	var got map[string]string
+	if json.Unmarshal([]byte(calls[0].args), &got) != nil || got["path"] != path || calls[0].fill != "parameter" {
+		t.Fatalf("%s fill=%s", calls[0].args, calls[0].fill)
+	}
+	qwen := []toolBuf{{name: "Shell", args: "{}"}}
+	fillEmptyToolArgs(qwen, "<tool_call>{\"name\":\"bash\"}\n<parameter=command>pwd</parameter>\n</tool_call>")
+	if json.Unmarshal([]byte(qwen[0].args), &got) != nil || got["command"] != "pwd" || qwen[0].fill != "parameter" {
+		t.Fatalf("qwen %s fill=%s", qwen[0].args, qwen[0].fill)
+	}
+	held := []toolBuf{{name: "Glob", args: "{}"}}
+	fillEmptyToolArgs(held, `<tool_call>{"name":"Glob","arguments":{}}<parameter name="pattern">*.go</parameter>`)
+	if json.Unmarshal([]byte(held[0].args), &got) != nil || got["pattern"] != "*.go" {
+		t.Fatalf("empty arguments object hid the tag: %s", held[0].args)
+	}
+	glm := []toolBuf{{name: "Read", args: "{}"}}
+	fillEmptyToolArgs(glm, "<tool_call>Read<arg_key>path</arg_key><arg_value>"+path+"</arg_value></tool_call>")
+	if json.Unmarshal([]byte(glm[0].args), &got) != nil || got["path"] != path || glm[0].fill != "glm" {
+		t.Fatalf("glm %s fill=%s", glm[0].args, glm[0].fill)
+	}
+	other := []toolBuf{{name: "Read", args: "{}"}}
+	fillEmptyToolArgs(other, `<tool_call>{"name":"bash"><parameter name="command">ls</parameter></tool_call>`)
+	if other[0].args != "{}" {
+		t.Fatalf("filled from another tool %s", other[0].args)
+	}
+	loose := []toolBuf{{name: "Read", args: "{}"}}
+	fillEmptyToolArgs(loose, `<parameter name="path">`+path+`</parameter>`)
+	if loose[0].args != "{}" {
+		t.Fatalf("parameter tag outside a call became %s", loose[0].args)
+	}
+	shell := []toolBuf{{name: "Shell", args: "{}"}}
+	fillEmptyToolArgs(shell, `<tool_call>{"name":"bash"}<parameter name="command">printf hi > notes.txt</parameter></tool_call>`)
+	if !strings.Contains(shell[0].args, ">") || strings.Contains(shell[0].args, `\u003e`) {
+		t.Fatalf("command escaped: %s", shell[0].args)
+	}
+}
+
+func TestPiCallReadySkipsEmptyComposerTools(t *testing.T) {
+	if piCallReady("Read", "{}") || piCallReady("Shell", `{"command":" "}`) || piCallReady("Glob", "{}") {
+		t.Fatal("empty composer tool looked ready")
+	}
+	if !piCallReady("Read", `{"path":"a.go"}`) || !piCallReady("LS", "{}") || !piCallReady("mcp_tool", "{}") {
+		t.Fatal("ready call was skipped")
+	}
+}
+
+func TestEmptyArgumentsObjectDoesNotHideParameters(t *testing.T) {
+	line := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"Read","arguments":"{}","parameters":{"path":"notes.txt"}}}]}}]}`
+	p, ok := chatPieces(line)
+	if !ok || len(p.tools) != 1 || p.tools[0].Args != `{"path":"notes.txt"}` {
+		t.Fatalf("%+v ok=%v", p, ok)
+	}
+}
+
+func TestToolTraceLogsKeysNotValues(t *testing.T) {
+	const path = "/tmp/magpie-p0-verify/README.md"
+	noteToolTrace("seal", "Read", `{"path":"`+path+`"}`, 2, 1, "parameter", "tool_call,parameter", "run")
+	var line string
+	for _, one := range strings.Split(Recent(), "\n") {
+		if strings.Contains(one, "where=seal name=Read frags=2") {
+			line = one
+		}
+	}
+	if line == "" || strings.Contains(line, path) {
+		t.Fatalf("trace %q", line)
+	}
+	if !strings.Contains(line, "empty=false keys=path fill=parameter markers=tool_call,parameter exec=run") {
+		t.Fatalf("trace %q", line)
+	}
+}
+
 func TestEmptyArgumentsObjectDoesNotHideInput(t *testing.T) {
 	line := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"Read","arguments":"{}","input":{"path":"notes.txt"}}}]}}]}`
 	p, ok := chatPieces(line)
