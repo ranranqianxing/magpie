@@ -22,7 +22,13 @@ func TestCursorDesktopConnectsAndRestores(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
-	t.Cleanup(cursorIDEStop)
+	t.Cleanup(func() {
+		cursorIDEStop()
+		cursorIDETrustMu.Lock()
+		cursorIDERestarted = false
+		cursorIDERestored = false
+		cursorIDETrustMu.Unlock()
+	})
 	a := cursorIDE(home)
 	if a.ID != cursoride.AgentID || a.Name != "Cursor" || !a.ListsModels || a.Launch != nil || a.shared != "" {
 		t.Fatalf("id %s name %s lists %v launch %v shared %q", a.ID, a.Name, a.ListsModels, a.Launch != nil, a.shared)
@@ -260,6 +266,8 @@ func TestCursorDesktopTrustNotice(t *testing.T) {
 		cursorIDETrustFn = nil
 		cursorIDETrustMu.Lock()
 		cursorIDETrustRes = cursoride.TrustResult{}
+		cursorIDERestarted = false
+		cursorIDERestored = false
 		cursorIDETrustMu.Unlock()
 	})
 	cert := cursoride.CertFile(cursorIDECADir())

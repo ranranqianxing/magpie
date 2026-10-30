@@ -63,13 +63,15 @@ type cursorIDESaved struct {
 }
 
 var (
-	noticeCursorIDE          = newNotice("Cursor reads its proxy settings when it starts — quit and reopen Cursor to use magpie's models, and leave magpie running, then pick a magpie model in Cursor's model menu.")
-	noticeCursorIDERestarted = newNotice("Cursor was quit and opened again so it reads these proxy settings. Leave magpie running, then pick a magpie model in Cursor's model menu.")
-	noticeCursorIDEKept      = newNotice("magpie's certificate is already trusted for your user, so this connect did not install it again.")
-	noticeCursorIDEWin       = newNotice("Approve the one Windows prompt to trust magpie's certificate for your user (it is not installed for the whole machine). If you dismissed it, disconnect and connect Cursor on the Agents page again, or open {cert} and install it under Current User → Trusted Root Certification Authorities.")
-	noticeCursorIDEMac       = newNotice("Enter your login keychain password when macOS asks, to trust magpie's certificate for your user (no administrator password). If you dismissed it, disconnect and connect Cursor on the Agents page again, or open {cert} in Keychain Access and set When using this certificate to Always Trust.")
-	noticeCursorIDELinux     = newNotice("Cursor on Linux also reads the system trust store, which still needs magpie's certificate. Run {command} once, then quit and reopen Cursor.")
-	noticeCursorIDEManual    = newNotice("Trust magpie's certificate ({cert}) so Cursor accepts the proxy.")
+	noticeCursorIDE              = newNotice("Cursor reads its proxy settings when it starts — quit and reopen Cursor to use magpie's models, and leave magpie running, then pick a magpie model in Cursor's model menu.")
+	noticeCursorIDERestarted     = newNotice("Cursor was quit and opened again so it reads these proxy settings. Leave magpie running, then pick a magpie model in Cursor's model menu.")
+	noticeCursorIDERestored      = newNotice("Cursor was quit and opened again so it reads the proxy settings that were put back.")
+	noticeCursorIDERestoreManual = newNotice("Cursor reads its proxy settings when it starts — quit and reopen Cursor so the settings that were put back take effect.")
+	noticeCursorIDEKept          = newNotice("magpie's certificate is already trusted for your user, so this connect did not install it again.")
+	noticeCursorIDEWin           = newNotice("Approve the one Windows prompt to trust magpie's certificate for your user (it is not installed for the whole machine). If you dismissed it, disconnect and connect Cursor on the Agents page again, or open {cert} and install it under Current User → Trusted Root Certification Authorities.")
+	noticeCursorIDEMac           = newNotice("Enter your login keychain password when macOS asks, to trust magpie's certificate for your user (no administrator password). If you dismissed it, disconnect and connect Cursor on the Agents page again, or open {cert} in Keychain Access and set When using this certificate to Always Trust.")
+	noticeCursorIDELinux         = newNotice("Cursor on Linux also reads the system trust store, which still needs magpie's certificate. Run {command} once, then quit and reopen Cursor.")
+	noticeCursorIDEManual        = newNotice("Trust magpie's certificate ({cert}) so Cursor accepts the proxy.")
 )
 
 // cursorIDETrustFn replaces TrustCA in tests. Production leaves it nil.
@@ -165,7 +167,14 @@ func cursorIDENotice(settingsPath string) string {
 	cursorIDETrustMu.Lock()
 	res := cursorIDETrustRes
 	restarted := cursorIDERestarted
+	restored := cursorIDERestored
 	cursorIDETrustMu.Unlock()
+	if restored {
+		if restarted {
+			return noticeCursorIDERestored.String()
+		}
+		return noticeCursorIDERestoreManual.String()
+	}
 	base := noticeCursorIDE.String()
 	if restarted && cursorIDEProxySet(settingsPath) {
 		base = noticeCursorIDERestarted.String()
@@ -247,6 +256,9 @@ func cursorIDESet(path, v string) error {
 				return err
 			}
 			cursorIDEApplyTrust()
+			cursorIDETrustMu.Lock()
+			cursorIDERestored = false
+			cursorIDETrustMu.Unlock()
 			return nil
 		}
 		first := stashLoad()[cursorIDEStashKey] == ""
@@ -266,19 +278,32 @@ func cursorIDESet(path, v string) error {
 			return err
 		}
 		cursorIDEApplyTrust()
+		cursorIDETrustMu.Lock()
+		cursorIDERestored = false
+		cursorIDETrustMu.Unlock()
 		cursorIDEAfterWrite()
 		return nil
 	case "":
 		// Disconnect puts Cursor's settings back and stops the proxy.
 		// The CA stays trusted: the next connect checks and skips the
-		// install when it is still there. Cursor is not quit.
-		cursorIDETrustMu.Lock()
-		cursorIDERestarted = false
-		cursorIDETrustMu.Unlock()
-		if err := cursorIDERestore(path); err != nil {
+		// install when it is still there. A restore that puts the
+		// previous settings back quits Cursor and opens it again, the
+		// same way a connect that wrote settings does. A disconnect
+		// that leaves the file alone does not.
+		restored, err := cursorIDERestore(path)
+		if err != nil {
 			return err
 		}
 		cursorIDEStop()
+		cursorIDETrustMu.Lock()
+		cursorIDERestored = restored
+		if !restored {
+			cursorIDERestarted = false
+		}
+		cursorIDETrustMu.Unlock()
+		if restored {
+			cursorIDEAfterWrite()
+		}
 		return nil
 	default:
 		return fmt.Errorf("cursor: provider %q", v)
@@ -335,16 +360,19 @@ func cursorIDERemember(path string) error {
 	return nil
 }
 
-func cursorIDERestore(path string) error {
+// cursorIDERestore puts the stashed proxy settings back. False means
+// the file was left alone: nothing was connected, and these are not
+// magpie's proxy settings, so a disconnect must not delete a proxy the
+// user set and must not quit Cursor. True means the restore ran, which
+// is when a connect would have relaunched after its own write.
+func cursorIDERestore(path string) (bool, error) {
 	raw := unstash(cursorIDEStashKey)
-	// Nothing was connected, and these are not magpie's proxy settings.
-	// Leave the file alone: a disconnect must not delete a proxy the user set.
 	if raw == "" && !cursorIDEProxySet(path) {
-		return nil
+		return false, nil
 	}
 	var saved cursorIDESaved
 	if raw != "" && json.Unmarshal([]byte(raw), &saved) != nil {
-		return fmt.Errorf("cursor: saved proxy settings are not readable")
+		return false, fmt.Errorf("cursor: saved proxy settings are not readable")
 	}
 	var del []string
 	for _, k := range cursorIDEManaged {
@@ -353,7 +381,7 @@ func cursorIDERestore(path string) error {
 		}
 	}
 	if err := edit.DelJSON(path, del...); err != nil {
-		return err
+		return false, err
 	}
 	var put []edit.KV
 	for k, v := range saved.Raw {
@@ -361,26 +389,26 @@ func cursorIDERestore(path string) error {
 	}
 	if len(put) > 0 {
 		if err := edit.SetJSON(path, put...); err != nil {
-			return err
+			return false, err
 		}
 	}
 	if !saved.Absent {
-		return nil
+		return true, nil
 	}
 	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return nil
+		return true, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	s := strings.TrimSpace(string(b))
 	if s == "" || s == "{}" {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
+			return false, err
 		}
 	}
-	return nil
+	return true, nil
 }
 
 func cursorIDESync(path string) error {

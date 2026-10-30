@@ -48,6 +48,8 @@ func TestCursorIDELogWordsAreTranslated(t *testing.T) {
 		"No cursor-ide lines yet.",
 		"Same lines as this file, for a terminal. A photo of the box is enough to share.",
 		"Cursor was quit and opened again so it reads these proxy settings. Leave magpie running, then pick a magpie model in Cursor's model menu.",
+		"Cursor was quit and opened again so it reads the proxy settings that were put back.",
+		"Cursor reads its proxy settings when it starts — quit and reopen Cursor so the settings that were put back take effect.",
 	}
 	for _, lang := range []string{"zh: {", `"zh-TW": {`, "ja: {", "de: {"} {
 		_, block, ok := strings.Cut(string(b), "\n  "+lang+"\n")
