@@ -1,6 +1,7 @@
 package cursoride
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +41,12 @@ func Note(msg string) {
 		return
 	}
 	line := time.Now().Format("2006-01-02 15:04:05") + " " + msg
+	// The Agents page reads the file. MAGPIE_DEBUG is the process log a
+	// terminal watch sees; the same line goes there, without values Note
+	// already stripped.
+	if os.Getenv("MAGPIE_DEBUG") != "" {
+		log.Printf("cursor-ide: %s", msg)
+	}
 	diagMu.Lock()
 	diagLines = append(diagLines, line)
 	if len(diagLines) > diagKeepLines {

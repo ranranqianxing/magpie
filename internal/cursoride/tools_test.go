@@ -618,6 +618,44 @@ func TestEmptyArgumentsObjectDoesNotHideInput(t *testing.T) {
 	}
 }
 
+func TestMessageArgsFillAnEmptyDeltaOnly(t *testing.T) {
+	const path = "/tmp/magpie-p0-verify/README.md"
+	obj := `{"path":"` + path + `"}`
+	filled := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_r","function":{"name":"Read","arguments":"{}"}}]},"message":{"tool_calls":[{"id":"call_r","function":{"name":"Read","arguments":` + obj + `}}]}}]}`
+	p, ok := chatPieces(filled)
+	if !ok || len(p.tools) != 1 || p.tools[0].Args != obj || p.tools[0].from != "message" {
+		t.Fatalf("filled %+v ok=%v", p, ok)
+	}
+	kept := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"Read","arguments":"{\"path\":\"a.go\"}"}}]},"message":{"tool_calls":[{"id":"c","function":{"name":"Read","arguments":{"path":"b.go"}}}]}}]}`
+	p, ok = chatPieces(kept)
+	if !ok || len(p.tools) != 1 || p.tools[0].Args != `{"path":"a.go"}` || p.tools[0].from != "" {
+		t.Fatalf("kept %+v", p)
+	}
+	split := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"Read","arguments":"{}"}}]},"message":{"tool_calls":[{"id":"c","function":{"name":"Read","arguments":{"path":"a"}}},{"id":"c","function":{"name":"Read","arguments":{"path":"b"}}}]}}]}`
+	p, ok = chatPieces(split)
+	if !ok || len(p.tools) != 1 || p.tools[0].Args != "{}" {
+		t.Fatalf("split %+v", p)
+	}
+}
+
+func TestCompleteObjectReplacesAnUnfinishedFragment(t *testing.T) {
+	// A duplicate completion resends the whole object. Its spacing does
+	// not match the fragment already buffered, so gluing the two would
+	// no longer parse and the Pi exec would be skipped.
+	var asm toolAssembler
+	for _, args := range []string{`{"path": "/tmp`, `{"path":"/tmp/magpie-p0-verify/README.md"}`} {
+		p, ok := chatPieces(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"Read","arguments":` + jsonQuote(args) + `}}]}}]}`)
+		if !ok || len(p.tools) != 1 {
+			t.Fatalf("%s %+v", args, p)
+		}
+		agentPartialFromDelta(&asm, p.tools[0])
+	}
+	sealed := asm.seal()
+	if len(sealed) != 1 || sealed[0].args != `{"path":"/tmp/magpie-p0-verify/README.md"}` {
+		t.Fatalf("%+v", sealed)
+	}
+}
+
 func TestEmptyObjectIsReplacedByTheRealArguments(t *testing.T) {
 	var asm toolAssembler
 	for _, args := range []string{`{}`, `{"path":"notes.txt"}`} {

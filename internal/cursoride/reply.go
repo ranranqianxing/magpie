@@ -190,14 +190,23 @@ func chatPieces(line string) (chatPiece, bool) {
 		if c.FinishReason != "" {
 			p.seal = true
 		}
-		calls := c.Delta.ToolCalls
-		if len(calls) == 0 {
-			calls = c.Message.ToolCalls
+		deltas := c.Delta.ToolCalls
+		messages := c.Message.ToolCalls
+		if len(deltas) == 0 {
+			deltas = messages
+			messages = nil
 		}
-		for i, raw := range calls {
+		for i, raw := range deltas {
 			d, ok := parseToolDelta(raw, i)
 			if !ok {
 				continue
+			}
+			// A completion often carries the call twice: the delta's
+			// arguments are "" or {}, and the message holds the object
+			// or the string. The delta used to win, so the path never
+			// reached the assembler.
+			if len(messages) > 0 {
+				d = mergeMessageArgs(d, messages)
 			}
 			p.tools = append(p.tools, d)
 		}
@@ -251,6 +260,50 @@ func parseToolDelta(raw json.RawMessage, fallback int) (toolDelta, bool) {
 		return toolDelta{}, false
 	}
 	return toolDelta{Index: idx, ID: call.ID, Name: name, Args: args}, true
+}
+
+// mergeMessageArgs fills a delta whose arguments are empty from the same
+// choice's message tool_calls. One matching call supplies them. Two that
+// disagree are left alone: a guess is not the call. from records message
+// so the seal line says where the arguments came from.
+func mergeMessageArgs(d toolDelta, messages []json.RawMessage) toolDelta {
+	if !callArgsEmpty(d.Args) || len(messages) == 0 {
+		return d
+	}
+	var hits []toolDelta
+	for _, raw := range messages {
+		m, ok := parseToolDelta(raw, d.Index)
+		if !ok || callArgsEmpty(m.Args) {
+			continue
+		}
+		if d.ID != "" && m.ID != "" && d.ID != m.ID {
+			continue
+		}
+		if d.Name != "" && m.Name != "" && !sameTool(d.Name, m.Name) {
+			continue
+		}
+		if m.Index != d.Index && !(d.ID != "" && m.ID == d.ID) {
+			continue
+		}
+		hits = append(hits, m)
+	}
+	if len(hits) == 0 {
+		return d
+	}
+	for _, h := range hits[1:] {
+		if h.Args != hits[0].Args || (h.Name != "" && hits[0].Name != "" && !sameTool(h.Name, hits[0].Name)) {
+			return d
+		}
+	}
+	d.Args = hits[0].Args
+	if d.Name == "" {
+		d.Name = hits[0].Name
+	}
+	if d.ID == "" {
+		d.ID = hits[0].ID
+	}
+	d.from = "message"
+	return d
 }
 
 // indexOf reports the tool-call index. A missing index uses fallback.

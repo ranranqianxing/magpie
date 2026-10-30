@@ -1,6 +1,8 @@
 package cursoride
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"strings"
 	"testing"
@@ -28,5 +30,17 @@ func TestDiagWritesTheConfigFile(t *testing.T) {
 	}
 	if strings.Contains(DiagPath(), "cursor-ide"+string(os.PathSeparator)+"cursor-ide.log") == false {
 		t.Fatalf("path %s", DiagPath())
+	}
+}
+
+func TestDiagReachesTheProcessLogWhenDebug(t *testing.T) {
+	t.Setenv("MAGPIE_DEBUG", "1")
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	Note("agent tool trace where=seal name=Read frags=1 placeholder=0 empty=false keys=path fill=none markers=none exec=run")
+	got := buf.String()
+	if !strings.Contains(got, "cursor-ide: agent tool trace where=seal") || !strings.Contains(got, "empty=false") || !strings.Contains(got, "exec=run") || !strings.Contains(got, "keys=path") {
+		t.Fatalf("process log %q", got)
 	}
 }
