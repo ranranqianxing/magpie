@@ -382,7 +382,16 @@ func (p *Proxy) runChat(s *sess, chat Chat) {
 // Cursor's backend is what returns ERROR_BAD_MODEL_NAME / Unknown model
 // ID for a provider/model id, so that run is not forwarded. A model
 // Cursor itself lists is forwarded unchanged.
+//
+// When the client keeps the request body open (chunked) after the first
+// Connect frame, later frames carry tool results for the same turn.
+// Reading the whole body before responding prevented that loop on HTTP/1.1.
 func (p *Proxy) agentRun(w http.ResponseWriter, r *http.Request) {
+	streaming := r.ContentLength < 0 || r.Header.Get("Transfer-Encoding") != ""
+	if streaming {
+		p.agentRunStreaming(w, r)
+		return
+	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, int64(maxCatalogBody)+1))
 	if err != nil || len(body) > maxCatalogBody {
 		http.Error(w, "read", http.StatusBadRequest)
@@ -400,6 +409,51 @@ func (p *Proxy) agentRun(w http.ResponseWriter, r *http.Request) {
 		p.forward(w, r, body, gunzipped)
 		return
 	}
+	var followups chan []byte
+	if payloads, framed := connectPayloads(body); framed && len(payloads) > 1 {
+		followups = make(chan []byte, len(payloads)-1)
+		for _, extra := range payloads[1:] {
+			followups <- extra
+		}
+		close(followups)
+	}
+	p.finishAgentRun(w, r, turn, body, gunzipped, followups, nil)
+}
+
+func (p *Proxy) agentRunStreaming(w http.ResponseWriter, r *http.Request) {
+	bodyReader := io.Reader(r.Body)
+	gunzipped := false
+	if enc := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding"))); enc == "gzip" || enc == "x-gzip" {
+		body, err := io.ReadAll(io.LimitReader(r.Body, int64(maxCatalogBody)+1))
+		if err != nil || len(body) > maxCatalogBody {
+			http.Error(w, "read", http.StatusBadRequest)
+			return
+		}
+		var plain bool
+		body, plain = gunzipRequest(body, r.Header.Get("Content-Encoding"))
+		gunzipped = plain
+		bodyReader = bytes.NewReader(body)
+	}
+	fr := newConnectFrameReader(bodyReader)
+	first, err := fr.next()
+	if err != nil {
+		http.Error(w, "run", http.StatusBadRequest)
+		return
+	}
+	forwardStreaming := func() {
+		p.forward(w, r, streamingAgentForwardBody(first, fr), gunzipped)
+	}
+	turn, ok, err := readAgentClient(first)
+	if err != nil {
+		Note("agent-run history fail")
+		http.Error(w, "history", http.StatusBadRequest)
+		return
+	}
+	if !ok {
+		Note("agent-run forward reason=not-a-run")
+		forwardStreaming()
+		return
+	}
 	route, ours, err := RouteModel(p.Models(), turn.ModelID, turn.Params)
 	if err != nil {
 		Note(fmt.Sprintf("route fail model=%s path=AgentService/Run", turn.ModelID))
@@ -408,9 +462,57 @@ func (p *Proxy) agentRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ours {
 		Note(fmt.Sprintf("route miss model=%s path=AgentService/Run forward", turn.ModelID))
-		p.forward(w, r, body, gunzipped)
+		forwardStreaming()
 		return
 	}
+	pumpCtx, stopPump := context.WithCancel(r.Context())
+	followups := make(chan []byte, 8)
+	go pumpConnectFrames(pumpCtx, fr, followups)
+	p.serveLocalAgentRun(w, r, turn, route, followups, stopPump)
+}
+
+func streamingAgentForwardBody(first []byte, fr *connectFrameReader) []byte {
+	return append(connectFrame(first), fr.readRemainder()...)
+}
+
+func pumpConnectFrames(ctx context.Context, fr *connectFrameReader, out chan<- []byte) {
+	defer close(out)
+	for {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		payload, err := fr.next()
+		if err != nil {
+			return
+		}
+		select {
+		case out <- payload:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (p *Proxy) finishAgentRun(w http.ResponseWriter, r *http.Request, turn AgentTurn, forwardBody []byte, gunzipped bool, followups <-chan []byte, stopPump context.CancelFunc) {
+	route, ours, err := RouteModel(p.Models(), turn.ModelID, turn.Params)
+	if err != nil {
+		Note(fmt.Sprintf("route fail model=%s path=AgentService/Run", turn.ModelID))
+		http.Error(w, "model", http.StatusBadRequest)
+		return
+	}
+	if !ours {
+		Note(fmt.Sprintf("route miss model=%s path=AgentService/Run forward", turn.ModelID))
+		if stopPump != nil {
+			stopPump()
+			drainFollowups(followups)
+		}
+		p.forward(w, r, forwardBody, gunzipped)
+		return
+	}
+	p.serveLocalAgentRun(w, r, turn, route, followups, stopPump)
+}
+
+func (p *Proxy) serveLocalAgentRun(w http.ResponseWriter, r *http.Request, turn AgentTurn, route Route, followups <-chan []byte, stopPump context.CancelFunc) {
 	Note(fmt.Sprintf("route ok model=%s path=AgentService/Run local messages=%d tools=%d blobs-missing=%d", route.Model, len(turn.Messages), len(turn.Tools), turn.MissingBlobs))
 	w.Header().Set("Content-Type", "application/connect+proto")
 	w.WriteHeader(http.StatusOK)
@@ -426,75 +528,21 @@ func (p *Proxy) agentRun(w http.ResponseWriter, r *http.Request) {
 		write(agentTextFrame("cursor ide: agent run has no message"))
 		write(agentTurnEnded())
 		write(connectEnd())
-		return
-	}
-	chat := Chat{
-		Model: route.Model, Effort: route.Effort, Session: turn.ConversationID,
-		Messages: turn.Messages, Tools: turn.Tools,
-		Fast: route.Fast, ContextTokens: route.ContextTokens,
-	}
-	p.streamAgent(r.Context(), chat, write)
-	write(connectEnd())
-}
-
-func (p *Proxy) streamAgent(ctx context.Context, chat Chat, write func([]byte)) {
-	Note("chat start model=" + chat.Model + " path=AgentService/Run")
-	defer Note("chat done model=" + chat.Model + " path=AgentService/Run")
-	body, err := chat.JSON()
-	if err != nil {
-		write(agentTextFrame("cursor ide: chat"))
-		write(agentTurnEnded())
-		return
-	}
-	base, token := p.Gateway()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		write(agentTextFrame("cursor ide: gateway"))
-		write(agentTurnEnded())
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	for k, v := range chat.Header() {
-		req.Header.Set(k, v)
-	}
-	resp, err := p.client.Do(req)
-	if err != nil {
-		write(agentTextFrame("cursor ide: gateway"))
-		write(agentTurnEnded())
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		write(agentTextFrame(fmt.Sprintf("cursor ide: gateway status %d", resp.StatusCode)))
-		write(agentTurnEnded())
-		return
-	}
-	var asm toolAssembler
-	var execN uint32
-	eachPiece(resp.Body, func(piece chatPiece) {
-		if piece.thinking != "" {
-			write(agentThinkingFrame(piece.thinking))
+		if stopPump != nil {
+			stopPump()
+			drainFollowups(followups)
 		}
-		if piece.text != "" {
-			write(agentTextFrame(piece.text))
-		}
-		for _, d := range piece.tools {
-			id, name, frag := asm.add(d)
-			if frag != "" {
-				write(agentPartialFrame(id, name, frag))
-			}
-		}
-		if piece.seal || piece.done {
-			writeSealedTools(&asm, &execN, write)
-		}
-	})
-	// A body that ends without finish_reason or [DONE] still closes
-	// the call. seal is empty when the stream already closed it.
-	writeSealedTools(&asm, &execN, write)
-	write(agentTurnEnded())
+		return
+	}
+	if stopPump != nil {
+		defer func() {
+			stopPump()
+			drainFollowups(followups)
+		}()
+	}
+	Note("chat start model=" + route.Model + " path=AgentService/Run")
+	defer Note("chat done model=" + route.Model + " path=AgentService/Run")
+	p.runAgentLoop(r.Context(), followups, turn, route, write)
 }
 
 func writeSealedTools(asm *toolAssembler, execN *uint32, write func([]byte)) {
