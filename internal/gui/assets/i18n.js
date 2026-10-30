@@ -4067,6 +4067,8 @@ const I18N = {
     "No cursor-ide lines yet.": "还没有 cursor-ide 的记录。",
     "Same lines as this file, for a terminal. A photo of the box is enough to share.": "这些行同时写在这个文件里，终端里也能打开。拍下这个框就够分享。",
     "Cursor was quit and opened again so it reads these proxy settings. Leave magpie running, then pick a magpie model in Cursor's model menu.": "Cursor 已退出并重新打开，以便读取这些代理设置。请保持 magpie 运行，然后在 Cursor 的模型菜单里选择 magpie 的模型。",
+    "Cursor was quit and opened again so it reads the proxy settings that were put back.": "Cursor 已退出并重新打开，以便读取已经放回去的代理设置。",
+    "Cursor reads its proxy settings when it starts — quit and reopen Cursor so the settings that were put back take effect.": "Cursor 启动时读取代理设置——请退出并重新打开 Cursor，已经放回去的设置才会生效。",
   },
   "zh-TW": {
     "Browser access": "瀏覽器存取",
@@ -8117,6 +8119,8 @@ const I18N = {
     "No cursor-ide lines yet.": "還沒有 cursor-ide 的記錄。",
     "Same lines as this file, for a terminal. A photo of the box is enough to share.": "這些行同時寫在這個檔案裡，終端裡也能打開。拍下這個框就夠分享。",
     "Cursor was quit and opened again so it reads these proxy settings. Leave magpie running, then pick a magpie model in Cursor's model menu.": "Cursor 已結束並重新開啟，以便讀取這些代理設定。請保持 magpie 運行，然後在 Cursor 的模型選單裡選擇 magpie 的模型。",
+    "Cursor was quit and opened again so it reads the proxy settings that were put back.": "Cursor 已結束並重新開啟，以便讀取已經放回去的代理設定。",
+    "Cursor reads its proxy settings when it starts — quit and reopen Cursor so the settings that were put back take effect.": "Cursor 啟動時讀取代理設定——請結束並重新開啟 Cursor，已經放回去的設定才會生效。",
   },
   ja: {
     "Browser access": "ブラウザからのアクセス",
@@ -12169,6 +12173,8 @@ const I18N = {
     "No cursor-ide lines yet.": "cursor-ide の行はまだありません。",
     "Same lines as this file, for a terminal. A photo of the box is enough to share.": "同じ行がこのファイルにも書いてあります。端末から開けます。この枠を撮れば共有できます。",
     "Cursor was quit and opened again so it reads these proxy settings. Leave magpie running, then pick a magpie model in Cursor's model menu.": "Cursor を終了して開き直したので、これらのプロキシ設定を読みます。magpie は起動したまま、Cursor のモデルメニューで magpie のモデルを選んでください。",
+    "Cursor was quit and opened again so it reads the proxy settings that were put back.": "Cursor を終了して開き直したので、元に戻したプロキシ設定を読みます。",
+    "Cursor reads its proxy settings when it starts — quit and reopen Cursor so the settings that were put back take effect.": "Cursor は起動時にプロキシ設定を読みます。元に戻した設定を反映するには、終了して開き直してください。",
   },
   de: {
     "Browser access": "Browserzugriff",
@@ -16221,6 +16227,8 @@ const I18N = {
     "No cursor-ide lines yet.": "Noch keine cursor-ide-Zeilen.",
     "Same lines as this file, for a terminal. A photo of the box is enough to share.": "Dieselben Zeilen stehen in dieser Datei, für ein Terminal. Ein Foto dieses Kastens reicht zum Teilen.",
     "Cursor was quit and opened again so it reads these proxy settings. Leave magpie running, then pick a magpie model in Cursor's model menu.": "Cursor wurde beendet und erneut geöffnet, damit es diese Proxy-Einstellungen liest. Lass magpie laufen und wähle dann ein magpie-Modell in Cursors Modellmenü.",
+    "Cursor was quit and opened again so it reads the proxy settings that were put back.": "Cursor wurde beendet und erneut geöffnet, damit es die zurückgesetzten Proxy-Einstellungen liest.",
+    "Cursor reads its proxy settings when it starts — quit and reopen Cursor so the settings that were put back take effect.": "Cursor liest seine Proxy-Einstellungen beim Start — beende Cursor und öffne es erneut, damit die zurückgesetzten Einstellungen gelten.",
   },
 };
 
@@ -16325,6 +16333,8 @@ const NOTICES = [
   "{agent} reads magpie's gateway from CURSOR_LOCAL_AGENT_BASE_URL and CURSOR_LOCAL_AGENT_API_KEY, now set for your user: quit it (the app, not only its window) and open it again, as it keeps the model list it was first given until it quits. A base URL or API key set in its Open configuration or a model's settings comes first, so leave both empty (or set the base URL to {url} and the key to {key}).",
   "Cursor reads its proxy settings when it starts — quit and reopen Cursor to use magpie's models, and leave magpie running, then pick a magpie model in Cursor's model menu.",
   "Cursor was quit and opened again so it reads these proxy settings. Leave magpie running, then pick a magpie model in Cursor's model menu.",
+  "Cursor was quit and opened again so it reads the proxy settings that were put back.",
+  "Cursor reads its proxy settings when it starts — quit and reopen Cursor so the settings that were put back take effect.",
   "magpie's certificate is already trusted for your user, so this connect did not install it again.",
   "Approve the one Windows prompt to trust magpie's certificate for your user (it is not installed for the whole machine). If you dismissed it, disconnect and connect Cursor on the Agents page again, or open {cert} and install it under Current User → Trusted Root Certification Authorities.",
   "Enter your login keychain password when macOS asks, to trust magpie's certificate for your user (no administrator password). If you dismissed it, disconnect and connect Cursor on the Agents page again, or open {cert} in Keychain Access and set When using this certificate to Always Trust.",
