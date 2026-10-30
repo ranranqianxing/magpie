@@ -133,6 +133,128 @@ func TestComposerToolsCarryStringArgsOnPiArms(t *testing.T) {
 	}
 }
 
+func TestReadSchemaOffersALineWindow(t *testing.T) {
+	var read ToolSpec
+	for _, spec := range builtinAgentTools() {
+		if spec.Name == "Read" {
+			read = spec
+		}
+	}
+	if read.Name != "Read" {
+		t.Fatal("Read is not offered")
+	}
+	var schema map[string]any
+	if json.Unmarshal(read.Parameters, &schema) != nil {
+		t.Fatalf("schema %s", read.Parameters)
+	}
+	props, _ := schema["properties"].(map[string]any)
+	for _, key := range []string{"offset", "limit"} {
+		prop, _ := props[key].(map[string]any)
+		if prop["type"] != "integer" || prop["minimum"] != float64(1) {
+			t.Fatalf("%s schema %#v", key, prop)
+		}
+	}
+	req, _ := schema["required"].([]any)
+	if len(req) != 1 || req[0] != "path" {
+		t.Fatalf("required %#v", req)
+	}
+	body, err := Chat{
+		Model:    "p/m",
+		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+		Tools:    []ToolSpec{read},
+	}.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"offset"`) || !strings.Contains(string(body), `"limit"`) {
+		t.Fatalf("chat tools dropped the window: %s", body)
+	}
+}
+
+func TestReadLineWindowReachesPiExec(t *testing.T) {
+	args := `{"path":"notes.txt","offset":10,"limit":20}`
+	frames, ok := agentToolFrames("call_r", "Read", args, 4)
+	if !ok || len(frames) != 2 {
+		t.Fatalf("frames %d ok=%v", len(frames), ok)
+	}
+	body := nested(t, execMessage(t, frames[1]), 45)
+	if got, _ := fieldString(body, 1); got != "notes.txt" {
+		t.Fatalf("path %q", got)
+	}
+	if got, ok := fieldUint(body, 2); !ok || got != 10 {
+		t.Fatalf("offset %d ok=%v", got, ok)
+	}
+	if got, ok := fieldUint(body, 3); !ok || got != 20 {
+		t.Fatalf("limit %d ok=%v", got, ok)
+	}
+	part := agentPartialFrame("call_r", "Read", args)
+	if got := partialArgsText(t, part); got != `{"limit":20,"offset":10,"path":"notes.txt"}` {
+		t.Fatalf("partial %s", got)
+	}
+	card := piArgsOf(t, partialTool(t, part), 61)
+	if got, ok := fieldUint(card, 2); !ok || got != 10 {
+		t.Fatalf("partial offset %d ok=%v", got, ok)
+	}
+	if got, ok := fieldUint(card, 3); !ok || got != 20 {
+		t.Fatalf("partial limit %d ok=%v", got, ok)
+	}
+
+	// A negative or fractional window is not an int32 field. The read
+	// stays the whole file rather than a guessed range.
+	bad, ok := agentToolFrames("call_r", "Read", `{"path":"notes.txt","offset":-1,"limit":1.5}`, 1)
+	if !ok {
+		t.Fatal("bad window was not a call")
+	}
+	badBody := nested(t, execMessage(t, bad[1]), 45)
+	if _, ok := fieldUint(badBody, 2); ok {
+		t.Fatal("negative offset was encoded")
+	}
+	if _, ok := fieldUint(badBody, 3); ok {
+		t.Fatal("fractional limit was encoded")
+	}
+}
+
+func TestEditReplaceAllIsNotAPiField(t *testing.T) {
+	var edit ToolSpec
+	for _, spec := range builtinAgentTools() {
+		if spec.Name == "Edit" {
+			edit = spec
+		}
+	}
+	var schema map[string]any
+	if json.Unmarshal(edit.Parameters, &schema) != nil {
+		t.Fatalf("schema %s", edit.Parameters)
+	}
+	props, _ := schema["properties"].(map[string]any)
+	if _, ok := props["replace_all"]; ok {
+		t.Fatal("Edit schema offers replace_all")
+	}
+	frames, ok := agentToolFrames("call_e", "Edit", `{"path":"a.go","old_string":"x","new_string":"y","replace_all":true}`, 1)
+	if !ok || len(frames) != 2 {
+		t.Fatalf("frames %d ok=%v", len(frames), ok)
+	}
+	body := nested(t, execMessage(t, frames[1]), 47)
+	reps := fieldBytes(body, 2)
+	if len(reps) != 1 {
+		t.Fatalf("replacements %d", len(reps))
+	}
+	rep, err := parseFields(reps[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := fieldString(rep, 1); got != "x" {
+		t.Fatalf("old %q", got)
+	}
+	if got, _ := fieldString(rep, 2); got != "y" {
+		t.Fatalf("new %q", got)
+	}
+	for _, f := range rep {
+		if f.num != 1 && f.num != 2 {
+			t.Fatalf("replacement grew field %d", f.num)
+		}
+	}
+}
+
 func partialArgsText(t *testing.T, frame []byte) string {
 	t.Helper()
 	top, err := parseFields(connectPayloadsMust(t, frame))
@@ -171,6 +293,50 @@ func nested(t *testing.T, msg []field, n int) []field {
 		t.Fatal(err)
 	}
 	return body
+}
+
+func partialTool(t *testing.T, frame []byte) []field {
+	t.Helper()
+	top, err := parseFields(connectPayloadsMust(t, frame))
+	if err != nil {
+		t.Fatal(err)
+	}
+	upd, err := parseFields(fieldBytes(top, 1)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, err := parseFields(fieldBytes(upd, 7)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := parseFields(fieldBytes(part, 2)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tool
+}
+
+// piArgsOf is the args message inside a Pi tool card. The card wraps
+// that message in field 1.
+func piArgsOf(t *testing.T, tool []field, card int) []field {
+	t.Helper()
+	arms := fieldBytes(tool, card)
+	if len(arms) != 1 {
+		t.Fatalf("card %d count %d", card, len(arms))
+	}
+	wrap, err := parseFields(arms[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := fieldBytes(wrap, 1)
+	if len(inner) != 1 {
+		t.Fatalf("args count %d", len(inner))
+	}
+	args, err := parseFields(inner[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return args
 }
 
 func startedTool(t *testing.T, frame []byte) []field {
