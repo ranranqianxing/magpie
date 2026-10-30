@@ -214,15 +214,19 @@ func chatPieces(line string) (chatPiece, bool) {
 // and lost the strings Cursor validates.
 func parseToolDelta(raw json.RawMessage, fallback int) (toolDelta, bool) {
 	var call struct {
-		Index     json.RawMessage `json:"index"`
-		ID        string          `json:"id"`
-		Name      string          `json:"name"`
-		Arguments json.RawMessage `json:"arguments"`
-		Input     json.RawMessage `json:"input"`
-		Function  struct {
-			Name      string          `json:"name"`
-			Arguments json.RawMessage `json:"arguments"`
-			Input     json.RawMessage `json:"input"`
+		Index      json.RawMessage `json:"index"`
+		ID         string          `json:"id"`
+		Name       string          `json:"name"`
+		Arguments  json.RawMessage `json:"arguments"`
+		Args       json.RawMessage `json:"args"`
+		Parameters json.RawMessage `json:"parameters"`
+		Input      json.RawMessage `json:"input"`
+		Function   struct {
+			Name       string          `json:"name"`
+			Arguments  json.RawMessage `json:"arguments"`
+			Args       json.RawMessage `json:"args"`
+			Parameters json.RawMessage `json:"parameters"`
+			Input      json.RawMessage `json:"input"`
 		} `json:"function"`
 	}
 	if json.Unmarshal(raw, &call) != nil {
@@ -236,7 +240,13 @@ func parseToolDelta(raw json.RawMessage, fallback int) (toolDelta, bool) {
 	if name == "" {
 		name = call.Name
 	}
-	args := firstArgText(call.Function.Arguments, call.Arguments, call.Function.Input, call.Input)
+	// arguments "{}" is a placeholder. A sibling parameters, args, or
+	// input object is the call. The first non-placeholder wins, so a
+	// real arguments string is not replaced by a later field.
+	args := firstArgText(
+		call.Function.Arguments, call.Function.Parameters, call.Function.Args, call.Function.Input,
+		call.Arguments, call.Parameters, call.Args, call.Input,
+	)
 	if name == "" && call.ID == "" && args == "" {
 		return toolDelta{}, false
 	}

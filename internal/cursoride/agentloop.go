@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -188,6 +189,7 @@ func drainFollowups(ch <-chan []byte) {
 // with tool calls, it emits composer tool frames and returns those calls.
 // done is true when the model finished without further tools.
 func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]byte), execN *uint32) (sealed []toolBuf, done bool, err error) {
+	noteRequestToolArgs(chat.Messages)
 	body, err := chat.JSON()
 	if err != nil {
 		return nil, false, errf("chat")
@@ -233,13 +235,28 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 	})
 	sealed = asm.seal()
 	// A native call whose arguments stayed "{}" often has the real
-	// parameters in the same reply, as DSML or a <tool_call> block.
-	// The Pi exec and the next gateway turn both read what is sealed.
-	fillEmptyToolArgs(sealed, said.String())
-	if len(sealed) == 0 {
+	// parameters in the same reply. The gateway leaves that text in
+	// place once a native call exists, so the fill reads it here. The
+	// Pi exec and the next gateway turn both use what is sealed.
+	text := said.String()
+	fillEmptyToolArgs(sealed, text)
+	markers := markupMarkers(text)
+	var run []toolBuf
+	for _, t := range sealed {
+		ready := piCallReady(t.name, t.args)
+		state := "skip"
+		if ready {
+			state = "run"
+			run = append(run, t)
+		} else if s := strings.TrimSpace(t.args); s != "" && !json.Valid([]byte(s)) {
+			write(agentTextFrame("cursor ide: tool arguments are not json"))
+		}
+		noteToolTrace("seal", t.name, t.args, t.frags, t.placeholders, t.fill, markers, state)
+	}
+	if len(run) == 0 {
 		return nil, true, nil
 	}
-	for _, t := range sealed {
+	for _, t := range run {
 		*execN++
 		frames, ok := agentToolFrames(t.id, t.name, t.args, *execN)
 		if !ok {
@@ -250,6 +267,36 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 			write(frame)
 		}
 	}
-	// Any sealed call needs follow-up frames (or ends one-shot when none arrive).
-	return sealed, false, nil
+	// Any run call needs follow-up frames (or ends one-shot when none arrive).
+	return run, false, nil
+}
+
+// noteRequestToolArgs records whether this gateway body is about to send
+// assistant tool calls whose arguments are still {}. One summary line
+// always, plus one line per empty call. Argument values are not logged.
+func noteRequestToolArgs(msgs []ChatMessage) {
+	var total, empty, logged int
+	for _, m := range msgs {
+		if m.Role != "assistant" {
+			continue
+		}
+		for _, c := range m.ToolCalls {
+			total++
+			if !callArgsEmpty(c.Arguments) {
+				continue
+			}
+			empty++
+			// A long replay of empty calls would otherwise fill the
+			// diagnostic file before this round's seal line. The summary
+			// still counts every one.
+			if logged < 4 {
+				noteToolTrace("request", c.Name, c.Arguments, 0, 0, "", "-", "na")
+				logged++
+			}
+		}
+	}
+	if total == 0 {
+		return
+	}
+	Note(fmt.Sprintf("agent tool trace where=request calls=%d empty=%d", total, empty))
 }

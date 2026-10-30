@@ -27,10 +27,16 @@ type toolDelta struct {
 
 // toolBuf accumulates one call. emitted is how much of Args was already
 // handed to Cursor as a delta, so a later frame sends only the new tail.
+// frags counts argument chunks. placeholders counts chunks that were {}.
+// fill is the markup source that replaced an empty object, or empty when
+// the stream's own JSON was kept.
 type toolBuf struct {
 	id, name, args string
 	emitted        int
 	closed         bool
+	frags          int
+	placeholders   int
+	fill           string
 }
 
 func (t *toolBuf) take() string {
@@ -54,6 +60,10 @@ func (t *toolBuf) take() string {
 func (t *toolBuf) appendArgs(s string) {
 	if strings.TrimSpace(s) == "" {
 		return
+	}
+	t.frags++
+	if emptyJSONObject(s) {
+		t.placeholders++
 	}
 	if t.args != "" && strings.HasPrefix(s, t.args) {
 		t.args = s
@@ -669,6 +679,57 @@ func argI32(obj map[string]any, keys ...string) (uint32, bool) {
 func argsReady(s string) bool {
 	s = strings.TrimSpace(s)
 	return strings.HasPrefix(s, "{") && json.Valid([]byte(s))
+}
+
+// piCallReady reports whether a sealed call has the strings the Pi exec
+// validates. A composer tool with none of them is not run: Cursor would
+// show Read {} and loop. LS may omit path. A tool this package does not
+// canon (an MCP tool) keeps a JSON object, including {}.
+func piCallReady(name, args string) bool {
+	args = strings.TrimSpace(args)
+	if !json.Valid([]byte(args)) {
+		return false
+	}
+	var obj map[string]any
+	if json.Unmarshal([]byte(args), &obj) != nil {
+		return false
+	}
+	switch canonTool(name) {
+	case "":
+		return true
+	case "ls":
+		return true
+	case "shell":
+		return argNonBlank(obj, "command", "cmd")
+	case "read", "delete":
+		return argNonBlank(obj, "path", "file_path", "target_file")
+	case "grep":
+		return argNonBlank(obj, "pattern", "query")
+	case "glob":
+		return argNonBlank(obj, "pattern", "glob_pattern", "glob", "query")
+	case "write":
+		if !argNonBlank(obj, "path", "file_path") {
+			return false
+		}
+		_, ok := argPresent(obj, "content", "contents", "file_text", "stream_content")
+		return ok
+	case "edit":
+		if editAsWrite(obj) {
+			return piCallReady("Write", args)
+		}
+		if !argNonBlank(obj, "path", "file_path") || !argNonBlank(obj, "old_string", "oldText", "old_str") {
+			return false
+		}
+		_, ok := argPresent(obj, "new_string", "newText", "new_str", "stream_content")
+		return ok
+	default:
+		return true
+	}
+}
+
+func argNonBlank(obj map[string]any, keys ...string) bool {
+	s, ok := argPresent(obj, keys...)
+	return ok && strings.TrimSpace(s) != ""
 }
 
 // displayArgs rewrites a finished arguments object onto the names the Pi

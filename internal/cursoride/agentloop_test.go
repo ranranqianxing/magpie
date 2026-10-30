@@ -97,6 +97,114 @@ func TestAgentGatewayRoundFillsEmptyCallFromDSML(t *testing.T) {
 	}
 }
 
+func TestAgentGatewayRoundFillsEmptyCallFromParameterTags(t *testing.T) {
+	// #917: DeepSeek writes {"name":"Read"> and <parameter name="path">,
+	// and the relay also emits a native tool_call whose arguments are {}.
+	// The gateway leaves the tags in the text once that native call exists.
+	const path = "/tmp/magpie-p0-verify/README.md"
+	text := "I'll read it.\n<tool_call>{\"name\":\"Read\">\n<parameter name=\"path\">" + path + "</parameter>"
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"choices":[{"delta":{"content":`+jsonQuote(text)+`}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_r","function":{"name":"Read","arguments":"{}"}}]}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer gw.Close()
+	p := &Proxy{
+		CADir:   t.TempDir(),
+		Gateway: func() (string, string) { return gw.URL, "tok" },
+		client:  http.DefaultClient,
+	}
+	var frames [][]byte
+	sealed, done, err := p.agentGatewayRound(context.Background(), Chat{
+		Model: "deepseek/deepseek-v4.1-flash", Messages: []ChatMessage{{Role: "user", Content: "read it"}},
+	}, func(b []byte) { frames = append(frames, append([]byte(nil), b...)) }, new(uint32))
+	if err != nil || done || len(sealed) != 1 || sealed[0].name != "Read" {
+		t.Fatalf("sealed=%+v done=%v err=%v", sealed, done, err)
+	}
+	var got map[string]string
+	if json.Unmarshal([]byte(sealed[0].args), &got) != nil || got["path"] != path {
+		t.Fatalf("args %s", sealed[0].args)
+	}
+	var saw bool
+	for _, frame := range frames {
+		msg, ok := readExec(frame)
+		if !ok {
+			continue
+		}
+		reads := fieldBytes(msg, 45)
+		if len(reads) != 1 {
+			continue
+		}
+		body, err := parseFields(reads[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if field, _ := fieldString(body, 1); field == path {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatal("Pi read exec had no path")
+	}
+	var line string
+	for _, one := range strings.Split(Recent(), "\n") {
+		if strings.Contains(one, "where=seal name=Read") && strings.Contains(one, "fill=parameter") {
+			line = one
+		}
+	}
+	if line == "" || strings.Contains(line, path) || !strings.Contains(line, "empty=false keys=path") || !strings.Contains(line, "exec=run") {
+		t.Fatalf("trace %q", line)
+	}
+}
+
+func TestAgentGatewayRoundDoesNotExecEmptyRead(t *testing.T) {
+	const path = "/tmp/magpie-p0-verify/README.md"
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"choices":[{"delta":{"content":`+jsonQuote("I'll read "+path)+`}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_r","function":{"name":"Read","arguments":"{}"}}]}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer gw.Close()
+	p := &Proxy{
+		CADir:   t.TempDir(),
+		Gateway: func() (string, string) { return gw.URL, "tok" },
+		client:  http.DefaultClient,
+	}
+	var frames [][]byte
+	sealed, done, err := p.agentGatewayRound(context.Background(), Chat{
+		Model: "deepseek/deepseek-v4.1-flash",
+		Messages: []ChatMessage{
+			{Role: "user", Content: "read it"},
+			{Role: "assistant", ToolCalls: []ToolCall{{ID: "old", Name: "Read", Arguments: `{"path":"` + path + `"}`}}},
+			{Role: "tool", ToolCallID: "old", Content: "package a"},
+		},
+	}, func(b []byte) { frames = append(frames, append([]byte(nil), b...)) }, new(uint32))
+	if err != nil || !done || len(sealed) != 0 {
+		t.Fatalf("sealed=%+v done=%v err=%v", sealed, done, err)
+	}
+	for _, frame := range frames {
+		if _, ok := readExec(frame); ok {
+			t.Fatal("empty Read was executed")
+		}
+	}
+	var line string
+	for _, one := range strings.Split(Recent(), "\n") {
+		if strings.Contains(one, "where=seal name=Read") && strings.Contains(one, "exec=skip") {
+			line = one
+		}
+	}
+	if line == "" || strings.Contains(line, path) || !strings.Contains(line, "empty=true") || !strings.Contains(line, "markers=none") {
+		t.Fatalf("trace %q", line)
+	}
+	if !strings.Contains(Recent(), "where=request calls=1 empty=0") || strings.Contains(Recent(), path) {
+		t.Fatalf("request trace leaked or was missing:\n%s", Recent())
+	}
+}
+
 func readExec(frame []byte) ([]field, bool) {
 	payloads, framed := connectPayloads(frame)
 	if !framed || len(payloads) != 1 {

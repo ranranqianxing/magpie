@@ -82,6 +82,34 @@ func TestReplayConversationResolvesPrefetchedBlobs(t *testing.T) {
 	}
 }
 
+func TestReplayToolCallUsesInputWhenArgsAreEmpty(t *testing.T) {
+	input := []byte(`{"role":"assistant","content":[{"type":"tool-call","toolCallId":"c1","toolName":"Read","input":{"path":"a.go"}}]}`)
+	msgs, err := messagesFromJSON(input)
+	if err != nil || len(msgs) != 1 || len(msgs[0].ToolCalls) != 1 || msgs[0].ToolCalls[0].Arguments != `{"path":"a.go"}` {
+		t.Fatalf("%v %+v", err, msgs)
+	}
+	both := []byte(`{"role":"assistant","content":[{"type":"tool-call","toolCallId":"c2","toolName":"Read","args":{},"input":{"path":"b.go"}}]}`)
+	msgs, err = messagesFromJSON(both)
+	if err != nil || len(msgs) != 1 || msgs[0].ToolCalls[0].Arguments != `{"path":"b.go"}` {
+		t.Fatalf("args {} hid input: %v %+v", err, msgs)
+	}
+	const secret = "sk-live-history-value"
+	empty := []byte(`{"role":"assistant","content":[{"type":"tool-call","toolCallId":"c3","toolName":"Read","note":"` + secret + `"}]}`)
+	msgs, err = messagesFromJSON(empty)
+	if err != nil || len(msgs) != 1 || msgs[0].ToolCalls[0].Arguments != "{}" {
+		t.Fatalf("empty part: %v %+v", err, msgs)
+	}
+	var line string
+	for _, one := range strings.Split(Recent(), "\n") {
+		if strings.Contains(one, "agent history tool name=Read empty=true") && strings.Contains(one, "keys=") {
+			line = one
+		}
+	}
+	if line == "" || strings.Contains(line, secret) || !strings.Contains(line, "from=none keys=note,toolCallId,toolName,type") {
+		t.Fatalf("history trace %q", line)
+	}
+}
+
 func TestReplayConversationRefusesATruncatedMessage(t *testing.T) {
 	// Field 1 claims five bytes and then the buffer ends.
 	_, _, err := replayConversation([]byte{0x0a, 0x05, 0x01}, nil)
