@@ -56,6 +56,16 @@ func (t *toolBuf) appendArgs(s string) {
 		}
 		return
 	}
+	// The arguments are already one JSON object. A later longer object
+	// replaces it ({} then the real call). Anything else, including a
+	// resend of the opening bytes, would glue on and fail json.Valid.
+	if argsReady(t.args) {
+		if argsReady(s) && len(s) > len(t.args) {
+			t.args = s
+			t.emitted = len(t.args)
+		}
+		return
+	}
 	t.args += s
 }
 
@@ -318,8 +328,9 @@ func agentPartialFrame(id, name, args string) []byte {
 	part.str(1, id)
 	// An unfinished fragment has no string fields yet. Attaching an empty
 	// tool body makes Cursor validate those strings as undefined and run
-	// the tool again. The card is attached once the JSON is an object.
-	if argsReady(text) {
+	// the tool again. The card waits until the JSON is an object and the
+	// call has a name: a nameless body is the MCP arm.
+	if argsReady(text) && strings.TrimSpace(name) != "" {
 		if call := agentToolCall(id, name, text, true); len(call) > 0 {
 			part.msg(2, call)
 		}
@@ -369,7 +380,8 @@ func agentToolCall(id, name, args string, full bool) []byte {
 }
 
 // toolBody is the ToolCall oneof arm. full is set once arguments are a
-// JSON object; a partial frame still names the tool so the card can open.
+// JSON object. A partial frame calls this only then, so the card opens
+// with the strings Cursor validates.
 func toolBody(id, name, args string, full bool) (int, []byte) {
 	obj := map[string]any{}
 	if full {

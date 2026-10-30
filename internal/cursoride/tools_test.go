@@ -194,6 +194,85 @@ func startedTool(t *testing.T, frame []byte) []field {
 	return tool
 }
 
+func TestPartialWithoutANameDoesNotOpenAToolCard(t *testing.T) {
+	var asm toolAssembler
+	line := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"notes.txt\"}"}}]}}]}`
+	p, ok := chatPieces(line)
+	if !ok || len(p.tools) != 1 {
+		t.Fatalf("%+v", p)
+	}
+	frame := agentPartialFromDelta(&asm, p.tools[0])
+	top, err := parseFields(connectPayloadsMust(t, frame))
+	if err != nil {
+		t.Fatal(err)
+	}
+	upd, err := parseFields(fieldBytes(top, 1)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, err := parseFields(fieldBytes(upd, 7)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fieldBytes(part, 2)) != 0 {
+		t.Fatal("unnamed partial opened a tool card")
+	}
+	if got, _ := fieldString(part, 3); got != `{"path":"notes.txt"}` {
+		t.Fatalf("args %q", got)
+	}
+}
+
+func TestNonIntegerToolIndexIsNotMerged(t *testing.T) {
+	line := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"Read","arguments":"{\"path\":\"a\"}"}},{"index":1.5,"function":{"name":"Read","arguments":"{\"path\":\"b\"}"}}]}}]}`
+	p, ok := chatPieces(line)
+	if !ok || len(p.tools) != 1 || p.tools[0].Args != `{"path":"a"}` {
+		t.Fatalf("%+v ok=%v", p, ok)
+	}
+}
+
+func TestEmptyArgumentsDoNotHideInput(t *testing.T) {
+	line := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"Read","arguments":"","input":{"path":"notes.txt"}}}]}}]}`
+	p, ok := chatPieces(line)
+	if !ok || len(p.tools) != 1 || p.tools[0].Args != `{"path":"notes.txt"}` {
+		t.Fatalf("%+v ok=%v", p, ok)
+	}
+}
+
+func TestFinishedArgsIgnoreALaterShorterCopy(t *testing.T) {
+	var asm toolAssembler
+	for _, args := range []string{`{"path":"notes.txt"}`, `{"path":`, `{}`} {
+		p, ok := chatPieces(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"Read","arguments":` + jsonQuote(args) + `}}]}}]}`)
+		if !ok || len(p.tools) != 1 {
+			t.Fatalf("%s %+v", args, p)
+		}
+		agentPartialFromDelta(&asm, p.tools[0])
+	}
+	sealed := asm.seal()
+	if len(sealed) != 1 || sealed[0].args != `{"path":"notes.txt"}` {
+		t.Fatalf("%+v", sealed)
+	}
+}
+
+func TestEmptyObjectIsReplacedByTheRealArguments(t *testing.T) {
+	var asm toolAssembler
+	for _, args := range []string{`{}`, `{"path":"notes.txt"}`} {
+		p, ok := chatPieces(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"Read","arguments":` + jsonQuote(args) + `}}]}}]}`)
+		if !ok || len(p.tools) != 1 {
+			t.Fatalf("%s %+v", args, p)
+		}
+		agentPartialFromDelta(&asm, p.tools[0])
+	}
+	sealed := asm.seal()
+	if len(sealed) != 1 || sealed[0].args != `{"path":"notes.txt"}` {
+		t.Fatalf("%+v", sealed)
+	}
+}
+
+func jsonQuote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
 func TestCumulativeArgSnapshotDoesNotDouble(t *testing.T) {
 	var asm toolAssembler
 	for _, line := range []string{

@@ -3,6 +3,7 @@ package cursoride
 import (
 	"encoding/binary"
 	"encoding/json"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -227,9 +228,9 @@ func parseToolDelta(raw json.RawMessage, fallback int) (toolDelta, bool) {
 	if json.Unmarshal(raw, &call) != nil {
 		return toolDelta{}, false
 	}
-	idx := fallback
-	if n, ok := rawIndex(call.Index); ok {
-		idx = n
+	idx, ok := indexOf(call.Index, fallback)
+	if !ok {
+		return toolDelta{}, false
 	}
 	name := call.Function.Name
 	if name == "" {
@@ -242,23 +243,26 @@ func parseToolDelta(raw json.RawMessage, fallback int) (toolDelta, bool) {
 	return toolDelta{Index: idx, ID: call.ID, Name: name, Args: args}, true
 }
 
-func rawIndex(raw json.RawMessage) (int, bool) {
+// indexOf reports the tool-call index. A missing index uses fallback.
+// A present index that is not a non-negative integer is rejected: 1.5
+// must not be truncated onto another call.
+func indexOf(raw json.RawMessage, fallback int) (int, bool) {
 	s := strings.TrimSpace(string(raw))
 	if s == "" || s == "null" {
-		return 0, false
+		return fallback, true
 	}
 	var n int
-	if json.Unmarshal(raw, &n) == nil {
+	if json.Unmarshal(raw, &n) == nil && n >= 0 {
 		return n, true
 	}
 	var f float64
-	if json.Unmarshal(raw, &f) == nil {
+	if json.Unmarshal(raw, &f) == nil && f >= 0 && f <= math.MaxInt32 && f == math.Trunc(f) {
 		return int(f), true
 	}
 	var text string
 	if json.Unmarshal(raw, &text) == nil {
 		n, err := strconv.Atoi(strings.TrimSpace(text))
-		if err == nil {
+		if err == nil && n >= 0 {
 			return n, true
 		}
 	}
@@ -267,9 +271,11 @@ func rawIndex(raw json.RawMessage) (int, bool) {
 
 func firstArgText(raws ...json.RawMessage) string {
 	for _, raw := range raws {
-		if text, ok := argText(raw); ok {
-			return text
+		text, ok := argText(raw)
+		if !ok || text == "" {
+			continue
 		}
+		return text
 	}
 	return ""
 }
