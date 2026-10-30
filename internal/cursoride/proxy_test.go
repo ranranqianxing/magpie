@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -806,6 +807,54 @@ func TestProxyInferenceEmitsToolCall(t *testing.T) {
 	b := stream.Bytes()
 	if !bytes.Contains(b, []byte("call_9")) || !bytes.Contains(b, []byte("Read")) || !bytes.Contains(b, []byte("a.go")) {
 		t.Fatalf("stream = %q", b)
+	}
+}
+
+func TestProxyAgentRunLoopsWhenToolResultsAreBuffered(t *testing.T) {
+	const conv = "77777777-7777-4777-8777-777777777777"
+	var mu sync.Mutex
+	var bodies [][]byte
+	gw := localHTTP(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, b)
+		n := len(bodies)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		if n == 1 {
+			io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"Shell","arguments":"{\"command\":\"ls\"}"}}]}}]}`+"\n\n")
+			io.WriteString(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+			io.WriteString(w, "data: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, `data: {"choices":[{"delta":{"content":"listed"}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	})
+	dir := t.TempDir()
+	p := &Proxy{
+		Addr: "127.0.0.1:0", CADir: dir,
+		Upstream: localHTTP(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }).URL,
+		Gateway:  func() (string, string) { return gw.URL, "tok" },
+		Models:   func() []Model { return agentCatalog() },
+	}
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	client := cursorClient(t, strings.TrimPrefix(addr, "http://"), dir, "api2.cursor.sh")
+	run := frameOf(agentClient(agentRunMessage("codex/gpt-5.6-luna", conv, "go", nil)))
+	tool := frameOf(agentToolResultClient("call_1", "listed"))
+	body := append(append([]byte(nil), run...), tool...)
+	out := postCursor(t, client, PathAgentRun, body)
+	if !agentExecRan(out, "ls") || !bytes.Contains(out, []byte("listed")) {
+		t.Fatalf("stream %q", out)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("gateway rounds %d", len(bodies))
 	}
 }
 
