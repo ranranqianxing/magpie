@@ -717,7 +717,7 @@ func agentExecRan(body []byte, cmd string) bool {
 		if err != nil {
 			continue
 		}
-		shells := fieldBytes(msg, 2)
+		shells := fieldBytes(msg, 46)
 		if len(shells) == 0 {
 			continue
 		}

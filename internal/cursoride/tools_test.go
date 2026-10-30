@@ -6,6 +6,303 @@ import (
 	"testing"
 )
 
+func TestStreamedArgsFillPiExecDespiteNullContent(t *testing.T) {
+	// DeepSeek and OpenAI streams put content:null beside tool_calls, send
+	// index as 0.0, and split arguments into JSON fragments. Dropping any
+	// of those chunks seals a call whose string fields Cursor rejects as
+	// undefined.
+	lines := []string{
+		`data: {"choices":[{"delta":{"content":null,"tool_calls":[{"index":0,"id":"call_r","type":"function","function":{"name":"Read","arguments":""}}]}}]}`,
+		`data: {"choices":[{"delta":{"content":null,"tool_calls":[{"index":0.0,"function":{"arguments":"{\"path\":"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"notes.txt\"}"}}]}}]}`,
+	}
+	var asm toolAssembler
+	var partials []string
+	for _, line := range lines {
+		p, ok := chatPieces(line)
+		if !ok {
+			t.Fatalf("dropped %s", line)
+		}
+		for _, d := range p.tools {
+			if frame := agentPartialFromDelta(&asm, d); frame != nil {
+				partials = append(partials, partialArgsText(t, frame))
+			}
+		}
+	}
+	if len(partials) < 2 || partials[0] != `{"path":` || partials[len(partials)-1] != `{"path":"notes.txt"}` {
+		t.Fatalf("partials %q", partials)
+	}
+	sealed := asm.seal()
+	if len(sealed) != 1 || sealed[0].name != "Read" || sealed[0].args != `{"path":"notes.txt"}` {
+		t.Fatalf("sealed %+v", sealed)
+	}
+	frames, ok := agentToolFrames(sealed[0].id, sealed[0].name, sealed[0].args, 3)
+	if !ok || len(frames) != 2 {
+		t.Fatalf("frames %d ok=%v", len(frames), ok)
+	}
+	exec := execMessage(t, frames[1])
+	if len(fieldBytes(exec, 7)) != 0 || len(fieldBytes(exec, 45)) != 1 {
+		t.Fatalf("read exec fields legacy=%d pi=%d", len(fieldBytes(exec, 7)), len(fieldBytes(exec, 45)))
+	}
+	body := nested(t, exec, 45)
+	if got, _ := fieldString(body, 1); got != "notes.txt" {
+		t.Fatalf("path %q", got)
+	}
+	if _, ok := fieldString(body, 2); ok {
+		t.Fatal("tool id landed in PiRead offset")
+	}
+}
+
+func TestObjectArgumentsAreNotDropped(t *testing.T) {
+	line := `data: {"choices":[{"delta":{"content":null,"tool_calls":[{"index":0,"id":"call_w","function":{"name":"Write","arguments":{"path":"notes.txt","file_text":"hello"}}}]}}]}`
+	p, ok := chatPieces(line)
+	if !ok || len(p.tools) != 1 || p.tools[0].Name != "Write" || p.tools[0].Args != `{"path":"notes.txt","file_text":"hello"}` {
+		t.Fatalf("%+v ok=%v", p, ok)
+	}
+	frames, ok := agentToolFrames("call_w", "Write", p.tools[0].Args, 1)
+	if !ok || len(frames) != 2 {
+		t.Fatalf("frames %d ok=%v", len(frames), ok)
+	}
+	exec := execMessage(t, frames[1])
+	if len(fieldBytes(exec, 3)) != 0 || len(fieldBytes(exec, 48)) != 1 {
+		t.Fatalf("write exec legacy=%d pi=%d", len(fieldBytes(exec, 3)), len(fieldBytes(exec, 48)))
+	}
+	body := nested(t, exec, 48)
+	if got, _ := fieldString(body, 1); got != "notes.txt" {
+		t.Fatalf("path %q", got)
+	}
+	if got, _ := fieldString(body, 2); got != "hello" {
+		t.Fatalf("content %q", got)
+	}
+	if got := partialArgsText(t, agentPartialFrame("call_w", "Write", p.tools[0].Args)); got != `{"content":"hello","path":"notes.txt"}` {
+		t.Fatalf("partial %s", got)
+	}
+}
+
+func TestComposerToolsCarryStringArgsOnPiArms(t *testing.T) {
+	cases := []struct {
+		name, args string
+		card, exec int
+		fields     map[int]string
+	}{
+		{"Shell", `{"command":"pwd"}`, 62, 46, map[int]string{1: "pwd"}},
+		{"Read", `{"path":"notes.txt"}`, 61, 45, map[int]string{1: "notes.txt"}},
+		{"Grep", `{"pattern":"foo","path":"src"}`, 65, 49, map[int]string{1: "foo", 2: "src"}},
+		{"Glob", `{"glob_pattern":"*.go","target_directory":"src"}`, 66, 50, map[int]string{1: "*.go", 2: "src"}},
+		{"Write", `{"path":"notes.txt","content":"hello"}`, 64, 48, map[int]string{1: "notes.txt", 2: "hello"}},
+		{"Edit", `{"path":"a.go","old_string":"x","new_string":"y"}`, 63, 47, map[int]string{1: "a.go"}},
+		{"LS", `{"path":"src"}`, 67, 51, map[int]string{1: "src"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			frames, ok := agentToolFrames("call_"+tc.name, tc.name, tc.args, 2)
+			if !ok || len(frames) != 2 {
+				t.Fatalf("frames %d ok=%v", len(frames), ok)
+			}
+			tool := startedTool(t, frames[0])
+			if len(fieldBytes(tool, tc.card)) != 1 {
+				t.Fatalf("card %d missing", tc.card)
+			}
+			exec := execMessage(t, frames[1])
+			if len(fieldBytes(exec, tc.exec)) != 1 {
+				t.Fatalf("exec %d missing", tc.exec)
+			}
+			body := nested(t, exec, tc.exec)
+			if tc.name == "Edit" {
+				reps := fieldBytes(body, 2)
+				if len(reps) != 1 {
+					t.Fatalf("replacements %d", len(reps))
+				}
+				rep, err := parseFields(reps[0])
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, _ := fieldString(rep, 1); got != "x" {
+					t.Fatalf("old %q", got)
+				}
+				if got, _ := fieldString(rep, 2); got != "y" {
+					t.Fatalf("new %q", got)
+				}
+			}
+			for n, want := range tc.fields {
+				if got, _ := fieldString(body, n); got != want {
+					t.Fatalf("field %d = %q, want %q", n, got, want)
+				}
+			}
+		})
+	}
+}
+
+func partialArgsText(t *testing.T, frame []byte) string {
+	t.Helper()
+	top, err := parseFields(connectPayloadsMust(t, frame))
+	if err != nil {
+		t.Fatal(err)
+	}
+	upd, err := parseFields(fieldBytes(top, 1)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, err := parseFields(fieldBytes(upd, 7)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := fieldString(part, 3)
+	return got
+}
+
+func execMessage(t *testing.T, frame []byte) []field {
+	t.Helper()
+	top, err := parseFields(connectPayloadsMust(t, frame))
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := parseFields(fieldBytes(top, 2)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return msg
+}
+
+func nested(t *testing.T, msg []field, n int) []field {
+	t.Helper()
+	body, err := parseFields(fieldBytes(msg, n)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func startedTool(t *testing.T, frame []byte) []field {
+	t.Helper()
+	top, err := parseFields(connectPayloadsMust(t, frame))
+	if err != nil {
+		t.Fatal(err)
+	}
+	upd, err := parseFields(fieldBytes(top, 1)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err := parseFields(fieldBytes(upd, 2)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := parseFields(fieldBytes(call, 2)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tool
+}
+
+func TestPartialWithoutANameDoesNotOpenAToolCard(t *testing.T) {
+	var asm toolAssembler
+	line := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"notes.txt\"}"}}]}}]}`
+	p, ok := chatPieces(line)
+	if !ok || len(p.tools) != 1 {
+		t.Fatalf("%+v", p)
+	}
+	frame := agentPartialFromDelta(&asm, p.tools[0])
+	top, err := parseFields(connectPayloadsMust(t, frame))
+	if err != nil {
+		t.Fatal(err)
+	}
+	upd, err := parseFields(fieldBytes(top, 1)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, err := parseFields(fieldBytes(upd, 7)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fieldBytes(part, 2)) != 0 {
+		t.Fatal("unnamed partial opened a tool card")
+	}
+	if got, _ := fieldString(part, 3); got != `{"path":"notes.txt"}` {
+		t.Fatalf("args %q", got)
+	}
+}
+
+func TestNonIntegerToolIndexIsNotMerged(t *testing.T) {
+	line := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"Read","arguments":"{\"path\":\"a\"}"}},{"index":1.5,"function":{"name":"Read","arguments":"{\"path\":\"b\"}"}}]}}]}`
+	p, ok := chatPieces(line)
+	if !ok || len(p.tools) != 1 || p.tools[0].Args != `{"path":"a"}` {
+		t.Fatalf("%+v ok=%v", p, ok)
+	}
+}
+
+func TestEmptyArgumentsDoNotHideInput(t *testing.T) {
+	line := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"Read","arguments":"","input":{"path":"notes.txt"}}}]}}]}`
+	p, ok := chatPieces(line)
+	if !ok || len(p.tools) != 1 || p.tools[0].Args != `{"path":"notes.txt"}` {
+		t.Fatalf("%+v ok=%v", p, ok)
+	}
+}
+
+func TestFinishedArgsIgnoreALaterShorterCopy(t *testing.T) {
+	var asm toolAssembler
+	for _, args := range []string{`{"path":"notes.txt"}`, `{"path":`, `{}`} {
+		p, ok := chatPieces(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"Read","arguments":` + jsonQuote(args) + `}}]}}]}`)
+		if !ok || len(p.tools) != 1 {
+			t.Fatalf("%s %+v", args, p)
+		}
+		agentPartialFromDelta(&asm, p.tools[0])
+	}
+	sealed := asm.seal()
+	if len(sealed) != 1 || sealed[0].args != `{"path":"notes.txt"}` {
+		t.Fatalf("%+v", sealed)
+	}
+}
+
+func TestEmptyObjectIsReplacedByTheRealArguments(t *testing.T) {
+	var asm toolAssembler
+	for _, args := range []string{`{}`, `{"path":"notes.txt"}`} {
+		p, ok := chatPieces(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"Read","arguments":` + jsonQuote(args) + `}}]}}]}`)
+		if !ok || len(p.tools) != 1 {
+			t.Fatalf("%s %+v", args, p)
+		}
+		agentPartialFromDelta(&asm, p.tools[0])
+	}
+	sealed := asm.seal()
+	if len(sealed) != 1 || sealed[0].args != `{"path":"notes.txt"}` {
+		t.Fatalf("%+v", sealed)
+	}
+}
+
+func jsonQuote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+func TestCumulativeArgSnapshotDoesNotDouble(t *testing.T) {
+	var asm toolAssembler
+	for _, line := range []string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"Read","arguments":"{\"pa"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"notes.txt\"}"}}]}}]}`,
+	} {
+		p, ok := chatPieces(line)
+		if !ok || len(p.tools) != 1 {
+			t.Fatalf("%s %+v", line, p)
+		}
+		agentPartialFromDelta(&asm, p.tools[0])
+	}
+	sealed := asm.seal()
+	if len(sealed) != 1 || sealed[0].args != `{"path":"notes.txt"}` {
+		t.Fatalf("%+v", sealed)
+	}
+}
+
+func TestEmptyWriteContentStaysAString(t *testing.T) {
+	frames, ok := agentToolFrames("c", "Write", `{"path":"notes.txt","content":""}`, 1)
+	if !ok || len(frames) != 2 {
+		t.Fatalf("frames %d ok=%v", len(frames), ok)
+	}
+	body := nested(t, execMessage(t, frames[1]), 48)
+	got, present := fieldString(body, 2)
+	if !present || got != "" {
+		t.Fatalf("content present=%v %q", present, got)
+	}
+}
+
 func TestChatPiecesKeepToolDeltas(t *testing.T) {
 	line := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"Shell","arguments":"{\"command\":"}}]}}]}`
 	p, ok := chatPieces(line)
@@ -69,7 +366,10 @@ func TestInferenceToolFrameAndAgentExecCarryTheCommand(t *testing.T) {
 	if n, ok := fieldUint(msg, 1); !ok || n != 7 {
 		t.Fatalf("exec id %d", n)
 	}
-	shell, err := parseFields(fieldBytes(msg, 2)[0])
+	if len(fieldBytes(msg, 2)) != 0 {
+		t.Fatal("shell exec used the legacy arm")
+	}
+	shell, err := parseFields(fieldBytes(msg, 46)[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +434,10 @@ func TestAgentWriteFramesUseTheWriteArm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writes := fieldBytes(msg, 3)
+	if len(fieldBytes(msg, 3)) != 0 {
+		t.Fatal("write exec used the legacy arm")
+	}
+	writes := fieldBytes(msg, 48)
 	if len(writes) != 1 {
 		t.Fatalf("exec write %d", len(writes))
 	}

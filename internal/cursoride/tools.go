@@ -42,6 +42,33 @@ func (t *toolBuf) take() string {
 	return frag
 }
 
+// appendArgs folds one arguments chunk. A later chunk that already starts
+// with the buffer is the aggregated JSON so far (some streams resend it);
+// anything else is the next fragment.
+func (t *toolBuf) appendArgs(s string) {
+	if s == "" {
+		return
+	}
+	if t.args != "" && strings.HasPrefix(s, t.args) {
+		t.args = s
+		if t.emitted > len(t.args) {
+			t.emitted = len(t.args)
+		}
+		return
+	}
+	// The arguments are already one JSON object. A later longer object
+	// replaces it ({} then the real call). Anything else, including a
+	// resend of the opening bytes, would glue on and fail json.Valid.
+	if argsReady(t.args) {
+		if argsReady(s) && len(s) > len(t.args) {
+			t.args = s
+			t.emitted = len(t.args)
+		}
+		return
+	}
+	t.args += s
+}
+
 // toolAssembler folds streaming tool deltas and closes them once.
 type toolAssembler struct {
 	by    map[int]*toolBuf
@@ -65,12 +92,31 @@ func (a *toolAssembler) add(d toolDelta) (id, name, frag string) {
 		t.name = d.Name
 	}
 	if d.Args != "" {
-		t.args += d.Args
+		t.appendArgs(d.Args)
 	}
 	if t.id == "" {
 		t.id = "call-" + itoa(d.Index+1)
 	}
 	return t.id, t.name, t.take()
+}
+
+// agentPartialFromDelta records one gateway fragment and returns the
+// partial_tool_call frame. The frame's arguments text is the aggregated
+// JSON so far. Cursor reads that field as a snapshot, so a bare fragment
+// leaves the IDE validating whatever tail arrived last.
+func agentPartialFromDelta(asm *toolAssembler, d toolDelta) []byte {
+	if asm == nil {
+		return nil
+	}
+	id, name, frag := asm.add(d)
+	if frag == "" {
+		return nil
+	}
+	full := frag
+	if asm.by != nil && asm.by[d.Index] != nil && asm.by[d.Index].args != "" {
+		full = asm.by[d.Index].args
+	}
+	return agentPartialFrame(id, name, full)
 }
 
 // seal closes every call that is still open and returns each one's full
@@ -118,11 +164,12 @@ func builtinAgentTools() []ToolSpec {
 	return []ToolSpec{
 		{Name: "Shell", Description: "Run a shell command in the workspace.", Parameters: schema(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`)},
 		{Name: "Read", Description: "Read a file.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
-		{Name: "Grep", Description: "Search files for a pattern.", Parameters: schema(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}`)},
+		{Name: "Grep", Description: "Search files for a pattern.", Parameters: schema(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"}},"required":["pattern"]}`)},
 		{Name: "Delete", Description: "Delete a file.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
+		{Name: "Glob", Description: "Find files by a glob pattern.", Parameters: schema(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}`)},
 		{Name: "LS", Description: "List a directory.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"}}}`)},
-		{Name: "Edit", Description: "Replace the contents of a file.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"},"stream_content":{"type":"string"}},"required":["path"]}`)},
-		{Name: "Write", Description: "Write a file.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"},"file_text":{"type":"string"}},"required":["path","file_text"]}`)},
+		{Name: "Edit", Description: "Replace text in a file.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}`)},
+		{Name: "Write", Description: "Write a file.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`)},
 	}
 }
 
@@ -272,14 +319,23 @@ func toolCallFrame(invocation, id, name, args string, complete bool) []byte {
 }
 
 // agentPartialFrame is interaction_update.partial_tool_call. args is the
-// new tail, not the whole arguments string.
+// aggregated arguments JSON so far (PartialToolCallUpdate.args_text_delta),
+// not only the newest fragment. When that JSON is an object, the tool
+// card carries the same strings the exec will.
 func agentPartialFrame(id, name, args string) []byte {
+	text := displayArgs(name, args)
 	var part wbuf
 	part.str(1, id)
-	if call := agentToolCall(id, name, args, false); len(call) > 0 {
-		part.msg(2, call)
+	// An unfinished fragment has no string fields yet. Attaching an empty
+	// tool body makes Cursor validate those strings as undefined and run
+	// the tool again. The card waits until the JSON is an object and the
+	// call has a name: a nameless body is the MCP arm.
+	if argsReady(text) && strings.TrimSpace(name) != "" {
+		if call := agentToolCall(id, name, text, true); len(call) > 0 {
+			part.msg(2, call)
+		}
 	}
-	part.str(3, args)
+	part.str(3, text)
 	part.str(4, id)
 	var upd wbuf
 	upd.msg(7, []byte(part))
@@ -324,70 +380,25 @@ func agentToolCall(id, name, args string, full bool) []byte {
 }
 
 // toolBody is the ToolCall oneof arm. full is set once arguments are a
-// JSON object; a partial frame still names the tool so the card can open.
+// JSON object. A partial frame calls this only then, so the card opens
+// with the strings Cursor validates.
 func toolBody(id, name, args string, full bool) (int, []byte) {
 	obj := map[string]any{}
 	if full {
 		_ = json.Unmarshal([]byte(args), &obj)
 	}
+	if card, _, pi, ok := piFrame(name, obj); ok {
+		var call wbuf
+		call.msg(1, pi)
+		return card, []byte(call)
+	}
 	switch canonTool(name) {
-	case "shell":
-		var shell wbuf
-		shell.str(1, argString(obj, "command", "cmd"))
-		shell.str(4, id)
-		var call wbuf
-		call.msg(1, []byte(shell))
-		return 1, []byte(call)
-	case "read":
-		var read wbuf
-		read.str(1, argString(obj, "path", "file_path", "target_file"))
-		var call wbuf
-		call.msg(1, []byte(read))
-		return 8, []byte(call)
-	case "grep":
-		var grep wbuf
-		grep.str(1, argString(obj, "pattern", "query"))
-		if p := argString(obj, "path"); p != "" {
-			grep.str(2, p)
-		}
-		var call wbuf
-		call.msg(1, []byte(grep))
-		return 5, []byte(call)
 	case "delete":
 		var del wbuf
-		del.str(1, argString(obj, "path", "file_path"))
+		putArg(&del, 1, obj, "path", "file_path")
 		var call wbuf
 		call.msg(1, []byte(del))
 		return 3, []byte(call)
-	case "ls":
-		var ls wbuf
-		ls.str(1, argString(obj, "path", "target_directory"))
-		var call wbuf
-		call.msg(1, []byte(ls))
-		return 13, []byte(call)
-	case "edit":
-		var edit wbuf
-		edit.str(1, argString(obj, "path", "file_path"))
-		if s := argString(obj, "stream_content", "new_string", "file_text", "contents"); s != "" {
-			edit.str(6, s)
-		}
-		var call wbuf
-		call.msg(1, []byte(edit))
-		return 12, []byte(call)
-	case "write":
-		// PiWriteToolCall is ToolCall oneof field 64. That oneof is the
-		// same list as the arms above (shell 1, delete 3, grep 5, read 8,
-		// edit 12, ls 13, mcp 15) and it has no WriteToolCall slot.
-		// Field 1 is the args: path = 1, content = 2. content is the same
-		// string the exec writes as WriteArgs.file_text.
-		var args wbuf
-		args.str(1, argString(obj, "path", "file_path"))
-		if s := argString(obj, "file_text", "contents", "content", "stream_content"); s != "" {
-			args.str(2, s)
-		}
-		var call wbuf
-		call.msg(1, []byte(args))
-		return 64, []byte(call)
 	default:
 		var mcp wbuf
 		mcp.str(1, name)
@@ -416,47 +427,16 @@ func agentExec(id, name, args string, n uint32) []byte {
 	var exec wbuf
 	exec.u32(1, n)
 	exec.str(15, id)
+	if _, field, pi, ok := piFrame(name, obj); ok {
+		exec.msg(field, pi)
+		return []byte(exec)
+	}
 	switch canonTool(name) {
-	case "shell":
-		var shell wbuf
-		shell.str(1, argString(obj, "command", "cmd"))
-		shell.str(4, id)
-		exec.msg(2, []byte(shell))
-	case "write":
-		var w wbuf
-		w.str(1, argString(obj, "path", "file_path"))
-		w.str(2, argString(obj, "file_text", "contents", "content", "stream_content"))
-		w.str(3, id)
-		exec.msg(3, []byte(w))
 	case "delete":
 		var d wbuf
-		d.str(1, argString(obj, "path", "file_path"))
+		putArg(&d, 1, obj, "path", "file_path")
 		d.str(2, id)
 		exec.msg(4, []byte(d))
-	case "grep":
-		var g wbuf
-		g.str(1, argString(obj, "pattern", "query"))
-		if p := argString(obj, "path"); p != "" {
-			g.str(2, p)
-		}
-		g.str(14, id)
-		exec.msg(5, []byte(g))
-	case "read":
-		var r wbuf
-		r.str(1, argString(obj, "path", "file_path", "target_file"))
-		r.str(2, id)
-		exec.msg(7, []byte(r))
-	case "ls":
-		var ls wbuf
-		ls.str(1, argString(obj, "path", "target_directory"))
-		ls.str(3, id)
-		exec.msg(8, []byte(ls))
-	case "edit":
-		var w wbuf
-		w.str(1, argString(obj, "path", "file_path"))
-		w.str(2, argString(obj, "stream_content", "new_string", "file_text", "contents"))
-		w.str(3, id)
-		exec.msg(3, []byte(w))
 	default:
 		var mcp wbuf
 		mcp.str(1, name)
@@ -485,6 +465,8 @@ func canonTool(name string) string {
 		return "delete"
 	case "ls", "list_dir", "list_directory":
 		return "ls"
+	case "glob", "find", "glob_file_search", "file_search":
+		return "glob"
 	case "edit", "strreplace", "str_replace", "search_replace":
 		return "edit"
 	case "write", "write_file":
@@ -492,6 +474,227 @@ func canonTool(name string) string {
 	default:
 		return ""
 	}
+}
+
+// piFrame is the ToolCall card and ExecServerMessage arm Cursor 3.27
+// runs. The legacy read/shell/grep/write arms are a different oneof;
+// validators on the Pi tools never see those strings.
+//
+// Cards: read 61, shell 62, edit 63, write 64, grep 65, glob 66, ls 67.
+// Exec:  read 45, shell 46, edit 47, write 48, grep 49, glob 50, ls 51.
+func piFrame(name string, obj map[string]any) (card, exec int, args []byte, ok bool) {
+	switch canonTool(name) {
+	case "shell":
+		return 62, 46, bashPi(obj), true
+	case "read":
+		return 61, 45, readPi(obj), true
+	case "grep":
+		return 65, 49, grepPi(obj), true
+	case "glob":
+		return 66, 50, findPi(obj), true
+	case "ls":
+		return 67, 51, lsPi(obj), true
+	case "write":
+		return 64, 48, writePi(obj), true
+	case "edit":
+		if editAsWrite(obj) {
+			return 64, 48, writePi(obj), true
+		}
+		return 63, 47, editPi(obj), true
+	default:
+		return 0, 0, nil, false
+	}
+}
+
+func bashPi(obj map[string]any) []byte {
+	var b wbuf
+	putArg(&b, 1, obj, "command", "cmd")
+	return []byte(b)
+}
+
+func readPi(obj map[string]any) []byte {
+	var b wbuf
+	putArg(&b, 1, obj, "path", "file_path", "target_file")
+	putI32(&b, 2, obj, "offset")
+	putI32(&b, 3, obj, "limit")
+	return []byte(b)
+}
+
+func grepPi(obj map[string]any) []byte {
+	var b wbuf
+	putArg(&b, 1, obj, "pattern", "query")
+	putArg(&b, 2, obj, "path", "file_path")
+	putArg(&b, 3, obj, "glob", "glob_pattern")
+	return []byte(b)
+}
+
+func findPi(obj map[string]any) []byte {
+	var b wbuf
+	putArg(&b, 1, obj, "pattern", "glob_pattern", "glob", "query")
+	putArg(&b, 2, obj, "path", "target_directory")
+	return []byte(b)
+}
+
+func lsPi(obj map[string]any) []byte {
+	var b wbuf
+	putArg(&b, 1, obj, "path", "target_directory")
+	return []byte(b)
+}
+
+func writePi(obj map[string]any) []byte {
+	var b wbuf
+	putArg(&b, 1, obj, "path", "file_path")
+	putArg(&b, 2, obj, "content", "contents", "file_text", "stream_content")
+	return []byte(b)
+}
+
+func editPi(obj map[string]any) []byte {
+	var rep wbuf
+	putArg(&rep, 1, obj, "old_string", "oldText", "old_str")
+	if _, ok := argPresent(obj, "new_string", "newText", "new_str"); ok {
+		putArg(&rep, 2, obj, "new_string", "newText", "new_str")
+	} else {
+		putArg(&rep, 2, obj, "stream_content")
+	}
+	var b wbuf
+	putArg(&b, 1, obj, "path", "file_path")
+	if len(rep) > 0 {
+		b.msg(2, []byte(rep))
+	}
+	return []byte(b)
+}
+
+func editAsWrite(obj map[string]any) bool {
+	if argString(obj, "old_string", "oldText", "old_str", "new_string", "newText", "new_str") != "" {
+		return false
+	}
+	return argString(obj, "content", "contents", "file_text", "stream_content") != ""
+}
+
+func putArg(b *wbuf, field int, obj map[string]any, keys ...string) {
+	if s, ok := argPresent(obj, keys...); ok {
+		b.str(field, s)
+	}
+}
+
+func argPresent(obj map[string]any, keys ...string) (string, bool) {
+	for _, k := range keys {
+		if _, ok := obj[k]; !ok || obj[k] == nil {
+			continue
+		}
+		return argString(obj, k), true
+	}
+	return "", false
+}
+
+func putI32(b *wbuf, field int, obj map[string]any, keys ...string) {
+	for _, k := range keys {
+		v, ok := obj[k]
+		if !ok || v == nil {
+			continue
+		}
+		switch n := v.(type) {
+		case float64:
+			if n < 0 || n > math.MaxInt32 || n != math.Trunc(n) {
+				return
+			}
+			b.u32(field, uint32(n))
+			return
+		case int:
+			if n < 0 || n > math.MaxInt32 {
+				return
+			}
+			b.u32(field, uint32(n))
+			return
+		case json.Number:
+			i, err := n.Int64()
+			if err != nil || i < 0 || i > math.MaxInt32 {
+				return
+			}
+			b.u32(field, uint32(i))
+			return
+		}
+	}
+}
+
+func argsReady(s string) bool {
+	s = strings.TrimSpace(s)
+	return strings.HasPrefix(s, "{") && json.Valid([]byte(s))
+}
+
+// displayArgs rewrites a finished arguments object onto the names the Pi
+// tools validate (content, pattern, path). An unfinished fragment is
+// returned as itself.
+func displayArgs(name, raw string) string {
+	if !argsReady(raw) {
+		return raw
+	}
+	var obj map[string]any
+	if json.Unmarshal([]byte(raw), &obj) != nil {
+		return raw
+	}
+	out := map[string]any{}
+	switch canonTool(name) {
+	case "shell":
+		if s, ok := argPresent(obj, "command", "cmd"); ok {
+			out["command"] = s
+		}
+	case "read":
+		if s, ok := argPresent(obj, "path", "file_path", "target_file"); ok {
+			out["path"] = s
+		}
+	case "write":
+		if s, ok := argPresent(obj, "path", "file_path"); ok {
+			out["path"] = s
+		}
+		if s, ok := argPresent(obj, "content", "contents", "file_text", "stream_content"); ok {
+			out["content"] = s
+		}
+	case "grep":
+		if s, ok := argPresent(obj, "pattern", "query"); ok {
+			out["pattern"] = s
+		}
+		if s, ok := argPresent(obj, "path", "file_path"); ok {
+			out["path"] = s
+		}
+		if s, ok := argPresent(obj, "glob", "glob_pattern"); ok {
+			out["glob"] = s
+		}
+	case "glob":
+		if s, ok := argPresent(obj, "pattern", "glob_pattern", "glob", "query"); ok {
+			out["pattern"] = s
+		}
+		if s, ok := argPresent(obj, "path", "target_directory"); ok {
+			out["path"] = s
+		}
+	case "ls", "delete":
+		if s, ok := argPresent(obj, "path", "file_path", "target_directory"); ok {
+			out["path"] = s
+		}
+	case "edit":
+		if editAsWrite(obj) {
+			return displayArgs("Write", raw)
+		}
+		if s, ok := argPresent(obj, "path", "file_path"); ok {
+			out["path"] = s
+		}
+		if s, ok := argPresent(obj, "old_string", "oldText", "old_str"); ok {
+			out["old_string"] = s
+		}
+		if s, ok := argPresent(obj, "new_string", "newText", "new_str", "stream_content"); ok {
+			out["new_string"] = s
+		}
+	default:
+		return raw
+	}
+	if len(out) == 0 {
+		return raw
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return raw
+	}
+	return string(b)
 }
 
 func argString(obj map[string]any, keys ...string) string {

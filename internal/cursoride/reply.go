@@ -3,6 +3,8 @@ package cursoride
 import (
 	"encoding/binary"
 	"encoding/json"
+	"math"
+	"strconv"
 	"strings"
 )
 
@@ -158,18 +160,14 @@ func chatPieces(line string) (chatPiece, bool) {
 		Choices []struct {
 			FinishReason string `json:"finish_reason"`
 			Delta        struct {
-				Content          string `json:"content"`
-				ReasoningContent string `json:"reasoning_content"`
-				Reasoning        string `json:"reasoning"`
-				ToolCalls        []struct {
-					Index    *int   `json:"index"`
-					ID       string `json:"id"`
-					Function struct {
-						Name      string `json:"name"`
-						Arguments string `json:"arguments"`
-					} `json:"function"`
-				} `json:"tool_calls"`
+				Content          json.RawMessage   `json:"content"`
+				ReasoningContent json.RawMessage   `json:"reasoning_content"`
+				Reasoning        json.RawMessage   `json:"reasoning"`
+				ToolCalls        []json.RawMessage `json:"tool_calls"`
 			} `json:"delta"`
+			Message struct {
+				ToolCalls []json.RawMessage `json:"tool_calls"`
+			} `json:"message"`
 		} `json:"choices"`
 		Error struct {
 			Message string `json:"message"`
@@ -183,27 +181,124 @@ func chatPieces(line string) (chatPiece, bool) {
 	}
 	var p chatPiece
 	for _, c := range body.Choices {
-		p.text += c.Delta.Content
-		if c.Delta.ReasoningContent != "" {
-			p.thinking += c.Delta.ReasoningContent
+		p.text += jsonString(c.Delta.Content)
+		if think := jsonString(c.Delta.ReasoningContent); think != "" {
+			p.thinking += think
 		} else {
-			p.thinking += c.Delta.Reasoning
+			p.thinking += jsonString(c.Delta.Reasoning)
 		}
 		if c.FinishReason != "" {
 			p.seal = true
 		}
-		for i, call := range c.Delta.ToolCalls {
-			idx := i
-			if call.Index != nil {
-				idx = *call.Index
+		calls := c.Delta.ToolCalls
+		if len(calls) == 0 {
+			calls = c.Message.ToolCalls
+		}
+		for i, raw := range calls {
+			d, ok := parseToolDelta(raw, i)
+			if !ok {
+				continue
 			}
-			p.tools = append(p.tools, toolDelta{
-				Index: idx, ID: call.ID, Name: call.Function.Name, Args: call.Function.Arguments,
-			})
+			p.tools = append(p.tools, d)
 		}
 	}
 	if p.text == "" && p.thinking == "" && len(p.tools) == 0 && !p.seal {
 		return chatPiece{}, false
 	}
 	return p, true
+}
+
+// parseToolDelta reads one streamed tool call. index may be a float
+// (0.0), and arguments may be a JSON object rather than a string. Either
+// one used to fail the whole SSE line, so the sealed call kept the name
+// and lost the strings Cursor validates.
+func parseToolDelta(raw json.RawMessage, fallback int) (toolDelta, bool) {
+	var call struct {
+		Index     json.RawMessage `json:"index"`
+		ID        string          `json:"id"`
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+		Input     json.RawMessage `json:"input"`
+		Function  struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+			Input     json.RawMessage `json:"input"`
+		} `json:"function"`
+	}
+	if json.Unmarshal(raw, &call) != nil {
+		return toolDelta{}, false
+	}
+	idx, ok := indexOf(call.Index, fallback)
+	if !ok {
+		return toolDelta{}, false
+	}
+	name := call.Function.Name
+	if name == "" {
+		name = call.Name
+	}
+	args := firstArgText(call.Function.Arguments, call.Arguments, call.Function.Input, call.Input)
+	if name == "" && call.ID == "" && args == "" {
+		return toolDelta{}, false
+	}
+	return toolDelta{Index: idx, ID: call.ID, Name: name, Args: args}, true
+}
+
+// indexOf reports the tool-call index. A missing index uses fallback.
+// A present index that is not a non-negative integer is rejected: 1.5
+// must not be truncated onto another call.
+func indexOf(raw json.RawMessage, fallback int) (int, bool) {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return fallback, true
+	}
+	var n int
+	if json.Unmarshal(raw, &n) == nil && n >= 0 {
+		return n, true
+	}
+	var f float64
+	if json.Unmarshal(raw, &f) == nil && f >= 0 && f <= math.MaxInt32 && f == math.Trunc(f) {
+		return int(f), true
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		n, err := strconv.Atoi(strings.TrimSpace(text))
+		if err == nil && n >= 0 {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+func firstArgText(raws ...json.RawMessage) string {
+	for _, raw := range raws {
+		text, ok := argText(raw)
+		if !ok || text == "" {
+			continue
+		}
+		return text
+	}
+	return ""
+}
+
+func argText(raw json.RawMessage) (string, bool) {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return "", false
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text, true
+	}
+	if json.Valid(raw) {
+		return s, true
+	}
+	return "", false
+}
+
+func jsonString(raw json.RawMessage) string {
+	var text string
+	if json.Unmarshal(raw, &text) != nil {
+		return ""
+	}
+	return text
 }
