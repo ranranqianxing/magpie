@@ -326,6 +326,7 @@ func (p *Proxy) localAppend(w http.ResponseWriter, s *sess, raw []byte) {
 func (p *Proxy) runChat(s *sess, chat Chat) {
 	Note("chat start model=" + chat.Model + " path=BidiAppend")
 	defer Note("chat done model=" + chat.Model + " path=BidiAppend")
+	noteRequestToolArgs(chat.Messages)
 	s.push(invocationIdFrame(chat.InvocationID))
 	body, err := chat.JSON()
 	if err != nil {
@@ -357,25 +358,50 @@ func (p *Proxy) runChat(s *sess, chat Chat) {
 	}
 	var sawText bool
 	var asm toolAssembler
+	var said strings.Builder
 	eachPiece(resp.Body, func(piece chatPiece) {
 		if piece.thinking != "" {
 			s.push(thinkingFrame(chat.InvocationID, piece.thinking))
+			said.WriteString(piece.thinking)
+			said.WriteByte('\n')
 		}
 		// Cursor drops text on is_final and only emits finish; content
 		// must ride non-final text_part frames (#Cursor 3.27 local loop).
 		if piece.text != "" {
 			sawText = true
 			s.push(textFrame(chat.InvocationID, piece.text, false))
+			said.WriteString(piece.text)
+			said.WriteByte('\n')
 		}
-		emitInferenceTools(s, chat.InvocationID, &asm, piece)
+		// Fragments stay in the assembler. A finish_reason is not the
+		// end: a duplicate completion often follows it in the same body,
+		// and a fragment already written cannot be taken back. Cursor
+		// concatenates tool_call_part until is_complete, so an early
+		// "{}" or a prefix plus the later object is the Read {} it runs.
+		for _, d := range piece.tools {
+			asm.add(d)
+		}
 	})
-	// A body that ends without finish_reason or [DONE] still closes
-	// the call. A second seal is empty.
-	emitInferenceTools(s, chat.InvocationID, &asm, chatPiece{done: true})
+	finishInferenceTools(s, chat.InvocationID, &asm, said.String())
 	if sawText {
 		s.push(textFrame(chat.InvocationID, "", true))
 	}
 	s.push(endFrame(chat.InvocationID, ""))
+}
+
+// finishInferenceTools writes one completing tool_call_part per call that
+// Pi can run. The part's arguments are the sealed JSON, not the unsent
+// tail of a fragment. Cursor's local loop parses that part and runs the
+// tool. A call that is still missing its strings is not sent.
+func finishInferenceTools(s *sess, invocation string, asm *toolAssembler, text string) {
+	markers := markupMarkers(text)
+	run := sealRound(asm, text, func(msg string) {
+		s.push(textFrame(invocation, msg, false))
+	})
+	for _, t := range run {
+		s.push(toolCallFrame(invocation, t.id, t.name, displayArgs(t.name, t.args), true))
+		noteToolTrace("frames", t.name, t.args, t.frags, t.placeholders, t.fill, markers, "written")
+	}
 }
 
 // agentRun answers AgentService/Run when the model is in the catalog.
@@ -555,24 +581,6 @@ func writeSealedTools(asm *toolAssembler, execN *uint32, write func([]byte)) {
 		}
 		for _, frame := range frames {
 			write(frame)
-		}
-	}
-}
-
-func emitInferenceTools(s *sess, invocation string, asm *toolAssembler, piece chatPiece) {
-	for _, d := range piece.tools {
-		id, name, frag := asm.add(d)
-		if frag != "" {
-			s.push(toolCallFrame(invocation, id, name, frag, false))
-		}
-	}
-	if piece.seal || piece.done {
-		for _, t := range asm.seal() {
-			tail := ""
-			if t.emitted < len(t.args) {
-				tail = t.args[t.emitted:]
-			}
-			s.push(toolCallFrame(invocation, t.id, t.name, tail, true))
 		}
 	}
 }
