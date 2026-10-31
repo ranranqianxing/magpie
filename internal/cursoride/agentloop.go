@@ -233,33 +233,12 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 			}
 		}
 	})
-	sealed = asm.seal()
-	// A native call whose arguments stayed "{}" often has the real
-	// parameters in the same reply. The gateway leaves that text in
-	// place once a native call exists, so the fill reads it here. The
-	// Pi exec and the next gateway turn both use what is sealed.
 	text := said.String()
-	fillEmptyToolArgs(sealed, text)
-	markers := markupMarkers(text)
-	var run []toolBuf
-	for _, t := range sealed {
-		ready := piCallReady(t.name, t.args)
-		state := "skip"
-		if ready {
-			state = "run"
-			run = append(run, t)
-		} else if s := strings.TrimSpace(t.args); s != "" && !json.Valid([]byte(s)) {
-			write(agentTextFrame("cursor ide: tool arguments are not json"))
-		}
-		noteToolTrace("seal", t.name, t.args, t.frags, t.placeholders, t.fill, markers, state)
-		if !ready {
-			noteToolTrace("frames", t.name, t.args, t.frags, t.placeholders, t.fill, markers, "skipped")
-		}
-	}
-	noteRound(len(sealed), len(run))
+	run := sealRound(&asm, text, func(msg string) { write(agentTextFrame(msg)) })
 	if len(run) == 0 {
 		return nil, true, nil
 	}
+	markers := markupMarkers(text)
 	for _, t := range run {
 		*execN++
 		frames, ok := agentToolFrames(t.id, t.name, t.args, *execN)
@@ -276,6 +255,35 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 	}
 	// Any run call needs follow-up frames (or ends one-shot when none arrive).
 	return run, false, nil
+}
+
+// sealRound closes asm once the gateway body has ended. A native call
+// whose arguments stayed "{}" is filled from text the gateway left in
+// the same reply. run is the calls that have the strings Pi validates.
+// where=seal, where=frames exec=skipped, and where=round are logged
+// here, on whichever entry read the body. The caller logs exec=written
+// after it puts the call on the wire.
+func sealRound(asm *toolAssembler, text string, say func(string)) []toolBuf {
+	sealed := asm.seal()
+	fillEmptyToolArgs(sealed, text)
+	markers := markupMarkers(text)
+	var run []toolBuf
+	for _, t := range sealed {
+		ready := piCallReady(t.name, t.args)
+		state := "skip"
+		if ready {
+			state = "run"
+			run = append(run, t)
+		} else if strings.TrimSpace(t.args) != "" && !json.Valid([]byte(t.args)) && say != nil {
+			say("cursor ide: tool arguments are not json")
+		}
+		noteToolTrace("seal", t.name, t.args, t.frags, t.placeholders, t.fill, markers, state)
+		if !ready {
+			noteToolTrace("frames", t.name, t.args, t.frags, t.placeholders, t.fill, markers, "skipped")
+		}
+	}
+	noteRound(len(sealed), len(run))
+	return run
 }
 
 // noteRequestToolArgs records whether this gateway body is about to send
