@@ -21,7 +21,7 @@ func TestAgentToolResultsFromPayloadFindsCallID(t *testing.T) {
 	run.msg(1, []byte(state))
 	payload := agentClient([]byte(run))
 	want := map[string]bool{"call_1": true}
-	got := agentToolResultsFromPayload(payload, want)
+	got := agentToolResultsFromPayload(payload, want, nil)
 	if len(got) != 1 || got[0].ToolCallID != "call_1" || got[0].Content.(string) != "ok" {
 		t.Fatalf("got %+v", got)
 	}
@@ -423,6 +423,160 @@ func agentToolResultClient(callID, result string) []byte {
 	var run wbuf
 	run.msg(1, []byte(state))
 	return agentClient([]byte(run))
+}
+
+func TestRunAgentLoopContinuesAfterPiExecResult(t *testing.T) {
+	const conv = "66666666-6666-4666-8666-666666666666"
+	const secret = "sk-live-exec-value"
+	var mu sync.Mutex
+	var bodies [][]byte
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, b)
+		n := len(bodies)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		if n == 1 {
+			io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"Read","arguments":"{\"path\":\"a.go\"}"}}]}}]}`+"\n\n")
+			io.WriteString(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+			io.WriteString(w, "data: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, `data: {"choices":[{"delta":{"content":"done"}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer gw.Close()
+	p := &Proxy{
+		Addr: "127.0.0.1:0", CADir: t.TempDir(),
+		Gateway: func() (string, string) { return gw.URL, "tok" },
+		Models:  func() []Model { return agentCatalog() },
+		client:  http.DefaultClient,
+	}
+	turn, ok, err := readAgentClient(agentClient(agentRunMessage("codex/gpt-5.6-luna", conv, "go", nil)))
+	if err != nil || !ok {
+		t.Fatalf("turn ok=%v err=%v", ok, err)
+	}
+	route, ours, err := RouteModel(agentCatalog(), turn.ModelID, turn.Params)
+	if err != nil || !ours {
+		t.Fatal(route, ours, err)
+	}
+	execSeen := make(chan struct{})
+	var out bytes.Buffer
+	write := func(b []byte) {
+		out.Write(b)
+		if readExecRan(b, "a.go") {
+			select {
+			case <-execSeen:
+			default:
+				close(execSeen)
+			}
+		}
+	}
+	followups := make(chan []byte, 2)
+	go func() {
+		<-execSeen
+		followups <- piExecClient(1, "call_1", 14, "PARTIAL-"+secret)
+		followups <- piExecClient(1, "call_1", 46, "package a "+secret)
+		close(followups)
+	}()
+	p.runAgentLoop(context.Background(), followups, turn, route, write)
+	if !strings.Contains(out.String(), "done") {
+		t.Fatalf("stream ended without the second round")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("gateway rounds %d", len(bodies))
+	}
+	second := string(bodies[1])
+	if !strings.Contains(second, "package a "+secret) || strings.Contains(second, "PARTIAL-") {
+		t.Fatalf("second chat kept the stream chunk or dropped the result: %s", second)
+	}
+	for _, line := range strings.Split(Recent(), "\n") {
+		if strings.Contains(line, "agent exec result") && strings.Contains(line, secret) {
+			t.Fatalf("exec trace leaked the result: %s", line)
+		}
+	}
+	if !strings.Contains(Recent(), "agent exec result kind=pi-read matched=true") {
+		t.Fatalf("missing exec trace:\n%s", Recent())
+	}
+}
+
+func TestExecThrowUsesTheExecNumber(t *testing.T) {
+	var throw wbuf
+	throw.u32(1, 2)
+	throw.str(2, "denied")
+	var ctrl wbuf
+	ctrl.msg(2, []byte(throw))
+	var client wbuf
+	client.msg(5, []byte(ctrl))
+	got := execToolResults([]byte(client), map[string]bool{"call_b": true}, map[uint32]string{2: "call_b"})
+	if len(got) != 1 || got[0].ToolCallID != "call_b" || got[0].Content.(string) != "error: denied" {
+		t.Fatalf("%+v", got)
+	}
+	if len(execToolResults([]byte(client), map[string]bool{"call_b": true}, nil)) != 0 {
+		t.Fatal("throw without the exec number was treated as a result")
+	}
+}
+
+func TestPiExecResultKeepsParallelCalls(t *testing.T) {
+	read := piExecClient(1, "call_a", 46, "package a")
+	bash := piExecClient(2, "call_b", 47, "listed")
+	want := map[string]bool{"call_a": true, "call_b": true}
+	got := execToolResults(read, want, nil)
+	got = append(got, execToolResults(bash, want, nil)...)
+	if len(got) != 2 || got[0].ToolCallID != "call_a" || got[0].Content.(string) != "package a" || got[1].ToolCallID != "call_b" || got[1].Content.(string) != "listed" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func readExecRan(body []byte, path string) bool {
+	payloads, framed := connectPayloads(body)
+	if !framed {
+		return false
+	}
+	for _, p := range payloads {
+		fs, err := parseFields(p)
+		if err != nil {
+			continue
+		}
+		execs := fieldBytes(fs, 2)
+		if len(execs) == 0 {
+			continue
+		}
+		msg, err := parseFields(execs[0])
+		if err != nil {
+			continue
+		}
+		reads := fieldBytes(msg, 45)
+		if len(reads) == 0 {
+			continue
+		}
+		read, err := parseFields(reads[0])
+		if err != nil {
+			continue
+		}
+		if got, _ := fieldString(read, 1); got == path {
+			return true
+		}
+	}
+	return false
+}
+
+func piExecClient(n uint32, callID string, resultField int, output string) []byte {
+	var success wbuf
+	success.str(1, output)
+	var result wbuf
+	result.msg(1, []byte(success))
+	var exec wbuf
+	exec.u32(1, n)
+	exec.str(15, callID)
+	exec.msg(resultField, []byte(result))
+	var client wbuf
+	client.msg(2, []byte(exec))
+	return []byte(client)
 }
 
 func mustFirstFrame(t *testing.T, framed []byte) []byte {

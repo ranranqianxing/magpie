@@ -1,6 +1,7 @@
 package cursoride
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -426,6 +427,10 @@ func projectParts(raw []byte) (any, error) {
 		case 3:
 			data, _ := fieldString(inner, 1)
 			media, _ := fieldString(inner, 2)
+			if part, ok := fileImagePart(data, media); ok {
+				parts = append(parts, part)
+				break
+			}
 			parts = append(parts, ContentPart{Type: "text", Text: fileText(data, media)})
 		}
 	}
@@ -442,10 +447,29 @@ func imageDataURL(data, mime string) string {
 	if strings.HasPrefix(data, "data:") {
 		return data
 	}
+	// An image part sometimes carries the file bytes rather than base64.
+	// A string that is already base64 does not sniff as an image, so it
+	// is left as the payload.
+	if sniff := sniffImageMime([]byte(data)); sniff != "" {
+		if !strings.HasPrefix(strings.ToLower(mime), "image/") {
+			mime = sniff
+		}
+		data = base64.StdEncoding.EncodeToString([]byte(data))
+	}
 	if mime == "" {
 		mime = "image/png"
 	}
 	return "data:" + mime + ";base64," + data
+}
+
+// fileImagePart is an inference file part whose bytes are an image.
+// A part only labeled image/*, with bytes that are not an image, stays
+// the media-type note: that label is not the picture.
+func fileImagePart(data, media string) (ContentPart, bool) {
+	if sniffImageMime([]byte(data)) == "" {
+		return ContentPart{}, false
+	}
+	return ContentPart{Type: "image_url", ImageURL: imageDataURL(data, media)}, true
 }
 
 func fileText(data, media string) string {
@@ -487,21 +511,22 @@ func projectTool(raw []byte) ([]ChatMessage, error) {
 			return nil, err
 		}
 		id, _ := fieldString(pf, 1)
-		text := toolResultText(pf)
-		out = append(out, ChatMessage{Role: "tool", ToolCallID: id, Content: text})
+		text, images := toolResultBody(pf)
+		out = append(out, ChatMessage{Role: "tool", ToolCallID: id, Content: toolContent(text, images)})
 	}
 	return out, nil
 }
 
-func toolResultText(fs []field) string {
+func toolResultBody(fs []field) (string, []ContentPart) {
 	if raw := fieldBytes(fs, 3); len(raw) > 0 {
 		if inner, err := parseFields(raw[len(raw)-1]); err == nil {
 			if s, ok := fieldString(inner, 3); ok {
-				return s
+				return s, nil
 			}
 		}
 	}
 	var b strings.Builder
+	var images []ContentPart
 	for _, exp := range fieldBytes(fs, 5) {
 		content, err := projectParts(exp)
 		if err != nil {
@@ -515,18 +540,22 @@ func toolResultText(fs []field) string {
 			b.WriteString(c)
 		case []ContentPart:
 			for _, p := range c {
-				if b.Len() > 0 {
-					b.WriteByte('\n')
+				if p.Type == "image_url" && p.ImageURL != "" {
+					if !hasImage(images, p.ImageURL) {
+						images = append(images, p)
+					}
+					continue
 				}
-				if p.Type == "text" {
+				if p.Type == "text" && p.Text != "" {
+					if b.Len() > 0 {
+						b.WriteByte('\n')
+					}
 					b.WriteString(p.Text)
-				} else {
-					b.WriteString("[image]")
 				}
 			}
 		}
 	}
-	return b.String()
+	return b.String(), images
 }
 
 // CompileChat builds the gateway request for an invoke that belongs to
