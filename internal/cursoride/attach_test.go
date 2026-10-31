@@ -3,6 +3,8 @@ package cursoride
 import (
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -213,6 +215,68 @@ func TestHistoryFileTextAndBareImageBase64(t *testing.T) {
 	if err != nil || len(plain) != 1 || plain[0].Content.(string) != "package a" {
 		t.Fatalf("untyped file %#v err=%v", plain, err)
 	}
+}
+
+func TestSelectedImageBase64IsNotEncodedTwice(t *testing.T) {
+	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0x01}
+	payload := base64.StdEncoding.EncodeToString(png)
+	var img wbuf
+	img.str(7, "image/png")
+	img.str(8, payload)
+	raw := selectedImageChat(t, []byte(img))
+	want := "data:image/png;base64," + payload
+	if !strings.Contains(raw, want) {
+		t.Fatalf("missing %s\n%s", want, raw)
+	}
+	if strings.Contains(raw, base64.StdEncoding.EncodeToString([]byte(payload))) {
+		t.Fatalf("image was encoded twice:\n%s", raw)
+	}
+}
+
+func TestSelectedImagePathIsRead(t *testing.T) {
+	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0x02}
+	path := filepath.Join(t.TempDir(), "paste.png")
+	if err := os.WriteFile(path, png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var img wbuf
+	img.str(3, path)
+	img.str(7, "image/png")
+	raw := selectedImageChat(t, []byte(img))
+	want := "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
+	if !strings.Contains(raw, want) || strings.Contains(raw, path) {
+		t.Fatalf("path image\n%s", raw)
+	}
+	if strings.Contains(Recent(), path) {
+		t.Fatalf("diag logged the path:\n%s", Recent())
+	}
+}
+
+func selectedImageChat(t *testing.T, img []byte) string {
+	t.Helper()
+	var ctx wbuf
+	ctx.msg(1, img)
+	var user wbuf
+	user.str(1, "what is this")
+	user.msg(3, []byte(ctx))
+	var action wbuf
+	action.msg(1, []byte(user))
+	var uma wbuf
+	uma.msg(1, []byte(action))
+	var requested wbuf
+	requested.str(1, "codex/gpt-5.6-luna")
+	var run wbuf
+	run.msg(2, []byte(uma))
+	run.msg(9, []byte(requested))
+	got, ok, err := readAgentClient(agentClient([]byte(run)))
+	if err != nil || !ok || len(got.Messages) != 1 {
+		t.Fatalf("ok=%v err=%v messages=%d", ok, err, len(got.Messages))
+	}
+	body, err := (Chat{Model: got.ModelID, Messages: got.Messages}).JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
 }
 
 func TestBrokenSelectedContextKeepsTheTypedText(t *testing.T) {

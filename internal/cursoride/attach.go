@@ -2,9 +2,16 @@ package cursoride
 
 import (
 	"encoding/base64"
+	"fmt"
+	"io"
+	"os"
 	"strings"
 	"unicode/utf8"
 )
+
+// maxImageFile is how much of a selected image path is read. A larger
+// file is left out. The bytes are not logged.
+const maxImageFile = 8 << 20
 
 // userAttach is context the current UserMessage carried beside the typed
 // text. Cursor's own agent renders selected_context into the prompt.
@@ -352,11 +359,9 @@ func imageFromSelected(raw []byte, prefetched map[string][]byte) (ContentPart, i
 	}
 	mime, _ := fieldString(fs, 7)
 	if data := fieldBytes(fs, 8); len(data) > 0 && len(data[0]) > 0 {
-		part, ok := imageBytesPart(data[0], mime)
-		if !ok {
-			return ContentPart{}, 0
+		if part, ok := imageBytesPart(data[0], mime); ok {
+			return part, 0
 		}
-		return part, 0
 	}
 	if wrapped := fieldBytes(fs, 9); len(wrapped) > 0 {
 		wf, err := parseFields(wrapped[0])
@@ -364,20 +369,94 @@ func imageFromSelected(raw []byte, prefetched map[string][]byte) (ContentPart, i
 			return ContentPart{}, 1
 		}
 		if data := fieldBytes(wf, 2); len(data) > 0 && len(data[0]) > 0 {
-			part, ok := imageBytesPart(data[0], mime)
-			if !ok {
-				return ContentPart{}, 0
+			if part, ok := imageBytesPart(data[0], mime); ok {
+				return part, 0
 			}
-			return part, 0
 		}
 		if ids := fieldBytes(wf, 1); len(ids) > 0 {
-			return imageBlob(ids[0], mime, prefetched)
+			part, miss := imageBlob(ids[0], mime, prefetched)
+			if part.Type != "" {
+				return part, 0
+			}
+			if path, ok := fieldString(fs, 3); ok {
+				if part, ok := imageFromPath(path, mime); ok {
+					return part, 0
+				}
+			}
+			return ContentPart{}, miss
 		}
 	}
 	if ids := fieldBytes(fs, 1); len(ids) > 0 {
-		return imageBlob(ids[0], mime, prefetched)
+		part, miss := imageBlob(ids[0], mime, prefetched)
+		if part.Type != "" {
+			return part, 0
+		}
+		if path, ok := fieldString(fs, 3); ok {
+			if part, ok := imageFromPath(path, mime); ok {
+				return part, 0
+			}
+		}
+		return ContentPart{}, miss
+	}
+	if path, ok := fieldString(fs, 3); ok && strings.TrimSpace(path) != "" {
+		part, ok := imageFromPath(path, mime)
+		if ok {
+			return part, 0
+		}
+		return ContentPart{}, 1
 	}
 	return ContentPart{}, 0
+}
+
+// imageFromPath reads a selected image Cursor named by path and did not
+// inline. The proxy runs on the same machine as the IDE. Only a regular
+// file that sniffs as an image and fits in maxImageFile is attached.
+// The path is not logged.
+func imageFromPath(path, mime string) (ContentPart, bool) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ContentPart{}, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		Note("agent image skipped reason=path")
+		return ContentPart{}, false
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() {
+		Note("agent image skipped reason=path")
+		return ContentPart{}, false
+	}
+	if st.Size() <= 0 || st.Size() > maxImageFile {
+		Note("agent image skipped reason=too-large")
+		return ContentPart{}, false
+	}
+	buf := make([]byte, st.Size())
+	if _, err := io.ReadFull(f, buf); err != nil {
+		Note("agent image skipped reason=path")
+		return ContentPart{}, false
+	}
+	part, ok := imageBytesPart(buf, mime)
+	if !ok {
+		Note("agent image skipped reason=not-image")
+		return ContentPart{}, false
+	}
+	Note(fmt.Sprintf("agent image source=path bytes=%d mime=%s", len(buf), sniffedOr(part.ImageURL, mime)))
+	return part, true
+}
+
+func sniffedOr(dataURL, mime string) string {
+	if i := strings.Index(dataURL, ":"); i >= 0 {
+		rest := dataURL[i+1:]
+		if j := strings.Index(rest, ";"); j > 0 {
+			return rest[:j]
+		}
+	}
+	if mime != "" {
+		return mime
+	}
+	return "image"
 }
 
 func imageBlob(id []byte, mime string, prefetched map[string][]byte) (ContentPart, int) {
@@ -396,16 +475,64 @@ func imageBytesPart(data []byte, mime string) (ContentPart, bool) {
 	if len(data) == 0 {
 		return ContentPart{}, false
 	}
-	if sniff := sniffImageMime(data); sniff != "" && !strings.HasPrefix(strings.ToLower(mime), "image/") {
-		mime = sniff
+	if sniff := sniffImageMime(data); sniff != "" {
+		if !strings.HasPrefix(strings.ToLower(mime), "image/") {
+			mime = sniff
+		}
+		return imagePart(base64.StdEncoding.EncodeToString(data), mime)
 	}
+	if utf8.Valid(data) {
+		s := strings.TrimSpace(string(data))
+		if strings.HasPrefix(s, "data:image") {
+			return ContentPart{Type: "image_url", ImageURL: s}, true
+		}
+		if payload, sniff, ok := base64Image(s); ok {
+			if !strings.HasPrefix(strings.ToLower(mime), "image/") {
+				mime = sniff
+			}
+			return imagePart(payload, mime)
+		}
+	}
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(mime)), "image/") {
+		return ContentPart{}, false
+	}
+	return imagePart(base64.StdEncoding.EncodeToString(data), mime)
+}
+
+func imagePart(payload, mime string) (ContentPart, bool) {
 	if mime == "" {
 		mime = "image/png"
 	}
 	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(mime)), "image/") {
 		return ContentPart{}, false
 	}
-	return ContentPart{Type: "image_url", ImageURL: imageDataURL(base64.StdEncoding.EncodeToString(data), mime)}, true
+	return ContentPart{Type: "image_url", ImageURL: imageDataURL(payload, mime)}, true
+}
+
+// base64Image reports whether s is already the base64 of an image, so a
+// selected image stored as text is not encoded a second time.
+func base64Image(s string) (payload, mime string, ok bool) {
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' || r == ' ' {
+			return -1
+		}
+		return r
+	}, s)
+	if len(s) < 8 || strings.ContainsAny(s, "{}") {
+		return "", "", false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.DecodeString(s)
+		if err != nil {
+			return "", "", false
+		}
+	}
+	mime = sniffImageMime(decoded)
+	if mime == "" {
+		return "", "", false
+	}
+	return base64.StdEncoding.EncodeToString(decoded), mime, true
 }
 
 func sniffImageMime(b []byte) string {

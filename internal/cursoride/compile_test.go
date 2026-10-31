@@ -1,6 +1,7 @@
 package cursoride
 
 import (
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"strings"
@@ -82,6 +83,35 @@ func TestCompileInvokeBecomesAGatewayChat(t *testing.T) {
 	}
 	if got.Messages[4].Role != "tool" || got.Messages[4].ToolCallID != "call_1" || string(got.Messages[4].Content) != `"file contents"` {
 		t.Fatalf("tool %+v", got.Messages[4])
+	}
+}
+
+func TestCompileFileImageBecomesADataURL(t *testing.T) {
+	png := string([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0x03})
+	payload := invoke("inv-img", fileMsg(png, "image/png"))
+	chat, err := CompileChat(Route{Model: "codex/gpt-5.6-luna"}, "conv", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := chat.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte(png))
+	if !strings.Contains(string(body), want) {
+		t.Fatalf("file image missing %s\n%s", want, body)
+	}
+	note := invoke("inv-note", fileMsg("PNGSECRET", "image/png"))
+	chat, err = CompileChat(Route{Model: "codex/gpt-5.6-luna"}, "conv", note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err = chat.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "PNGSECRET") || !strings.Contains(string(body), "[attached file: image/png]") {
+		t.Fatalf("labeled non-image was sent as a picture: %s", body)
 	}
 }
 
