@@ -84,7 +84,7 @@ Claude Code · Claude Desktop · Claude Science · Codex · Gemini CLI · Antigr
 </td></tr>
 </table>
 
-magpie shows only the agents installed on your machine; setup notes for some of them are in the [reference](docs/reference.md#notes-on-some-agents). Cursor (the desktop IDE) connects from the Agents page, and Cursor CLI is the row magpie cannot connect; connect installs magpie's CA for your user, as the [Cursor note](docs/reference.md#cursor) says. Anything else that takes a base URL can use the gateway too:
+magpie shows only the agents installed on your machine; setup notes for some of them are in the [reference](docs/reference.md#notes-on-some-agents). Cursor (the desktop IDE) connects from the Agents page, and Cursor CLI is the row magpie cannot connect; connect installs magpie's CA for your user, as the [Cursor note](docs/reference.md#cursor) says. What that connection changes for Agent chats, images and long sessions is in [Cursor 接入三方 API 经验交流](cursor接入三方api经验交流.md) (Chinese). Anything else that takes a base URL can use the gateway too:
 
 ```sh
 export OPENAI_BASE_URL=http://127.0.0.1:3425/v1     OPENAI_API_KEY=magpie
