@@ -539,7 +539,7 @@ func (p *Proxy) finishAgentRun(w http.ResponseWriter, r *http.Request, turn Agen
 }
 
 func (p *Proxy) serveLocalAgentRun(w http.ResponseWriter, r *http.Request, turn AgentTurn, route Route, followups <-chan []byte, stopPump context.CancelFunc) {
-	Note(fmt.Sprintf("route ok model=%s path=AgentService/Run local messages=%d tools=%d blobs-missing=%d", route.Model, len(turn.Messages), len(turn.Tools), turn.MissingBlobs))
+	Note(fmt.Sprintf("route ok model=%s path=AgentService/Run local messages=%d tools=%d blobs-missing=%d images=%d", route.Model, len(turn.Messages), len(turn.Tools), turn.MissingBlobs, countChatImages(turn.Messages)))
 	w.Header().Set("Content-Type", "application/connect+proto")
 	w.WriteHeader(http.StatusOK)
 	fl, _ := w.(http.Flusher)

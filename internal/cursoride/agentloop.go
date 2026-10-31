@@ -73,7 +73,7 @@ func (fr *connectFrameReader) next() ([]byte, error) {
 
 // agentToolResultsFromPayload finds tool-role chat messages in one client
 // frame. want lists the call ids still expected this turn.
-func agentToolResultsFromPayload(payload []byte, want map[string]bool) []ChatMessage {
+func agentToolResultsFromPayload(payload []byte, want map[string]bool, execOf map[uint32]string) []ChatMessage {
 	if len(want) == 0 {
 		return nil
 	}
@@ -92,6 +92,7 @@ func agentToolResultsFromPayload(payload []byte, want map[string]bool) []ChatMes
 		add(turn.Messages)
 	}
 	add(scanJSONToolResults(payload, want))
+	add(execToolResults(payload, want, execOf))
 	return out
 }
 
@@ -133,7 +134,9 @@ func (p *Proxy) runAgentLoop(ctx context.Context, followups <-chan []byte, turn 
 		Fast: route.Fast, ContextTokens: route.ContextTokens,
 	}
 	var execN uint32
+	execOf := map[uint32]string{}
 	for {
+		before := execN
 		sealed, done, err := p.agentGatewayRound(ctx, chat, write, &execN)
 		if err != nil {
 			write(agentTextFrame("cursor ide: " + err.Error()))
@@ -148,9 +151,11 @@ func (p *Proxy) runAgentLoop(ctx context.Context, followups <-chan []byte, turn 
 		}
 		var calls []ToolCall
 		want := map[string]bool{}
-		for _, t := range sealed {
+		for i, t := range sealed {
 			calls = append(calls, ToolCall{ID: t.id, Name: t.name, Arguments: t.args})
 			want[t.id] = true
+			// agentGatewayRound numbers each exec from before+1, in order.
+			execOf[before+uint32(i)+1] = t.id
 		}
 		chat.Messages = append(chat.Messages, ChatMessage{Role: "assistant", ToolCalls: calls})
 
@@ -163,7 +168,11 @@ func (p *Proxy) runAgentLoop(ctx context.Context, followups <-chan []byte, turn 
 				Note("agent tool loop eof without tool results")
 				break
 			}
-			for _, m := range agentToolResultsFromPayload(payload, want) {
+			got := agentToolResultsFromPayload(payload, want, execOf)
+			if len(got) == 0 {
+				noteUnparsedToolFrame(payload)
+			}
+			for _, m := range got {
 				chat.Messages = append(chat.Messages, m)
 				delete(want, m.ToolCallID)
 			}

@@ -127,6 +127,106 @@ func TestReplayConversationRefusesInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestReplayToolMessageKeepsItsCallIDAndOutput(t *testing.T) {
+	byID, err := messagesFromJSON([]byte(`{"role":"tool","id":"c9","content":"package a"}`))
+	if err != nil || len(byID) != 1 || byID[0].Role != "tool" || byID[0].ToolCallID != "c9" || byID[0].Content.(string) != "package a" {
+		t.Fatalf("id: %v %+v", err, byID)
+	}
+	byOutput, err := messagesFromJSON([]byte(`{"role":"tool","content":[{"type":"tool-result","toolCallId":"c1","toolName":"Read","output":"package b"}]}`))
+	if err != nil || len(byOutput) != 1 || byOutput[0].ToolCallID != "c1" || byOutput[0].Content.(string) != "package b" {
+		t.Fatalf("output: %v %+v", err, byOutput)
+	}
+	withImage, err := messagesFromJSON([]byte(`{"role":"tool","content":[{"type":"tool-result","toolCallId":"c2","result":[{"type":"text","text":"see"},{"type":"image","image":"data:image/png;base64,aGk=","mediaType":"image/png"}]}]}`))
+	if err != nil || len(withImage) != 1 {
+		t.Fatalf("image result: %v %+v", err, withImage)
+	}
+	parts, ok := withImage[0].Content.([]ContentPart)
+	if !ok || len(parts) != 2 || parts[0].Text != "see" || parts[1].ImageURL != "data:image/png;base64,aGk=" {
+		t.Fatalf("image parts %#v", withImage[0].Content)
+	}
+}
+
+func TestHistoryImageURLStringAndObjectStayImages(t *testing.T) {
+	url, err := messagesFromJSON([]byte(`{"role":"user","content":[{"type":"text","text":"see"},{"type":"image_url","image_url":"data:image/png;base64,aGk="}]}`))
+	if err != nil || len(url) != 1 {
+		t.Fatalf("string image_url: %v %+v", err, url)
+	}
+	parts, ok := url[0].Content.([]ContentPart)
+	if !ok || len(parts) != 2 || parts[1].ImageURL != "data:image/png;base64,aGk=" {
+		t.Fatalf("string image %#v", url[0].Content)
+	}
+	obj, err := messagesFromJSON([]byte(`{"role":"user","content":[{"type":"image","image":{"data":"aGk=","mediaType":"image/png"}}]}`))
+	if err != nil || len(obj) != 1 {
+		t.Fatalf("object image: %v %+v", err, obj)
+	}
+	parts, ok = obj[0].Content.([]ContentPart)
+	if !ok || len(parts) != 1 || parts[0].ImageURL != "data:image/png;base64,aGk=" {
+		t.Fatalf("object image %#v", obj[0].Content)
+	}
+}
+
+func TestReplayTurnsFillAMissingRootPrompt(t *testing.T) {
+	id := make([]byte, 32)
+	id[0] = 9
+	var state wbuf
+	state.msg(1, id)
+	state.msg(8, agentTurnWithRead("fix the handler", "a.go", "c1", "package a"))
+	msgs, missing, err := replayConversation([]byte(state), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) < 3 {
+		t.Fatalf("messages %d missing=%d %+v", len(msgs), missing, msgs)
+	}
+	if msgs[0].Role != "user" || msgs[0].Content.(string) != "fix the handler" {
+		t.Fatalf("user %+v", msgs[0])
+	}
+	if msgs[1].Role != "assistant" || len(msgs[1].ToolCalls) != 1 || msgs[1].ToolCalls[0].Name != "Read" || !strings.Contains(msgs[1].ToolCalls[0].Arguments, "a.go") {
+		t.Fatalf("call %+v", msgs[1])
+	}
+	if msgs[2].Role != "tool" || msgs[2].ToolCallID != "c1" || msgs[2].Content.(string) != "package a" {
+		t.Fatalf("result %+v", msgs[2])
+	}
+	if !strings.Contains(Recent(), "agent history source=turns") {
+		t.Fatalf("trace:\n%s", Recent())
+	}
+}
+
+func TestReplayTurnsDoNotReplaceACompleteRoot(t *testing.T) {
+	var state wbuf
+	state.msg(1, []byte(`{"role":"user","content":"from-root"}`))
+	state.msg(8, agentTurnWithRead("from-turn", "a.go", "c1", "package a"))
+	msgs, missing, err := replayConversation([]byte(state), nil)
+	if err != nil || missing != 0 || len(msgs) != 1 || msgs[0].Content.(string) != "from-root" {
+		t.Fatalf("missing=%d %+v err=%v", missing, msgs, err)
+	}
+}
+
+func agentTurnWithRead(user, path, callID, output string) []byte {
+	var um wbuf
+	um.str(1, user)
+	var args wbuf
+	args.str(1, path)
+	var success wbuf
+	success.str(1, output)
+	var result wbuf
+	result.msg(1, []byte(success))
+	var pi wbuf
+	pi.msg(1, []byte(args))
+	pi.msg(2, []byte(result))
+	var call wbuf
+	call.str(57, callID)
+	call.msg(61, []byte(pi))
+	var step wbuf
+	step.msg(2, []byte(call))
+	var agent wbuf
+	agent.msg(1, []byte(um))
+	agent.msg(2, []byte(step))
+	var turn wbuf
+	turn.msg(1, []byte(agent))
+	return []byte(turn)
+}
+
 func TestReplayConversationCountsABlobTheRequestDidNotCarry(t *testing.T) {
 	id := make([]byte, 32)
 	id[0] = 9
