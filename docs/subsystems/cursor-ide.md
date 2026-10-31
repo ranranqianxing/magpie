@@ -11,7 +11,10 @@ Cursor Private Inference is a different product. It is the build whose
 from `CURSOR_LOCAL_AGENT_BASE_URL` and `CURSOR_LOCAL_AGENT_API_KEY`
 (`cursorLocalOn` in [`cursorlocal.go`](../../internal/agent/cursorlocal.go)).
 Magpie writes none of ordinary Cursor's settings for that row. This page
-is the other path: ordinary Cursor, magpie's existing models.
+is the other path: ordinary Cursor, magpie's existing models. What a
+person using that path runs into is in
+[Cursor 接入三方 API 经验交流](../../cursor接入三方api经验交流.md) (Chinese).
+The facts below stay the contract.
 
 ## Responsibilities and boundaries
 

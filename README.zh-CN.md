@@ -84,7 +84,7 @@ Claude Code · Claude Desktop · Claude Science · Codex · Gemini CLI · Antigr
 </td></tr>
 </table>
 
-magpie 只显示你电脑上装了的 Agent；部分 Agent 的配置说明见[参考文档](docs/reference.md#notes-on-some-agents)（英文）。桌面版 Cursor 在 Agents 页可以连接，Cursor CLI 是 magpie 无法接入的那一行；连接时会把证书装进当前用户的信任库，还要你做的一步见[Cursor 说明](docs/reference.md#cursor)（英文）。其他任何能填 base URL 的工具也都能用这个网关：
+magpie 只显示你电脑上装了的 Agent；部分 Agent 的配置说明见[参考文档](docs/reference.md#notes-on-some-agents)（英文）。桌面版 Cursor 在 Agents 页可以连接，Cursor CLI 是 magpie 无法接入的那一行；连接时会把证书装进当前用户的信任库，还要你做的一步见[Cursor 说明](docs/reference.md#cursor)（英文）。接上之后 Agent、图片和长对话里你会碰到的事，写在[Cursor 接入三方 API 经验交流](cursor接入三方api经验交流.md)。其他任何能填 base URL 的工具也都能用这个网关：
 
 ```sh
 export OPENAI_BASE_URL=http://127.0.0.1:3425/v1     OPENAI_API_KEY=magpie
@@ -285,6 +285,7 @@ magpie plugin options model-map '{"mapping": {"fast": "deepseek/deepseek-chat"}}
 | :-- | :-- |
 | **[快速上手](https://usemagpie.ai/docs/zh/start)** | 入门导览 |
 | **[完整参考](docs/reference.md)**（英文） | 每个 Agent、provider 选项、网关接口、CLI 命令和文件 |
+| **[Cursor 接入三方 API](cursor接入三方api经验交流.md)** | 普通 Cursor 桌面版用 magpie 里的模型做 Agent |
 | **[插件](https://usemagpie.ai/docs/zh/plugins)** | 使用插件和编写插件 |
 | **[意图路由](https://usemagpie.ai/docs/zh/intent)** | 按每轮对话的内容选择模型 |
 | **[导入链接](https://usemagpie.ai/docs/zh/import)** | 给 provider 网站用的「添加到 magpie」按钮 |
