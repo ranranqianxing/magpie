@@ -128,6 +128,17 @@ func scanJSONToolResults(payload []byte, want map[string]bool) []ChatMessage {
 // stops without tools, executing each tool call and reading results from
 // followups (extra Connect request frames) before turn_ended.
 func (p *Proxy) runAgentLoop(ctx context.Context, followups <-chan []byte, turn AgentTurn, route Route, write func([]byte)) {
+	src := &followSource{ch: followups}
+	if turn.liveKV {
+		turn = hydrateAgentTurn(ctx, turn, write, src)
+	}
+	if len(turn.Messages) == 0 {
+		Note("chat done model=" + route.Model + " path=AgentService/Run reason=no-message")
+		write(agentTextFrame("cursor ide: agent run has no message"))
+		write(agentTurnEnded())
+		write(connectEnd())
+		return
+	}
 	chat := Chat{
 		Model: route.Model, Effort: route.Effort, Session: turn.ConversationID,
 		Messages: append([]ChatMessage(nil), turn.Messages...), Tools: turn.Tools,
@@ -180,10 +191,10 @@ func (p *Proxy) runAgentLoop(ctx context.Context, followups <-chan []byte, turn 
 		gotN := 0
 		closed := false
 		for len(want) > 0 {
-			if followups == nil {
+			if src == nil || (len(src.buf) == 0 && src.ch == nil) {
 				break
 			}
-			payload, ok := <-followups
+			payload, ok := src.take()
 			if !ok {
 				closed = true
 				break

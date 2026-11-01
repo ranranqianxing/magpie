@@ -113,19 +113,21 @@ func messagesFromStep(body []byte) []ChatMessage {
 	if err != nil {
 		return nil
 	}
+	var out []ChatMessage
 	if asst := fieldBytes(fs, 1); len(asst) > 0 {
 		af, err := parseFields(asst[0])
 		if err == nil {
 			if text, ok := fieldString(af, 1); ok && strings.TrimSpace(text) != "" {
-				return []ChatMessage{{Role: "assistant", Content: strings.TrimSpace(text)}}
+				out = append(out, ChatMessage{Role: "assistant", Content: strings.TrimSpace(text)})
 			}
 		}
 	}
-	calls := fieldBytes(fs, 2)
-	if len(calls) == 0 {
-		return nil
+	// One step can carry several tool calls. The first one is not the step.
+	// Assistant text on the same step stays in front of those calls.
+	for _, raw := range fieldBytes(fs, 2) {
+		out = append(out, messagesFromToolStep(raw)...)
 	}
-	return messagesFromToolStep(calls[0])
+	return out
 }
 
 type turnArm struct {

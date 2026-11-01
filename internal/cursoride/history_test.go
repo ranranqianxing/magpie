@@ -323,6 +323,72 @@ func agentTurnWithRead(user, path, callID, output string) []byte {
 	return []byte(turn)
 }
 
+func TestReplayStepKeepsEveryCallAndTheAssistantText(t *testing.T) {
+	id := make([]byte, 32)
+	id[0] = 7
+	var state wbuf
+	state.msg(1, id)
+	state.msg(8, turnWithTwoReads())
+	msgs, _, err := replayConversation([]byte(state), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 6 {
+		t.Fatalf("messages %d %+v", len(msgs), msgs)
+	}
+	if msgs[0].Role != "user" || msgs[0].Content.(string) != "read both" {
+		t.Fatalf("user %+v", msgs[0])
+	}
+	if msgs[1].Role != "assistant" || msgs[1].Content.(string) != "looking" || len(msgs[1].ToolCalls) != 0 {
+		t.Fatalf("text %+v", msgs[1])
+	}
+	if len(msgs[2].ToolCalls) != 1 || msgs[2].ToolCalls[0].ID != "c1" || !strings.Contains(msgs[2].ToolCalls[0].Arguments, "a.go") {
+		t.Fatalf("first call %+v", msgs[2])
+	}
+	if msgs[3].Role != "tool" || msgs[3].ToolCallID != "c1" || msgs[3].Content.(string) != "aaa" {
+		t.Fatalf("first result %+v", msgs[3])
+	}
+	if len(msgs[4].ToolCalls) != 1 || msgs[4].ToolCalls[0].ID != "c2" || !strings.Contains(msgs[4].ToolCalls[0].Arguments, "b.go") {
+		t.Fatalf("second call %+v", msgs[4])
+	}
+	if msgs[5].Role != "tool" || msgs[5].ToolCallID != "c2" || msgs[5].Content.(string) != "bbb" {
+		t.Fatalf("second result %+v", msgs[5])
+	}
+}
+
+func turnWithTwoReads() []byte {
+	var um wbuf
+	um.str(1, "read both")
+	var asst wbuf
+	asst.str(1, "looking")
+	var step wbuf
+	step.msg(1, []byte(asst))
+	step.msg(2, readCall("c1", "a.go", "aaa"))
+	step.msg(2, readCall("c2", "b.go", "bbb"))
+	var agent wbuf
+	agent.msg(1, []byte(um))
+	agent.msg(2, []byte(step))
+	var turn wbuf
+	turn.msg(1, []byte(agent))
+	return []byte(turn)
+}
+
+func readCall(id, path, output string) []byte {
+	var args wbuf
+	args.str(1, path)
+	var success wbuf
+	success.str(1, output)
+	var result wbuf
+	result.msg(1, []byte(success))
+	var pi wbuf
+	pi.msg(1, []byte(args))
+	pi.msg(2, []byte(result))
+	var call wbuf
+	call.str(57, id)
+	call.msg(61, []byte(pi))
+	return []byte(call)
+}
+
 func TestReplayConversationCountsABlobTheRequestDidNotCarry(t *testing.T) {
 	id := make([]byte, 32)
 	id[0] = 9
