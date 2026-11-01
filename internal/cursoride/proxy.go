@@ -72,14 +72,7 @@ func (p *Proxy) Start() (string, error) {
 	p.ca, p.key = ca, key
 	p.leaves = map[string]*tls.Certificate{}
 	p.hub = newHub()
-	p.client = &http.Client{Transport: &http.Transport{
-		// A nil Proxy would also skip HTTP_PROXY. Set it so a later edit
-		// cannot inherit ProxyFromEnvironment and send Cursor's traffic
-		// back into this proxy.
-		Proxy:               func(*http.Request) (*url.URL, error) { return nil, nil },
-		DialContext:         (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
-		TLSHandshakeTimeout: 10 * time.Second,
-	}}
+	p.client = &http.Client{Transport: upstreamTransport()}
 	addr := p.Addr
 	if addr == "" {
 		addr = ListenAddr
@@ -178,6 +171,11 @@ func (p *Proxy) mitm(w http.ResponseWriter, r *http.Request) {
 	case PathAgentRun:
 		p.agentRun(w, r)
 	default:
+		// RunSSE is AgentService/Run once disableHttp2 has put the IDE
+		// on HTTP/1.1. Its body is a request id; the model id rides on
+		// BidiAppend or on Run. A catalog id is compiled on those. This
+		// call, and every other path, is Cursor's own and is streamed
+		// through unchanged.
 		p.forward(w, r, nil, false)
 	}
 }
@@ -228,10 +226,10 @@ func (p *Proxy) bidi(w http.ResponseWriter, r *http.Request) {
 	if gunzipped {
 		bidiLog("gunzipped len=%d", len(body))
 	}
-	plain, _, err := UnwrapUnary(body)
+	plain, err := inspectUnary(body)
 	if err != nil {
-		bidiLog("unwrap-fail err=%v len=%d", err, len(body))
-		http.Error(w, "append", http.StatusBadRequest)
+		bidiLog("unwrap-fail err=%v len=%d forward", err, len(body))
+		p.forward(w, r, body, gunzipped)
 		return
 	}
 	id, data, blob, err := decodeAppend(plain)
@@ -563,12 +561,12 @@ func (p *Proxy) agentRun(w http.ResponseWriter, r *http.Request) {
 	}
 	body, gunzipped := gunzipRequest(body, r.Header.Get("Content-Encoding"))
 	turn, ok, err := ReadAgentRun(body)
-	if err != nil {
+	if err != nil && catalogRefusal(p, turn) {
 		Note("agent-run history fail")
 		http.Error(w, "history", http.StatusBadRequest)
 		return
 	}
-	if !ok {
+	if err != nil || !ok {
 		Note("agent-run forward reason=not-a-run")
 		p.forward(w, r, body, gunzipped)
 		return
@@ -585,6 +583,10 @@ func (p *Proxy) agentRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) agentRunStreaming(w http.ResponseWriter, r *http.Request) {
+	// The IDE keeps this body open and reads the response at the same
+	// time. Without this, net/http finishes the body before the first
+	// response byte, and an official run never starts.
+	enableFullDuplex(w)
 	bodyReader := io.Reader(r.Body)
 	gunzipped := false
 	if enc := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding"))); enc == "gzip" || enc == "x-gzip" {
@@ -598,28 +600,37 @@ func (p *Proxy) agentRunStreaming(w http.ResponseWriter, r *http.Request) {
 		gunzipped = plain
 		bodyReader = bytes.NewReader(body)
 	}
-	fr := newConnectFrameReader(bodyReader)
+	caught := newPrefixCapture(bodyReader)
+	fr := newConnectFrameReader(caught)
 	first, err := fr.next()
-	if err != nil {
-		http.Error(w, "run", http.StatusBadRequest)
-		return
-	}
+	head := caught.prefix()
+	caught.stop()
+	// head is the wire bytes already read. bodyReader is positioned
+	// just after them. Forwarding waits for neither the client to
+	// close the body nor the upstream to finish before the other
+	// starts: an official run keeps the body open for later tool
+	// results, and Cursor stalls if those frames sit in this proxy.
 	forwardStreaming := func() {
-		p.forward(w, r, streamingAgentForwardBody(first, fr), gunzipped)
+		p.forwardLive(w, r, head, bodyReader, gunzipped)
 	}
-	turn, ok, err := readAgentClient(first)
 	if err != nil {
-		Note("agent-run history fail")
-		http.Error(w, "history", http.StatusBadRequest)
-		return
-	}
-	if !ok {
 		Note("agent-run forward reason=not-a-run")
 		forwardStreaming()
 		return
 	}
-	route, ours, err := RouteModel(p.Models(), turn.ModelID, turn.Params)
-	if err != nil {
+	turn, ok, err := readAgentClient(first)
+	if err != nil && catalogRefusal(p, turn) {
+		Note("agent-run history fail")
+		http.Error(w, "history", http.StatusBadRequest)
+		return
+	}
+	if err != nil || !ok {
+		Note("agent-run forward reason=not-a-run")
+		forwardStreaming()
+		return
+	}
+	route, ours, rerr := RouteModel(p.Models(), turn.ModelID, turn.Params)
+	if rerr != nil {
 		Note(fmt.Sprintf("route fail model=%s path=AgentService/Run", turn.ModelID))
 		http.Error(w, "model", http.StatusBadRequest)
 		return
@@ -633,10 +644,6 @@ func (p *Proxy) agentRunStreaming(w http.ResponseWriter, r *http.Request) {
 	followups := make(chan []byte, 8)
 	go pumpConnectFrames(pumpCtx, fr, followups)
 	p.serveLocalAgentRun(w, r, turn, route, followups, stopPump)
-}
-
-func streamingAgentForwardBody(first []byte, fr *connectFrameReader) []byte {
-	return append(connectFrame(first), fr.readRemainder()...)
 }
 
 func pumpConnectFrames(ctx context.Context, fr *connectFrameReader, out chan<- []byte) {
@@ -744,7 +751,17 @@ func eachPiece(r io.Reader, fn func(chatPiece)) {
 }
 
 func (p *Proxy) fetch(r *http.Request, body []byte) (int, []byte, string, error) {
-	resp, err := p.do(r, body, false)
+	// The IDE often sends Accept-Encoding: br. Forwarding that makes
+	// Cursor's backend answer with brotli, which is not protobuf, and
+	// appending to it drops official rows (Grok included) out of the
+	// list the IDE can parse. identity keeps a successful reply as
+	// the protobuf MergeUnary appends to.
+	hdr := r.Header.Clone()
+	if hdr == nil {
+		hdr = make(http.Header)
+	}
+	hdr.Set("Accept-Encoding", "identity")
+	resp, err := p.doReader(r, bytes.NewReader(body), false, int64(len(body)), hdr)
 	if err != nil {
 		return 0, nil, "", err
 	}
@@ -834,8 +851,8 @@ func readLimited(r io.Reader, limit int) ([]byte, error) {
 
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, body []byte, plain bool) {
 	if body == nil {
-		b, err := io.ReadAll(io.LimitReader(r.Body, int64(maxCatalogBody)+1))
-		if err != nil || len(b) > maxCatalogBody {
+		b, err := readLimited(r.Body, maxCatalogBody)
+		if err != nil {
 			http.Error(w, "read", http.StatusBadRequest)
 			return
 		}
@@ -848,27 +865,77 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, body []byte, pla
 		return
 	}
 	defer resp.Body.Close()
-	for k, vs := range resp.Header {
-		if hop(k) {
-			continue
-		}
-		for _, v := range vs {
-			w.Header().Add(k, v)
-		}
+	writeUpstream(w, resp)
+}
+
+// forwardLive sends head and then rest without waiting for rest to end
+// before the response is written back. rest may stay open for the whole
+// turn. A live body is chunked so the backend can answer before the
+// client closes it.
+func (p *Proxy) forwardLive(w http.ResponseWriter, r *http.Request, head []byte, rest io.Reader, plain bool) {
+	if rest == nil {
+		p.forward(w, r, head, plain)
+		return
 	}
-	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	// An in-memory body (the HTTP-gzip path) has a known length. Send
+	// that length. A live body stays chunked so the backend can answer
+	// before the client closes it.
+	if br, ok := rest.(*bytes.Reader); ok {
+		tail, err := io.ReadAll(br)
+		if err != nil {
+			http.Error(w, "read", http.StatusBadRequest)
+			return
+		}
+		p.forward(w, r, append(append([]byte(nil), head...), tail...), plain)
+		return
+	}
+	pr, pw := io.Pipe()
+	go func() {
+		var err error
+		if len(head) > 0 {
+			_, err = pw.Write(head)
+		}
+		if err == nil {
+			_, err = io.Copy(pw, rest)
+		}
+		_ = pw.CloseWithError(err)
+	}()
+	resp, err := p.doReader(r, pr, plain, -1, nil)
+	if err != nil {
+		_ = pr.CloseWithError(err)
+		http.Error(w, "upstream", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	writeUpstream(w, resp)
 }
 
 func (p *Proxy) do(r *http.Request, body []byte, plain bool) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, p.origin(r), bytes.NewReader(body))
+	return p.doReader(r, bytes.NewReader(body), plain, int64(len(body)), nil)
+}
+
+func (p *Proxy) doReader(r *http.Request, body io.Reader, plain bool, n int64, hdr http.Header) (*http.Response, error) {
+	if p.client == nil {
+		return nil, errf("no upstream client")
+	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, p.origin(r), body)
 	if err != nil {
 		return nil, err
 	}
 	// body is what is sent. The client's Content-Length is the size before
 	// a gunzip, so it is not copied: the Transport writes this field.
-	req.ContentLength = int64(len(body))
-	for k, vs := range r.Header {
+	// n < 0 is a body that is still open; chunked framing lets the
+	// backend answer before the client closes it.
+	if n >= 0 {
+		req.ContentLength = n
+	} else {
+		req.ContentLength = -1
+	}
+	src := r.Header
+	if hdr != nil {
+		src = hdr
+	}
+	for k, vs := range src {
 		if hop(k) || strings.EqualFold(k, "Host") || strings.EqualFold(k, "Content-Length") {
 			continue
 		}
@@ -882,12 +949,119 @@ func (p *Proxy) do(r *http.Request, body []byte, plain bool) (*http.Response, er
 			req.Header.Add(k, v)
 		}
 	}
-	req.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	if n >= 0 {
+		req.Header.Set("Content-Length", strconv.FormatInt(n, 10))
+	} else {
+		req.Header.Del("Content-Length")
+	}
 	if plain {
 		req.Header.Del("Content-Encoding")
 	}
 	return p.client.Do(req)
 }
+
+// writeUpstream copies an upstream response as it arrives. The IDE's
+// HTTP server buffer holds a short frame until the handler returns, which
+// is long enough for Cursor to call an official stream stalled. Grok's
+// first tokens and the HTTP/1.1 heartbeats are those short frames.
+func writeUpstream(w http.ResponseWriter, resp *http.Response) {
+	for k, vs := range resp.Header {
+		if hop(k) {
+			continue
+		}
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	fl, _ := w.(http.Flusher)
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	for k, vs := range resp.Trailer {
+		if hop(k) {
+			continue
+		}
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+}
+
+// enableFullDuplex lets the handler write the response while the
+// request body is still open. A writer that cannot (a test stand-in)
+// keeps the ordinary half-duplex behavior.
+func enableFullDuplex(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).EnableFullDuplex()
+}
+
+// catalogRefusal is true when a parsed run names a magpie model. A
+// truncated conversation_state on that id is refused. The same body for
+// any other id is forwarded.
+func catalogRefusal(p *Proxy, turn AgentTurn) bool {
+	if turn.ModelID == "" {
+		return false
+	}
+	_, ours, err := RouteModel(p.Models(), turn.ModelID, turn.Params)
+	return ours || err != nil
+}
+
+// upstreamTransport talks to Cursor the way the IDE does while this proxy
+// is connected. disableHttp2 has put the IDE on HTTP/1.1. Upgrading that
+// hop to HTTP/2, or adding gzip the IDE did not ask for, changes the
+// framing official models are written against.
+func upstreamTransport() *http.Transport {
+	return &http.Transport{
+		// A nil Proxy would also skip HTTP_PROXY. Set it so a later edit
+		// cannot inherit ProxyFromEnvironment and send Cursor's traffic
+		// back into this proxy.
+		Proxy:               func(*http.Request) (*url.URL, error) { return nil, nil },
+		DialContext:         (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+		TLSHandshakeTimeout: 10 * time.Second,
+		DisableCompression:  true,
+		ForceAttemptHTTP2:   false,
+		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},
+	}
+}
+
+// prefixCapture records the bytes a frame reader consumes, then stops.
+// The forwarded official run is those bytes plus whatever is still in
+// the body, not a re-encoded frame.
+type prefixCapture struct {
+	r   io.Reader
+	buf bytes.Buffer
+	on  bool
+}
+
+func newPrefixCapture(r io.Reader) *prefixCapture {
+	return &prefixCapture{r: r, on: true}
+}
+
+func (c *prefixCapture) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if c.on && n > 0 {
+		c.buf.Write(p[:n])
+	}
+	return n, err
+}
+
+func (c *prefixCapture) prefix() []byte {
+	return append([]byte(nil), c.buf.Bytes()...)
+}
+
+func (c *prefixCapture) stop() { c.on = false }
 
 func (p *Proxy) origin(r *http.Request) string {
 	path := r.URL.RequestURI()
