@@ -33,6 +33,9 @@ type Client struct {
 	Messages       []ChatMessage
 	Tools          []ToolSpec
 	MaxTokens      int
+	wire           []json.RawMessage
+	cacheHit       int
+	cacheMiss      int
 }
 
 // ChatMessage is one turn in the gateway's chat body.
@@ -81,6 +84,13 @@ type Chat struct {
 	MaxTokens     int
 	Fast          bool
 	ContextTokens int
+	// wire is the marshaled gateway message for Messages[i] when that
+	// message was compiled before. A shorter slice means the tail was
+	// added after compile (a skipped tool's error) and is marshaled on
+	// the way out. cacheHit and cacheMiss count protobuf messages
+	// reused or compiled for this invoke. They stay off the JSON.
+	wire                []json.RawMessage
+	cacheHit, cacheMiss int
 }
 
 // Header is the session header, when the run named a conversation.
@@ -93,12 +103,12 @@ func (c Chat) Header() map[string]string {
 }
 
 type chatBody struct {
-	Model           string       `json:"model"`
-	Messages        []outMessage `json:"messages"`
-	Tools           []outToolDef `json:"tools,omitempty"`
-	MaxTokens       int          `json:"max_tokens,omitempty"`
-	ReasoningEffort string       `json:"reasoning_effort,omitempty"`
-	Stream          bool         `json:"stream"`
+	Model           string            `json:"model"`
+	Messages        []json.RawMessage `json:"messages"`
+	Tools           []outToolDef      `json:"tools,omitempty"`
+	MaxTokens       int               `json:"max_tokens,omitempty"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
+	Stream          bool              `json:"stream"`
 }
 
 type outToolDef struct {
@@ -162,14 +172,42 @@ func (c Chat) JSON() ([]byte, error) {
 			},
 		})
 	}
-	for _, m := range c.Messages {
-		om, err := marshalMessage(m)
+	body.Messages = make([]json.RawMessage, len(c.Messages))
+	for i, m := range c.Messages {
+		if i < len(c.wire) && len(c.wire[i]) > 0 {
+			body.Messages[i] = c.wire[i]
+			continue
+		}
+		raw, err := wireMessage(m)
 		if err != nil {
 			return nil, err
 		}
-		body.Messages = append(body.Messages, om)
+		body.Messages[i] = raw
 	}
 	return json.Marshal(body)
+}
+
+// wireMessage is one gateway message, the bytes json.Marshal would emit
+// for it inside the chat body. A cached compile stores these and splices
+// them back, so a later tool round does not escape the prefix again.
+func wireMessage(m ChatMessage) (json.RawMessage, error) {
+	om, err := marshalMessage(m)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(om)
+}
+
+func wireOf(msgs []ChatMessage) ([]json.RawMessage, error) {
+	out := make([]json.RawMessage, len(msgs))
+	for i, m := range msgs {
+		raw, err := wireMessage(m)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = raw
+	}
+	return out, nil
 }
 
 func marshalMessage(m ChatMessage) (outMessage, error) {
@@ -299,12 +337,30 @@ func readInvoke(c Client, body []byte) (Client, error) {
 	if err != nil {
 		return Client{}, err
 	}
+	var wire []json.RawMessage
+	useWire := true
 	for _, raw := range fieldBytes(rf, 1) {
-		msgs, err := projectMessage(raw)
+		msgs, w, hit, err := projectCached(raw)
 		if err != nil {
 			return Client{}, err
 		}
+		if hit {
+			c.cacheHit++
+		} else {
+			c.cacheMiss++
+		}
+		if len(msgs) == 0 {
+			continue
+		}
 		c.Messages = append(c.Messages, msgs...)
+		if useWire && len(w) == len(msgs) {
+			wire = append(wire, w...)
+			continue
+		}
+		useWire = false
+	}
+	if useWire {
+		c.wire = wire
 	}
 	tools, err := inferenceTools(rf)
 	if err != nil {
@@ -323,7 +379,7 @@ func readInvoke(c Client, body []byte) (Client, error) {
 	return c, nil
 }
 
-func projectMessage(raw []byte) ([]ChatMessage, error) {
+func projectMessage(raw []byte, notes *[]string) ([]ChatMessage, error) {
 	fs, err := parseFields(raw)
 	if err != nil {
 		return nil, err
@@ -353,7 +409,7 @@ func projectMessage(raw []byte) ([]ChatMessage, error) {
 		}
 	}
 	if haveTool {
-		return projectTool(toolBody)
+		return projectTool(toolBody, notes)
 	}
 	role, ok := roleName(int(roleN))
 	if !ok {
@@ -362,7 +418,7 @@ func projectMessage(raw []byte) ([]ChatMessage, error) {
 	msg := ChatMessage{Role: role}
 	switch {
 	case haveParts:
-		content, err := projectParts(parts)
+		content, err := projectParts(parts, notes)
 		if err != nil {
 			return nil, err
 		}
@@ -424,7 +480,7 @@ func roleName(n int) (string, bool) {
 	}
 }
 
-func projectParts(raw []byte) (any, error) {
+func projectParts(raw []byte, notes *[]string) (any, error) {
 	fs, err := parseFields(raw)
 	if err != nil {
 		return nil, err
@@ -433,7 +489,7 @@ func projectParts(raw []byte) (any, error) {
 	for _, one := range fieldBytes(fs, 1) {
 		pf, err := parseFields(one)
 		if err != nil {
-			noteImageSkip("partial", "part")
+			logImageSkip(notes, "partial", "part")
 			continue
 		}
 		var part []byte
@@ -449,7 +505,7 @@ func projectParts(raw []byte) (any, error) {
 		inner, err := parseFields(part)
 		if err != nil {
 			if kind == 2 || kind == 3 {
-				noteImageSkip("partial", partSource(kind))
+				logImageSkip(notes, "partial", partSource(kind))
 			}
 			continue
 		}
@@ -462,21 +518,21 @@ func projectParts(raw []byte) (any, error) {
 			mime, _ := fieldString(inner, 2)
 			img, reason := inferenceImage(data, mime)
 			if reason != "" {
-				noteImageSkip(reason, "part")
+				logImageSkip(notes, reason, "part")
 				break
 			}
-			noteImage(img, "part")
+			logImage(notes, img, "part")
 			parts = append(parts, img)
 		case 3:
 			data, _ := fieldString(inner, 1)
 			media, _ := fieldString(inner, 2)
 			if part, ok := fileImagePart(data, media); ok {
-				noteImage(part, "file")
+				logImage(notes, part, "file")
 				parts = append(parts, part)
 				break
 			}
 			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(media)), "image/") && strings.TrimSpace(data) != "" {
-				noteImageSkip("not-image", "file")
+				logImageSkip(notes, "not-image", "file")
 			}
 			parts = append(parts, ContentPart{Type: "text", Text: fileText(data, media)})
 		}
@@ -641,7 +697,7 @@ func toolArgsUseful(s string) bool {
 	return len(obj) > 0
 }
 
-func projectTool(raw []byte) ([]ChatMessage, error) {
+func projectTool(raw []byte, notes *[]string) ([]ChatMessage, error) {
 	fs, err := parseFields(raw)
 	if err != nil {
 		return nil, err
@@ -653,22 +709,22 @@ func projectTool(raw []byte) ([]ChatMessage, error) {
 			return nil, err
 		}
 		id, _ := fieldString(pf, 1)
-		text, images := toolResultBody(pf)
+		text, images := toolResultBody(pf, notes)
 		out = append(out, ChatMessage{Role: "tool", ToolCallID: id, Content: toolContent(text, images)})
 	}
 	return out, nil
 }
 
-func toolResultBody(fs []field) (string, []ContentPart) {
+func toolResultBody(fs []field, notes *[]string) (string, []ContentPart) {
 	if raw := fieldBytes(fs, 3); len(raw) > 0 {
-		if text, images, ok := toolResultValue(raw[len(raw)-1]); ok {
+		if text, images, ok := toolResultValue(raw[len(raw)-1], notes); ok {
 			return text, images
 		}
 	}
 	var b strings.Builder
 	var images []ContentPart
 	for _, exp := range fieldBytes(fs, 5) {
-		content, err := projectParts(exp)
+		content, err := projectParts(exp, notes)
 		if err != nil {
 			continue
 		}
@@ -703,7 +759,7 @@ func toolResultBody(fs []field) (string, []ContentPart) {
 // and images. Any other value is its JSON, which is the object an
 // official server would hand the model. A value that does not decode
 // is not a result: the caller tries the older parts field.
-func toolResultValue(raw []byte) (string, []ContentPart, bool) {
+func toolResultValue(raw []byte, notes *[]string) (string, []ContentPart, bool) {
 	v, err := decodeValue(raw)
 	if err != nil || v == nil {
 		return "", nil, false
@@ -712,11 +768,11 @@ func toolResultValue(raw []byte) (string, []ContentPart, bool) {
 	case string:
 		return t, nil, true
 	case []any:
-		if text, images, ok := contentList(t); ok {
+		if text, images, ok := contentList(t, notes); ok {
 			return text, images, true
 		}
 	case map[string]any:
-		if text, images, ok := contentList([]any{t}); ok {
+		if text, images, ok := contentList([]any{t}, notes); ok {
 			return text, images, true
 		}
 	}
@@ -742,7 +798,7 @@ func jsonCompact(v any) (string, error) {
 
 // contentList is a Value list of {type,text} or image parts. A list
 // that is not that shape is refused so the caller keeps the JSON.
-func contentList(list []any) (string, []ContentPart, bool) {
+func contentList(list []any, notes *[]string) (string, []ContentPart, bool) {
 	if len(list) == 0 {
 		return "", nil, false
 	}
@@ -767,7 +823,7 @@ func contentList(list []any) (string, []ContentPart, bool) {
 		case "image", "image_url", "input_image":
 			url := imageFromValue(obj)
 			if url == "" {
-				noteImageSkip("empty", "tool")
+				logImageSkip(notes, "empty", "tool")
 				continue
 			}
 			if !hasImage(images, url) {
@@ -785,7 +841,7 @@ func contentList(list []any) (string, []ContentPart, bool) {
 		return "", nil, false
 	}
 	for _, img := range images {
-		noteImage(img, "tool")
+		logImage(notes, img, "tool")
 	}
 	return b.String(), images, true
 }
@@ -839,6 +895,13 @@ func CompileChat(route Route, session string, payload []byte) (Chat, error) {
 	if err != nil {
 		return Chat{}, err
 	}
+	return chatFromRead(route, session, c)
+}
+
+// chatFromRead is the invoke CompileChat already decoded. The live
+// BidiAppend path parses the protobuf once and calls this, instead of
+// compiling the same bytes again before the gateway request starts.
+func chatFromRead(route Route, session string, c Client) (Chat, error) {
 	if c.Kind != KindInvoke {
 		return Chat{}, fmt.Errorf("cursor ide: expected invoke_model")
 	}
@@ -849,7 +912,29 @@ func CompileChat(route Route, session string, payload []byte) (Chat, error) {
 		Model: route.Model, Effort: route.Effort, Session: session,
 		InvocationID: c.InvocationID, Messages: c.Messages, Tools: c.Tools,
 		MaxTokens: c.MaxTokens, Fast: route.Fast, ContextTokens: route.ContextTokens,
+		wire: c.wire, cacheHit: c.cacheHit, cacheMiss: c.cacheMiss,
 	}, nil
+}
+
+// logImage records one kept picture. notes, when set, keeps the same
+// line so a later compile of these bytes can say it again without
+// reading the picture. The data URL is not on the line.
+func logImage(notes *[]string, part ContentPart, source string) {
+	msg := fmt.Sprintf("agent image source=%s bytes=%d mime=%s", source, imageByteCount(part), sniffedOr(part.ImageURL, ""))
+	if notes != nil {
+		*notes = append(*notes, msg)
+	}
+	Note(msg)
+}
+
+// logImageSkip records one picture left out. The reason is empty,
+// partial, or not-image. The bytes are not on the line.
+func logImageSkip(notes *[]string, reason, source string) {
+	msg := "agent image skipped reason=" + reason + " source=" + source
+	if notes != nil {
+		*notes = append(*notes, msg)
+	}
+	Note(msg)
 }
 
 // Decide says whether a run_request names a magpie model. Any other

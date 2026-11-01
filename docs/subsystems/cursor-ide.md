@@ -195,6 +195,24 @@ when a live run asked the client for those blobs (a miss is `filled=0`).
 BidiAppend line is `history=inline` because the invoke carried the
 transcript. It ends with `image-bytes=`, the decoded size of those
 image parts. A BidiAppend turn does not log `agent kv hydrate`.
+The invoke is compiled once. A message whose protobuf bytes were
+already compiled in this process is reused, including its image data
+URL, so a later tool round does not decode that picture or escape
+that message again. Text frames are written as the gateway streams
+them. A tool part is still held until that body ends, then sent once
+with the sealed arguments. `MAGPIE_DEBUG=1` prints `bidi timing`
+lines (the diag file keeps them too) with `append-ms=` (read, gunzip,
+hex), `compile-ms=` (that one compile), `json-ms=` (the gateway
+body), `gateway-ttfb=` (request start until response headers),
+`first-text-ms=` (request start until the first text or thinking
+frame, or `-1`), `seal-ms=` (request start until the tool calls are
+sealed), `cache-hit=` and `cache-miss=`. A bare retry in the same
+turn logs `compile-ms=0` because the invoke was not compiled again.
+The lines are counts and durations. They do not include message
+text, paths, image bytes, or the gateway token. Outside the test
+sandbox the diag file is appended off the request goroutine, so a
+full log does not stall the gateway call. The Agents page reads the
+lines as they are noted.
 Each kept picture also logs `agent image source=part`, `source=file`,
 or `source=tool` with `bytes=` and `mime=`. A picture left out logs
 `agent image skipped reason=` (`empty`, `partial`, `not-image`) and
@@ -240,6 +258,12 @@ a native `{}` filled from a DSML invoke of the same tool,
 a native `{}` filled from `<parameter name="path">` after `{"name":"Read">`,
 a Read whose history part stores the path on `input` rather than `args`,
 a native `{}` whose only path is a sentence and which therefore does not exec,
+a BidiAppend invoke whose text frame is on the stream while the
+gateway is still holding the rest of the body, and whose process log
+contains `compile-ms=`, `gateway-ttfb=` and `seal-ms=` without the
+typed text, a second compile of the same inline prefix whose
+`cache-hit` is that prefix and whose gateway JSON matches compiling
+it again,
 a BidiAppend invoke (RunInferenceSSE) whose gateway body has a prefix,
 then `finish_reason`, then a duplicate message tool call with the path,
 and whose one completing `tool_call_part` carries that path while the

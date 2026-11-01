@@ -217,6 +217,7 @@ func (p *Proxy) inferenceSSE(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) bidi(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	body, err := readLimited(r.Body, maxAppendBody)
 	if err != nil {
 		bidiLog("read-fail reason=too-large err=%v enc=%q", err, r.Header.Get("Content-Encoding"))
@@ -250,13 +251,15 @@ func (p *Proxy) bidi(w http.ResponseWriter, r *http.Request) {
 		// Cursor 3.x may send data_binary instead of hex data.
 		raw = blob
 		bidiLog("append id=%s via=data_binary n=%d", id, len(raw))
-	case data != "":
-		raw, err = hex.DecodeString(data)
+	case len(data) > 0:
+		raw = make([]byte, hex.DecodedLen(len(data)))
+		n, err := hex.Decode(raw, data)
 		if err != nil {
 			bidiLog("hex-fail err=%v dataLen=%d", err, len(data))
 			http.Error(w, "append", http.StatusBadRequest)
 			return
 		}
+		raw = raw[:n]
 		bidiLog("append id=%s via=hex n=%d", id, len(raw))
 	default:
 		bidiLog("forward empty-payload id=%s", id)
@@ -264,7 +267,7 @@ func (p *Proxy) bidi(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s := p.hub.localOf(id); s != nil {
-		p.localAppend(w, s, raw)
+		p.localAppend(w, s, raw, time.Since(started).Milliseconds())
 		return
 	}
 	if run, ok := inferenceRun(raw); ok {
@@ -289,13 +292,15 @@ func (p *Proxy) bidi(w http.ResponseWriter, r *http.Request) {
 	p.forward(w, r, body, gunzipped)
 }
 
-func (p *Proxy) localAppend(w http.ResponseWriter, s *sess, raw []byte) {
+func (p *Proxy) localAppend(w http.ResponseWriter, s *sess, raw []byte, appendMs int64) {
 	// Cursor 3.x sometimes nests a Connect frame inside BidiAppend data.
 	if plain, framed, uerr := UnwrapUnary(raw); uerr == nil && framed && len(plain) > 0 {
 		bidiLog("localAppend unwrap nested connect n=%d->%d", len(raw), len(plain))
 		raw = plain
 	}
+	compileStart := time.Now()
 	c, err := ReadClient(raw)
+	compileMs := time.Since(compileStart).Milliseconds()
 	if err != nil {
 		bidiLog("ReadClient-fail n=%d err=%v", len(raw), err)
 		http.Error(w, "append", http.StatusBadRequest)
@@ -303,7 +308,7 @@ func (p *Proxy) localAppend(w http.ResponseWriter, s *sess, raw []byte) {
 	}
 	switch c.Kind {
 	case KindInvoke:
-		chat, err := CompileChat(s.route, s.conv, raw)
+		chat, err := chatFromRead(s.route, s.conv, c)
 		if err != nil {
 			id := c.InvocationID
 			if id == "" {
@@ -313,7 +318,7 @@ func (p *Proxy) localAppend(w http.ResponseWriter, s *sess, raw []byte) {
 			s.push(invocationIdFrame(id))
 			s.push(endFrame(id, err.Error()))
 		} else {
-			go p.runChat(s, chat)
+			go p.runChat(s, chat, appendMs, compileMs)
 		}
 	case KindCancel:
 		s.stop()
@@ -323,7 +328,7 @@ func (p *Proxy) localAppend(w http.ResponseWriter, s *sess, raw []byte) {
 	writeProto(w, nil, "application/proto")
 }
 
-func (p *Proxy) runChat(s *sess, chat Chat) {
+func (p *Proxy) runChat(s *sess, chat Chat, appendMs, compileMs int64) {
 	noteBidiHistory(chat)
 	defer Note("chat done model=" + chat.Model + " path=BidiAppend")
 	s.push(invocationIdFrame(chat.InvocationID))
@@ -336,7 +341,8 @@ func (p *Proxy) runChat(s *sess, chat Chat) {
 	// one completing tool_call_part, and Cursor's own loop continues.
 	bare := 0
 	for {
-		run, skipped, err := p.completeInference(s, chat, &sawText)
+		run, skipped, err := p.completeInference(s, chat, &sawText, appendMs, compileMs)
+		appendMs, compileMs = 0, 0
 		if err != nil {
 			s.push(endFrame(chat.InvocationID, err.Error()))
 			return
@@ -361,25 +367,18 @@ func (p *Proxy) runChat(s *sess, chat Chat) {
 // completeInference asks the gateway once and writes text as it arrives.
 // Runnable calls go out as one completing tool_call_part each. Skipped
 // calls are not sent. The error is the frame text.
-func (p *Proxy) completeInference(s *sess, chat Chat, sawText *bool) (run, skipped []toolBuf, err error) {
+func (p *Proxy) completeInference(s *sess, chat Chat, sawText *bool, appendMs, compileMs int64) (run, skipped []toolBuf, err error) {
 	noteRequestToolArgs(chat.Messages)
+	jsonStart := time.Now()
 	body, jerr := chat.JSON()
+	jsonMs := time.Since(jsonStart).Milliseconds()
 	if jerr != nil {
 		return nil, nil, errf("chat")
 	}
-	base, token := p.Gateway()
-	req, rerr := http.NewRequestWithContext(s.context(), http.MethodPost, strings.TrimRight(base, "/")+"/v1/chat/completions", bytes.NewReader(body))
-	if rerr != nil {
-		return nil, nil, errf("gateway")
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	for k, v := range chat.Header() {
-		req.Header.Set(k, v)
-	}
-	resp, derr := p.client.Do(req)
+	reqStart := time.Now()
+	resp, derr := p.postChat(s.context(), chat, body)
+	ttfb := time.Since(reqStart).Milliseconds()
+	noteBidiTiming(appendMs, compileMs, jsonMs, ttfb, len(body), chat.cacheHit, chat.cacheMiss)
 	if derr != nil {
 		return nil, nil, errf("gateway")
 	}
@@ -389,9 +388,13 @@ func (p *Proxy) completeInference(s *sess, chat Chat, sawText *bool) (run, skipp
 	}
 	var asm toolAssembler
 	var said strings.Builder
+	var firstText int64 = -1
 	eachPiece(resp.Body, func(piece chatPiece) {
 		if piece.thinking != "" {
 			s.push(thinkingFrame(chat.InvocationID, piece.thinking))
+			if firstText < 0 {
+				firstText = time.Since(reqStart).Milliseconds()
+			}
 			said.WriteString(piece.thinking)
 			said.WriteByte('\n')
 		}
@@ -400,6 +403,9 @@ func (p *Proxy) completeInference(s *sess, chat Chat, sawText *bool) (run, skipp
 		if piece.text != "" {
 			*sawText = true
 			s.push(textFrame(chat.InvocationID, piece.text, false))
+			if firstText < 0 {
+				firstText = time.Since(reqStart).Milliseconds()
+			}
 			said.WriteString(piece.text)
 			said.WriteByte('\n')
 		}
@@ -413,7 +419,40 @@ func (p *Proxy) completeInference(s *sess, chat Chat, sawText *bool) (run, skipp
 		}
 	})
 	run, skipped = finishInferenceTools(s, chat.InvocationID, &asm, said.String())
+	Note(fmt.Sprintf("bidi timing first-text-ms=%d seal-ms=%d", firstText, time.Since(reqStart).Milliseconds()))
 	return run, skipped, nil
+}
+
+// postChat is the gateway chat completion both inject paths send.
+// Accept-Encoding is identity so a stream is not gunzipped by the
+// transport: a gzip member buffers until it can flush, which holds the
+// first token. The body is the JSON the caller already built.
+func (p *Proxy) postChat(ctx context.Context, chat Chat, body []byte) (*http.Response, error) {
+	base, token := p.Gateway()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "identity")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	for k, v := range chat.Header() {
+		req.Header.Set(k, v)
+	}
+	return p.client.Do(req)
+}
+
+// noteBidiTiming is the prep line for one BidiAppend gateway call.
+// append-ms is read, gunzip and hex. compile-ms is the one protobuf
+// compile. json-ms is the gateway body. gateway-ttfb is the request
+// start until response headers. A bare retry did not read a new append,
+// so those two are 0. Counts and durations only: no text, paths, or
+// image bytes.
+func noteBidiTiming(appendMs, compileMs, jsonMs, ttfb int64, jsonBytes, hit, miss int) {
+	Note(fmt.Sprintf("bidi timing append-ms=%d compile-ms=%d json-ms=%d gateway-ttfb=%d json-bytes=%d cache-hit=%d cache-miss=%d",
+		appendMs, compileMs, jsonMs, ttfb, jsonBytes, hit, miss))
 }
 
 // noteBidiHistory is the per-invoke line for the path injected Agent
@@ -947,19 +986,26 @@ func sseRequestID(body []byte) (string, error) {
 	return id, nil
 }
 
-func decodeAppend(plain []byte) (id, data string, blob []byte, err error) {
+func decodeAppend(plain []byte) (id string, data, blob []byte, err error) {
 	fs, err := parseFields(plain)
 	if err != nil {
-		return "", "", nil, err
+		return "", nil, nil, err
 	}
-	data, _ = fieldString(fs, 1)
+	// data is the hex of the invoke. It stays a slice of plain so the
+	// decode does not copy the hex before turning it into protobuf.
+	for _, f := range fs {
+		if f.num == 1 && f.wt == 2 {
+			data = f.b
+			break
+		}
+	}
 	if bins := fieldBytes(fs, 4); len(bins) > 0 && len(bins[0]) > 0 {
 		blob = bins[0]
 	}
 	if ids := fieldBytes(fs, 2); len(ids) > 0 {
 		inner, err := parseFields(ids[0])
 		if err != nil {
-			return "", "", nil, err
+			return "", nil, nil, err
 		}
 		id, _ = fieldString(inner, 1)
 	}

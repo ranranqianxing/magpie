@@ -1,13 +1,11 @@
 package cursoride
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"strings"
 )
 
@@ -250,19 +248,7 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 	if err != nil {
 		return nil, nil, false, errf("chat")
 	}
-	base, token := p.Gateway()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, nil, false, errf("gateway")
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	for k, v := range chat.Header() {
-		req.Header.Set(k, v)
-	}
-	resp, err := p.client.Do(req)
+	resp, err := p.postChat(ctx, chat, body)
 	if err != nil {
 		return nil, nil, false, errf("gateway")
 	}
