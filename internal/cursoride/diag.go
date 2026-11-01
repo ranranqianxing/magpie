@@ -148,9 +148,21 @@ func sanitizeDiag(msg string) string {
 	return msg
 }
 
+// diagBeforeAppend, when set, runs before a batch is written. A test
+// holds the first call so it can queue the lines that will cross the cap.
+// diagBeforeCompact runs after that append has crossed the cap and before
+// the pending lines are taken. Holding it lets a Note land in both the
+// page buffer and the queue, which is the window that used to write the
+// line twice.
+var diagBeforeAppend func()
+var diagBeforeCompact func()
+
 func appendDiagBatch(batch []string) {
 	if len(batch) == 0 {
 		return
+	}
+	if diagBeforeAppend != nil {
+		diagBeforeAppend()
 	}
 	path := DiagPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -168,14 +180,25 @@ func appendDiagBatch(batch []string) {
 	if statErr != nil || st.Size() <= diagMaxBytes {
 		return
 	}
-	// The page buffer is already trimmed. Rewrite from it instead of
-	// reading the file back on the path that just appended.
+	if diagBeforeCompact != nil {
+		diagBeforeCompact()
+	}
+	// A Note that arrived after this batch was taken is already in
+	// diagLines, so the rewrite contains it. It is also still in
+	// diagPending. Leaving it there appends it again once the writer
+	// wakes. Take those lines with the snapshot. Their wait is this
+	// write, not a later append.
 	diagMu.Lock()
 	lines := append([]string(nil), diagLines...)
+	n := len(diagPending)
+	diagPending = nil
 	diagMu.Unlock()
 	body := strings.TrimRight(strings.Join(lines, "\n"), "\n")
 	if body != "" {
 		body += "\n"
 	}
 	_ = os.WriteFile(path, []byte(body), 0o600)
+	if n > 0 {
+		diagWG.Add(-n)
+	}
 }

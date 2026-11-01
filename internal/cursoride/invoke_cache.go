@@ -46,8 +46,10 @@ func projectCached(raw []byte) (msgs []ChatMessage, wire []json.RawMessage, hit 
 		return nil, nil, false, err
 	}
 	notes = append([]string(nil), notes...)
+	// An empty message has no JSON. Caching it would not add to
+	// invokeBytes, so the map would grow with nothing for the LRU to
+	// drop. Parsing it again is the whole cost.
 	if len(msgs) == 0 {
-		invokePut(invokeItem{key: sum, notes: notes})
 		return nil, nil, false, nil
 	}
 	w, werr := wireOf(msgs)

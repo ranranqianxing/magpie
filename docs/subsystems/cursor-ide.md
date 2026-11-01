@@ -207,7 +207,11 @@ body), `gateway-ttfb=` (request start until response headers),
 `first-text-ms=` (request start until the first text or thinking
 frame, or `-1`), `seal-ms=` (request start until the tool calls are
 sealed), `cache-hit=` and `cache-miss=`. A bare retry in the same
-turn logs `compile-ms=0` because the invoke was not compiled again.
+turn logs `compile-ms=0` and leaves off `cache-hit=` and
+`cache-miss=`, because that round did not compile. The file rewrite
+that runs once the log is over its cap replaces the file with the
+lines already noted and drops the pending copy of those lines, so a
+line noted during the rewrite is not appended twice.
 The lines are counts and durations. They do not include message
 text, paths, image bytes, or the gateway token. Outside the test
 sandbox the diag file is appended off the request goroutine, so a

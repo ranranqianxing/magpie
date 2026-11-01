@@ -560,14 +560,6 @@ func imageByteCount(part ContentPart) int {
 	return n
 }
 
-func noteImage(part ContentPart, source string) {
-	Note(fmt.Sprintf("agent image source=%s bytes=%d mime=%s", source, imageByteCount(part), sniffedOr(part.ImageURL, "")))
-}
-
-func noteImageSkip(reason, source string) {
-	Note("agent image skipped reason=" + reason + " source=" + source)
-}
-
 func imagePart(payload, mime string) (ContentPart, bool) {
 	if mime == "" {
 		mime = "image/png"

@@ -24,10 +24,11 @@ func TestInvokePrefixIsCompiledOnce(t *testing.T) {
 	png := append(tinyPNG(), bytes.Repeat([]byte{0x5a}, 4096)...)
 	wrapped := wrapB64(base64.StdEncoding.EncodeToString(png))
 	const prefix = "latency-prefix-unique"
-	payload := invoke("inv-cache",
+	lead := []wbuf{
 		userImage(prefix, wrapped, "image/png"),
 		textMsg(2, "latency-answer-unique"),
-	)
+	}
+	payload := invoke("inv-cache", lead...)
 	first, err := CompileChat(Route{Model: "deepseek/deepseek-v4.1-flash"}, "conv", payload)
 	if err != nil {
 		t.Fatal(err)
@@ -82,6 +83,49 @@ func TestInvokePrefixIsCompiledOnce(t *testing.T) {
 	}
 	if json.Unmarshal(withTail, &got) != nil || len(got.Messages) != 3 {
 		t.Fatalf("messages %s", withTail)
+	}
+	// The next invoke is the same prefix bytes plus one new tool result,
+	// which is what a later BidiAppend round sends.
+	withResult := invoke("inv-next", lead[0], lead[1], toolResultValueMsg("call_1", map[string]any{"content": "latency-new-result"}))
+	third, err := CompileChat(Route{Model: "deepseek/deepseek-v4.1-flash"}, "conv", withResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.cacheHit != 2 || third.cacheMiss != 1 {
+		t.Fatalf("prefix hit / new result miss hit=%d miss=%d", third.cacheHit, third.cacheMiss)
+	}
+	round, err := third.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(round, []byte(prefix)) || !bytes.Contains(round, []byte("latency-new-result")) {
+		t.Fatalf("round dropped prefix or result: %s", round)
+	}
+}
+
+func TestEmptyInferenceMessageIsNotCached(t *testing.T) {
+	resetInvokeCache()
+	var empty wbuf
+	empty.u32(1, 1)
+	const text = "kept-beside-empty-latency"
+	payload := invoke("inv-empty", empty, textMsg(1, text))
+	first, err := CompileChat(Route{Model: "deepseek/deepseek-v4.1-flash"}, "conv", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.cacheHit != 0 || first.cacheMiss != 2 {
+		t.Fatalf("first hit=%d miss=%d", first.cacheHit, first.cacheMiss)
+	}
+	second, err := CompileChat(Route{Model: "deepseek/deepseek-v4.1-flash"}, "conv", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.cacheHit != 1 || second.cacheMiss != 1 {
+		t.Fatalf("empty message was cached hit=%d miss=%d", second.cacheHit, second.cacheMiss)
+	}
+	body, err := second.JSON()
+	if err != nil || !bytes.Contains(body, []byte(text)) {
+		t.Fatalf("body %s err=%v", body, err)
 	}
 }
 

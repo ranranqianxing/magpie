@@ -378,7 +378,14 @@ func (p *Proxy) completeInference(s *sess, chat Chat, sawText *bool, appendMs, c
 	reqStart := time.Now()
 	resp, derr := p.postChat(s.context(), chat, body)
 	ttfb := time.Since(reqStart).Milliseconds()
-	noteBidiTiming(appendMs, compileMs, jsonMs, ttfb, len(body), chat.cacheHit, chat.cacheMiss)
+	// A bare retry zeros append-ms and compile-ms. The cache counts on
+	// chat are from the invoke's compile, already logged on the first
+	// line. Repeating them makes the retry look like another compile.
+	hit, miss := chat.cacheHit, chat.cacheMiss
+	if appendMs == 0 && compileMs == 0 {
+		hit, miss = -1, -1
+	}
+	noteBidiTiming(appendMs, compileMs, jsonMs, ttfb, len(body), hit, miss)
 	if derr != nil {
 		return nil, nil, errf("gateway")
 	}
@@ -448,9 +455,15 @@ func (p *Proxy) postChat(ctx context.Context, chat Chat, body []byte) (*http.Res
 // append-ms is read, gunzip and hex. compile-ms is the one protobuf
 // compile. json-ms is the gateway body. gateway-ttfb is the request
 // start until response headers. A bare retry did not read a new append,
-// so those two are 0. Counts and durations only: no text, paths, or
+// so those two are 0, and hit and miss are negative: the cache counts
+// stay off that line. Counts and durations only: no text, paths, or
 // image bytes.
 func noteBidiTiming(appendMs, compileMs, jsonMs, ttfb int64, jsonBytes, hit, miss int) {
+	if hit < 0 || miss < 0 {
+		Note(fmt.Sprintf("bidi timing append-ms=%d compile-ms=%d json-ms=%d gateway-ttfb=%d json-bytes=%d",
+			appendMs, compileMs, jsonMs, ttfb, jsonBytes))
+		return
+	}
 	Note(fmt.Sprintf("bidi timing append-ms=%d compile-ms=%d json-ms=%d gateway-ttfb=%d json-bytes=%d cache-hit=%d cache-miss=%d",
 		appendMs, compileMs, jsonMs, ttfb, jsonBytes, hit, miss))
 }
