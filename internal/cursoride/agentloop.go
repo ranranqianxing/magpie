@@ -178,13 +178,8 @@ func (p *Proxy) runAgentLoop(ctx context.Context, followups <-chan []byte, turn 
 			// agentGatewayRound numbers each exec from before+1, in order.
 			execOf[before+uint32(i)+1] = t.id
 		}
-		var skips []ChatMessage
-		for _, t := range skipped {
-			calls = append(calls, ToolCall{ID: t.id, Name: t.name, Arguments: t.args})
-			skips = append(skips, ChatMessage{
-				Role: "tool", ToolCallID: t.id, Content: piSkipReason(t.name, t.args),
-			})
-		}
+		skippedCalls, skips := skippedToolMessages(skipped)
+		calls = append(calls, skippedCalls...)
 		chat.Messages = append(chat.Messages, ChatMessage{Role: "assistant", ToolCalls: calls})
 		chat.Messages = append(chat.Messages, skips...)
 
@@ -325,6 +320,30 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 // where=seal, where=frames exec=skipped, and where=round are logged
 // here, on whichever entry read the body. The caller logs exec=written
 // after it puts the call on the wire.
+// skippedToolMessages is the assistant calls and tool errors for calls
+// the facade will not run. The text names the missing field. The
+// argument values are not copied into the diagnostic line.
+func skippedToolMessages(skipped []toolBuf) (calls []ToolCall, msgs []ChatMessage) {
+	for _, t := range skipped {
+		calls = append(calls, ToolCall{ID: t.id, Name: t.name, Arguments: t.args})
+		msgs = append(msgs, ChatMessage{
+			Role: "tool", ToolCallID: t.id, Content: piSkipReason(t.name, t.args),
+		})
+	}
+	return calls, msgs
+}
+
+// feedSkipped appends those calls onto chat so the next gateway body
+// still has the user's images and a result for the empty call.
+func feedSkipped(chat *Chat, skipped []toolBuf) {
+	if chat == nil || len(skipped) == 0 {
+		return
+	}
+	calls, msgs := skippedToolMessages(skipped)
+	chat.Messages = append(chat.Messages, ChatMessage{Role: "assistant", ToolCalls: calls})
+	chat.Messages = append(chat.Messages, msgs...)
+}
+
 func sealRound(asm *toolAssembler, text string, say func(string)) []toolBuf {
 	run, _ := sealCalls(asm, text, say)
 	return run

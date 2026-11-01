@@ -28,6 +28,12 @@ const (
 // answer with magpie's models alone, which would drop Cursor's own list.
 const maxCatalogBody = 32 << 20
 
+// maxAppendBody is how much of a BidiAppend is read. The invoke inlines
+// the transcript and its images, and the hex form is twice the protobuf,
+// so a burst of pictures is larger than a model list. Past this the
+// append is refused. It is not parsed as an empty invoke.
+const maxAppendBody = 96 << 20
+
 // Upstream fetches Cursor's own reply for the same catalog request.
 // status outside 2xx, or a non-nil err, is "Cursor's backend did not
 // answer": the handler then returns magpie's rows alone. contentType is

@@ -217,13 +217,13 @@ func (p *Proxy) inferenceSSE(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) bidi(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, int64(maxCatalogBody)+1))
-	if err != nil || len(body) > maxCatalogBody {
-		bidiLog("read-fail err=%v len=%d enc=%q", err, len(body), r.Header.Get("Content-Encoding"))
+	body, err := readLimited(r.Body, maxAppendBody)
+	if err != nil {
+		bidiLog("read-fail reason=too-large err=%v enc=%q", err, r.Header.Get("Content-Encoding"))
 		http.Error(w, "read", http.StatusBadRequest)
 		return
 	}
-	body, gunzipped := gunzipRequest(body, r.Header.Get("Content-Encoding"))
+	body, gunzipped := gunzipRequestLimit(body, r.Header.Get("Content-Encoding"), maxAppendBody)
 	if gunzipped {
 		bidiLog("gunzipped len=%d", len(body))
 	}
@@ -326,18 +326,51 @@ func (p *Proxy) localAppend(w http.ResponseWriter, s *sess, raw []byte) {
 func (p *Proxy) runChat(s *sess, chat Chat) {
 	noteBidiHistory(chat)
 	defer Note("chat done model=" + chat.Model + " path=BidiAppend")
-	noteRequestToolArgs(chat.Messages)
 	s.push(invocationIdFrame(chat.InvocationID))
-	body, err := chat.JSON()
-	if err != nil {
-		s.push(endFrame(chat.InvocationID, "cursor ide: chat"))
-		return
+	var sawText bool
+	// bare counts rounds whose calls were all refused by the facade.
+	// Cursor never sees those calls, so it will not send a follow-up
+	// invoke. One such round is asked again with the tool error and the
+	// images still on the chat. A second is the model repeating that
+	// shape; the turn stops instead of spinning. A call that can run is
+	// one completing tool_call_part, and Cursor's own loop continues.
+	bare := 0
+	for {
+		run, skipped, err := p.completeInference(s, chat, &sawText)
+		if err != nil {
+			s.push(endFrame(chat.InvocationID, err.Error()))
+			return
+		}
+		Note(fmt.Sprintf("agent tool round runnable=%d skipped=%d images=%d", len(run), len(skipped), countChatImages(chat.Messages)))
+		if len(run) > 0 || len(skipped) == 0 {
+			break
+		}
+		bare++
+		if bare > 1 {
+			Note("agent tool round stop reason=bare")
+			break
+		}
+		feedSkipped(&chat, skipped)
+	}
+	if sawText {
+		s.push(textFrame(chat.InvocationID, "", true))
+	}
+	s.push(endFrame(chat.InvocationID, ""))
+}
+
+// completeInference asks the gateway once and writes text as it arrives.
+// Runnable calls go out as one completing tool_call_part each. Skipped
+// calls are not sent. The error is the frame text.
+func (p *Proxy) completeInference(s *sess, chat Chat, sawText *bool) (run, skipped []toolBuf, err error) {
+	noteRequestToolArgs(chat.Messages)
+	body, jerr := chat.JSON()
+	if jerr != nil {
+		return nil, nil, errf("chat")
 	}
 	base, token := p.Gateway()
-	req, err := http.NewRequestWithContext(s.context(), http.MethodPost, strings.TrimRight(base, "/")+"/v1/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		s.push(endFrame(chat.InvocationID, "cursor ide: gateway"))
-		return
+	req, rerr := http.NewRequestWithContext(s.context(), http.MethodPost, strings.TrimRight(base, "/")+"/v1/chat/completions", bytes.NewReader(body))
+	if rerr != nil {
+		return nil, nil, errf("gateway")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
@@ -346,17 +379,14 @@ func (p *Proxy) runChat(s *sess, chat Chat) {
 	for k, v := range chat.Header() {
 		req.Header.Set(k, v)
 	}
-	resp, err := p.client.Do(req)
-	if err != nil {
-		s.push(endFrame(chat.InvocationID, "cursor ide: gateway"))
-		return
+	resp, derr := p.client.Do(req)
+	if derr != nil {
+		return nil, nil, errf("gateway")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		s.push(endFrame(chat.InvocationID, fmt.Sprintf("cursor ide: gateway status %d", resp.StatusCode)))
-		return
+		return nil, nil, fmt.Errorf("cursor ide: gateway status %d", resp.StatusCode)
 	}
-	var sawText bool
 	var asm toolAssembler
 	var said strings.Builder
 	eachPiece(resp.Body, func(piece chatPiece) {
@@ -368,7 +398,7 @@ func (p *Proxy) runChat(s *sess, chat Chat) {
 		// Cursor drops text on is_final and only emits finish; content
 		// must ride non-final text_part frames (#Cursor 3.27 local loop).
 		if piece.text != "" {
-			sawText = true
+			*sawText = true
 			s.push(textFrame(chat.InvocationID, piece.text, false))
 			said.WriteString(piece.text)
 			said.WriteByte('\n')
@@ -382,11 +412,8 @@ func (p *Proxy) runChat(s *sess, chat Chat) {
 			asm.add(d)
 		}
 	})
-	finishInferenceTools(s, chat.InvocationID, &asm, said.String())
-	if sawText {
-		s.push(textFrame(chat.InvocationID, "", true))
-	}
-	s.push(endFrame(chat.InvocationID, ""))
+	run, skipped = finishInferenceTools(s, chat.InvocationID, &asm, said.String())
+	return run, skipped, nil
 }
 
 // noteBidiHistory is the per-invoke line for the path injected Agent
@@ -422,8 +449,14 @@ func noteBidiHistory(chat Chat) {
 			}
 		}
 	}
-	Note(fmt.Sprintf("chat start model=%s path=BidiAppend history=inline messages=%d tools=%d calls=%d results=%d images=%d bytes=%d empty-args=%d reasoning=%d",
-		chat.Model, len(chat.Messages), len(chat.Tools), calls, results, countChatImages(chat.Messages), n, empty, reasoning))
+	var imageBytes int
+	for _, m := range chat.Messages {
+		for _, img := range messageImages(m) {
+			imageBytes += imageByteCount(img)
+		}
+	}
+	Note(fmt.Sprintf("chat start model=%s path=BidiAppend history=inline messages=%d tools=%d calls=%d results=%d images=%d bytes=%d empty-args=%d reasoning=%d image-bytes=%d",
+		chat.Model, len(chat.Messages), len(chat.Tools), calls, results, countChatImages(chat.Messages), n, empty, reasoning, imageBytes))
 }
 
 // agentHistoryMode is how this AgentService/Run got its prompt.
@@ -445,15 +478,16 @@ func agentHistoryMode(turn AgentTurn) string {
 // Pi can run. The part's arguments are the sealed JSON, not the unsent
 // tail of a fragment. Cursor's local loop parses that part and runs the
 // tool. A call that is still missing its strings is not sent.
-func finishInferenceTools(s *sess, invocation string, asm *toolAssembler, text string) {
+func finishInferenceTools(s *sess, invocation string, asm *toolAssembler, text string) (run, skipped []toolBuf) {
 	markers := markupMarkers(text)
-	run := sealRound(asm, text, func(msg string) {
+	run, skipped = sealCalls(asm, text, func(msg string) {
 		s.push(textFrame(invocation, msg, false))
 	})
 	for _, t := range run {
 		s.push(toolCallFrame(invocation, t.id, t.name, displayArgs(t.name, t.args), true))
 		noteToolTrace("frames", t.name, t.args, t.frags, t.placeholders, t.fill, markers, "written")
 	}
+	return run, skipped
 }
 
 // agentRun answers AgentService/Run when the model is in the catalog.
@@ -680,6 +714,14 @@ func (p *Proxy) fetch(r *http.Request, body []byte) (int, []byte, string, error)
 // decodeCatalogBody gunzips a catalog reply when Cursor's Accept-Encoding
 // left the upstream body compressed. MergeUnary needs raw protobuf.
 func decodeCatalogBody(b []byte, contentEncoding string) ([]byte, error) {
+	plain, err := gunzipUpTo(b, contentEncoding, maxCatalogBody)
+	if err != nil && err.Error() == "cursor ide: body too large" {
+		return nil, errf("upstream catalog too large")
+	}
+	return plain, err
+}
+
+func gunzipUpTo(b []byte, contentEncoding string, limit int) ([]byte, error) {
 	enc := strings.ToLower(contentEncoding)
 	if enc != "gzip" && !(len(b) >= 2 && b[0] == 0x1f && b[1] == 0x8b) {
 		return b, nil
@@ -688,13 +730,13 @@ func decodeCatalogBody(b []byte, contentEncoding string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	plain, err := io.ReadAll(io.LimitReader(zr, int64(maxCatalogBody)+1))
+	plain, err := io.ReadAll(io.LimitReader(zr, int64(limit)+1))
 	_ = zr.Close()
 	if err != nil {
 		return nil, err
 	}
-	if len(plain) > maxCatalogBody {
-		return nil, errf("upstream catalog too large")
+	if len(plain) > limit {
+		return nil, errf("body too large")
 	}
 	return plain, nil
 }
@@ -705,12 +747,19 @@ func decodeCatalogBody(b []byte, contentEncoding string) ([]byte, error) {
 // original bytes and plain false, so the headers the client sent still
 // match. x-gzip is the same encoding.
 func gunzipRequest(body []byte, contentEncoding string) ([]byte, bool) {
+	return gunzipRequestLimit(body, contentEncoding, maxCatalogBody)
+}
+
+// gunzipRequestLimit is gunzipRequest with an explicit cap. BidiAppend
+// uses maxAppendBody so a gzipped burst of images is not cut at the
+// catalog cap. A failed gunzip keeps the original bytes.
+func gunzipRequestLimit(body []byte, contentEncoding string, limit int) ([]byte, bool) {
 	enc := strings.ToLower(strings.TrimSpace(contentEncoding))
 	magic := len(body) >= 2 && body[0] == 0x1f && body[1] == 0x8b
 	if enc != "gzip" && enc != "x-gzip" && !magic {
 		return body, false
 	}
-	plain, err := decodeCatalogBody(body, contentEncoding)
+	plain, err := gunzipUpTo(body, contentEncoding, limit)
 	if err != nil || bytes.Equal(plain, body) {
 		if err != nil {
 			bidiLog("gunzip-fail err=%v len=%d", err, len(body))
@@ -718,6 +767,17 @@ func gunzipRequest(body []byte, contentEncoding string) ([]byte, bool) {
 		return body, false
 	}
 	return plain, true
+}
+
+func readLimited(r io.Reader, limit int) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > limit {
+		return nil, errf("body too large")
+	}
+	return b, nil
 }
 
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, body []byte, plain bool) {
