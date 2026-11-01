@@ -56,14 +56,24 @@ func replayConversation(state []byte, prefetched map[string][]byte) (msgs []Chat
 	// when the JSON prompt is missing blobs, which is how a long session
 	// arrives before those blobs are prefetched. A complete JSON prompt
 	// stays the prompt: turns are not appended beside it.
+	// Root holes stay counted after the stand-in is chosen. Replacing
+	// missing with the turn count hid the root prompt, so a later KV
+	// get never asked for it.
 	if missing > 0 || len(msgs) == 0 {
+		rootMissing := missing
 		turns, turnMissing := replayTurns(fs, prefetched)
 		if len(turns) > len(msgs) {
 			Note(fmt.Sprintf("agent history source=turns messages=%d root=%d blobs-missing=%d", len(turns), len(msgs), missing))
-			msgs, missing = turns, turnMissing
+			msgs = turns
+			missing = rootMissing
+			if turnMissing > missing {
+				missing = turnMissing
+			}
 		}
 	}
-	if summary := summaryText(fs, prefetched); summary != "" {
+	if summary, miss := summaryText(fs, prefetched); miss > 0 {
+		missing += miss
+	} else if summary != "" {
 		msgs = append([]ChatMessage{{Role: "system", Content: summary}}, msgs...)
 	}
 	if n := countChatImages(msgs); n > 0 || missing > 0 {
@@ -136,30 +146,36 @@ func looksJSON(b []byte) bool {
 	return len(b) > 0 && (b[0] == '{' || b[0] == '[')
 }
 
-func summaryText(fs []field, prefetched map[string][]byte) string {
+// summaryText reads ConversationStateStructure field 6. miss is a blob
+// id that was not prefetched. Bytes that are present but not a summary
+// are not a miss: the field was read, and it was not a prompt hole.
+func summaryText(fs []field, prefetched map[string][]byte) (string, int) {
 	raw := fieldBytes(fs, 6)
 	if len(raw) == 0 {
-		return ""
+		return "", 0
 	}
 	body, miss := resolveBlob(raw[0], prefetched)
-	if miss > 0 || len(body) == 0 || !utf8.Valid(body) {
-		return ""
+	if miss > 0 {
+		return "", miss
+	}
+	if len(body) == 0 || !utf8.Valid(body) {
+		return "", 0
 	}
 	if looksJSON(body) {
 		msgs, err := messagesFromJSON(body)
 		if err != nil || len(msgs) == 0 {
-			return ""
+			return "", 0
 		}
 		if s, ok := msgs[0].Content.(string); ok {
-			return s
+			return s, 0
 		}
-		return ""
+		return "", 0
 	}
 	s := strings.TrimSpace(string(body))
 	if s == "" || strings.ContainsRune(s, 0) {
-		return ""
+		return "", 0
 	}
-	return s
+	return s, 0
 }
 
 // messagesFromJSON reads one AI SDK message, or a JSON array of them.

@@ -549,7 +549,12 @@ func (p *Proxy) serveLocalAgentRun(w http.ResponseWriter, r *http.Request, turn 
 			fl.Flush()
 		}
 	}
-	if len(turn.Messages) == 0 {
+	// A live body can still fill an empty prompt: the history is blob
+	// ids, and the client has not been asked yet. A buffered body cannot.
+	if stopPump != nil && len(turn.rawRun) > 0 && len(missingBlobIDs(turn.rawRun, turn.blobs, nil)) > 0 {
+		turn.liveKV = true
+	}
+	if len(turn.Messages) == 0 && !turn.liveKV {
 		Note("chat done model=" + route.Model + " path=AgentService/Run reason=no-message")
 		write(agentTextFrame("cursor ide: agent run has no message"))
 		write(agentTurnEnded())

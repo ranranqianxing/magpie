@@ -20,7 +20,12 @@ import (
 // through pre_fetched_blobs.
 // Tools is the composer tool list. ConversationID is the run's
 // conversation, when it named one. MissingBlobs counts prompt ids the
-// request did not carry bytes for.
+// request did not carry bytes for, including a summary blob and root
+// holes that a turns stand-in did not close.
+//
+// rawRun is the AgentRunRequest. blobs is its pre_fetched_blobs, plus
+// anything a live KV get added. liveKV is set only when the request body
+// is still open, so a buffered run does not ask the client for blobs.
 type AgentTurn struct {
 	ModelID        string
 	Params         []Parameter
@@ -29,6 +34,10 @@ type AgentTurn struct {
 	Messages       []ChatMessage
 	Tools          []ToolSpec
 	MissingBlobs   int
+
+	rawRun []byte
+	blobs  map[string][]byte
+	liveKV bool
 }
 
 // ReadAgentRun reads an AgentService/Run body. ok is false when the body
@@ -85,28 +94,50 @@ func readAgentClient(payload []byte) (AgentTurn, bool, error) {
 		return AgentTurn{}, false, nil
 	}
 	conv, _ := fieldString(rf, 5)
+	turn := AgentTurn{
+		ModelID: id, Params: params, ConversationID: conv,
+		Tools:  agentTools(rf),
+		rawRun: append([]byte(nil), runs[0]...),
+		blobs:  blobIndex(fieldBytes(rf, 17)),
+	}
+	if err := turn.rebuild(true); err != nil {
+		return AgentTurn{}, false, err
+	}
+	return turn, true, nil
+}
+
+// rebuild reads Messages from rawRun and blobs. note is the attach
+// diagnostic, which belongs to the first read and not to a KV rebuild.
+func (t *AgentTurn) rebuild(note bool) error {
+	if len(t.rawRun) == 0 {
+		return nil
+	}
+	rf, err := parseFields(t.rawRun)
+	if err != nil {
+		return err
+	}
 	text := readAgentText(rf)
-	blobs := blobIndex(fieldBytes(rf, 17))
 	var msgs []ChatMessage
 	var missing int
 	if states := fieldBytes(rf, 1); len(states) > 0 {
-		msgs, missing, err = replayConversation(states[0], blobs)
+		msgs, missing, err = replayConversation(states[0], t.blobs)
 		if err != nil {
-			return AgentTurn{}, false, err
+			return err
 		}
 	}
-	attach := readUserAttach(rf, blobs)
+	attach := readUserAttach(rf, t.blobs)
 	missing += attach.missing
-	if attach.skipped {
-		Note("agent attach skipped reason=context")
-	} else if n := len(attach.images); n > 0 || len(attach.pieces) > 0 {
-		Note(fmt.Sprintf("agent attach offered images=%d texts=%d", n, len(attach.pieces)))
+	if note {
+		if attach.skipped {
+			Note("agent attach skipped reason=context")
+		} else if n := len(attach.images); n > 0 || len(attach.pieces) > 0 {
+			Note(fmt.Sprintf("agent attach offered images=%d texts=%d", n, len(attach.pieces)))
+		}
 	}
-	return AgentTurn{
-		ModelID: id, Params: params, ConversationID: conv,
-		Text: text, Messages: appendCurrent(msgs, text, attach),
-		Tools: agentTools(rf), MissingBlobs: missing,
-	}, true, nil
+	t.Text = text
+	t.Messages = appendCurrent(msgs, text, attach)
+	t.MissingBlobs = missing
+	return nil
 }
 
 func readRequestedModel(msg []byte) (string, []Parameter) {
