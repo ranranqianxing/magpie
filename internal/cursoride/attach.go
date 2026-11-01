@@ -560,14 +560,6 @@ func imageByteCount(part ContentPart) int {
 	return n
 }
 
-func noteImage(part ContentPart, source string) {
-	Note(fmt.Sprintf("agent image source=%s bytes=%d mime=%s", source, imageByteCount(part), sniffedOr(part.ImageURL, "")))
-}
-
-func noteImageSkip(reason, source string) {
-	Note("agent image skipped reason=" + reason + " source=" + source)
-}
-
 func imagePart(payload, mime string) (ContentPart, bool) {
 	if mime == "" {
 		mime = "image/png"
@@ -581,27 +573,41 @@ func imagePart(payload, mime string) (ContentPart, bool) {
 // base64Image reports whether s is already the base64 of an image, so a
 // selected image stored as text is not encoded a second time.
 func base64Image(s string) (payload, mime string, ok bool) {
-	s = strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\r' || r == '\t' || r == ' ' {
-			return -1
-		}
-		return r
-	}, s)
-	if len(s) < 8 || strings.ContainsAny(s, "{}") {
+	if strings.ContainsAny(s, " \t\r\n") {
+		s = stripB64Space(s)
+	}
+	if len(s) < 8 || strings.ContainsAny(s, "{}") || !base64Alphabet(s) {
 		return "", "", false
 	}
-	decoded, err := base64.StdEncoding.DecodeString(s)
-	if err != nil {
-		decoded, err = base64.RawStdEncoding.DecodeString(s)
-		if err != nil {
-			return "", "", false
-		}
+	// Missing padding is the raw form. The canonical payload is the
+	// padded string, which is what encoding the decoded bytes produced.
+	// A prefix sniff recognizes the picture. The rest is checked without
+	// holding a second copy of the decoded bytes.
+	if m := len(s) % 4; m != 0 {
+		s += "===="[:4-m]
 	}
-	mime = sniffImageMime(decoded)
+	if i := strings.IndexByte(s, '='); i >= 0 && i < len(s)-2 {
+		return "", "", false
+	}
+	n := 32
+	if len(s) < n {
+		n = len(s) - len(s)%4
+	}
+	if n < 8 {
+		return "", "", false
+	}
+	head, err := base64.StdEncoding.DecodeString(s[:n])
+	if err != nil {
+		return "", "", false
+	}
+	mime = sniffImageMime(head)
 	if mime == "" {
 		return "", "", false
 	}
-	return base64.StdEncoding.EncodeToString(decoded), mime, true
+	if _, err := io.Copy(io.Discard, base64.NewDecoder(base64.StdEncoding, strings.NewReader(s))); err != nil {
+		return "", "", false
+	}
+	return s, mime, true
 }
 
 func sniffImageMime(b []byte) string {
