@@ -72,7 +72,7 @@ parameters, so a request that names either still resolves to the catalog id.
 6. `POST` `/agent.v1.AgentService/Run` is the Agent composer. Its `requested_model.model_id` is the catalog id the picker stored (`codex/gpt-5.6-luna`, `workbuddy/deepseek-v4.1-flash`, `aicodings-openai/gpt-6-astra`, or that id plus a variant string or `reasoning` parameter). Cursor's own backend answers `ERROR_BAD_MODEL_NAME` / `Unknown model ID` for every such id, which is why the picker can list the model while the send fails. A catalog model is not forwarded. The chat is the current user text plus `conversation_state`: each `root_prompt_messages_json` entry that is JSON, or a blob id whose bytes are in `pre_fetched_blobs`, becomes a gateway message (text, tool call, tool result, or an image part). A blob id with no bytes is counted in the log and left out. On a live `AgentService/Run` (the request body is still open) those ids are asked for before the gateway call. `KvServerMessage.get_blob_args` is `AgentServerMessage` field 4 (`id` field 1, `blob_id` field 1). The client answers `KvClientMessage.get_blob_result` (`AgentClientMessage` field 3, `blob_data` field 1). The bytes join the prefetched set and the root prompt is replayed: the summary (field 6), a turn stored by id, and the current turn's context blob are the same ask. Root ids are asked before the journal. A reply with no bytes, a blob over 16 MiB, or JSON that is not a message stays missing and is not asked again. Silence for a second, or four seconds for the whole exchange, stops the ask. A run whose body is already complete does not ask. Root holes stay counted when `turns` is used as a stand-in, so the ask still happens. When that prompt is still missing blobs, or it produced no messages, `turns` (field 8) is replayed instead if it yields more messages: each agent turn's user text and Pi tool steps (the call's args and its result) become the chat. A step with several tool calls replays every call, and assistant text on that step stays in front of them. A complete JSON prompt is left as it is; turns are not appended beside it. The current `UserMessage.selected_context` is rendered onto that user turn: an inline image (or a prefetched blob) becomes a data URL. Raw image bytes are base64-encoded once. Bytes that are already a data URL, or already the base64 of an image, are not encoded again. A selected image that names a path and does not carry bytes is read from that path when the file is a regular image of at most 8 MiB. The path is not logged. A path that cannot be read is counted missing, and the typed text is kept. Attached file text, code selections, extra context and attached rules are appended when that text is not already in the turn. A `selected_context` that does not parse is left out; the typed text is kept. The gateway stream comes back as `interaction_update` text and thinking deltas. A tool-call delta becomes `partial_tool_call`, then `tool_call_started` and `exec_server_message`. `partial_tool_call` field 3 is the aggregated arguments JSON so far, including when the newest gateway chunk was only a fragment, an arguments object, or an `index` of `0.0`. Cursor 3.27 runs the Pi arms: read (card 61, exec 45, `path`), shell (card 62, exec 46, `command`), edit (card 63, exec 47, `path` plus `old_string`/`new_string`), write (card 64, exec 48, `path` and `content`), grep (card 65, exec 49, `pattern`), glob (card 66, exec 50, `pattern`), and ls (card 67, exec 51, `path`). Delete stays exec field 4. MCP stays exec field 11. When the client sends another Connect frame on the same run — buffered in one body or on a chunked request the proxy reads while the response streams — carrying that tool result, the proxy appends it to the chat and asks the gateway again in the same turn. The result is the JSON tool message, or the executor's `ExecClientMessage` (AgentClientMessage field 2): `exec_id` (field 15) is the tool-call id, and Pi results are fields 46–52 (read, bash, edit, write, grep, find, ls). A shell stream chunk (field 14) is not that result, so the loop keeps waiting. A throw (`ExecClientControlMessage` field 2) is an error result for the exec's uint32 id. `agent exec result` logs the kind, whether it matched a call still open, and the byte and image counts. The text is not logged. A follow-up that is neither a result nor a heartbeat logs its field numbers only. A chunked run that is not a catalog model is routed before any follow-up reader starts; the forward carries the first frame and the rest of the body together. `turn_ended` and the Connect end frame go out only after the model stops without further tools. A stream that ends without `finish_reason` or `[DONE]` still closes a tool call it already started. The same close happens on the inference path. A call the codec will not execute (missing the strings that tool validates) is not sent as an exec. It is paired with a tool result that names the missing field, and the gateway is asked again, so the model can retry or answer in text. A second round of only those calls ends the turn. The diagnostic line is `agent tool round stop reason=bare`. A batch that already returned at least one result, and then ends with others still open, closes the open calls with `error: tool result did not arrive` and continues. The line is `agent tool round partial`. When no follow-up result arrives at all, the turn still ends after the exec. Those results are left to the next run's `conversation_state`, and this turn does not invent a second copy. `agent tool round` records `runnable`, `skipped`, and `images` for the round. Cursor's own model on this path is still forwarded. A route miss is logged as a forward. It is not logged as `Unknown model ID`, which is what Cursor's backend says only when a catalog id is forwarded. A gzipped connect frame is read decompressed; the forwarded body of a Cursor model stays the bytes the client sent, aside from an HTTP gzip that was stripped so the length matches. A truncated `conversation_state` is refused. It is not forwarded and not treated as an empty history.
 7. The chat `POST` uses `Authorization: Bearer <gateway.TokenFor("cursor-ide")>` and `X-Magpie-Session` from `Chat.Header` when the run named a conversation. The token is not written into the protobuf or into Cursor's settings.
 
-A catalog request larger than 32 MiB is refused. It is not read as empty, which would replace Cursor's list with magpie's rows alone.
+A catalog request larger than 32 MiB is refused. It is not read as empty, which would replace Cursor's list with magpie's rows alone. A BidiAppend is read up to 96 MiB, gzip included, because the invoke carries the images.
 
 `settings.json` also records `magpie.cursorGateway` (the gateway address the proxy calls) and, on sync, `magpie.cursorModels` (the catalog ids last published). Cursor ignores both. The proxy does not read them: it calls `gateway.URL()` and `ForAgent` on each request. The gateway key is what drift and a port move look at, including a reverse proxy in front of magpie. The model key is what a catalog sync refreshes without putting an address the user pointed elsewhere back on this machine.
 
@@ -91,9 +91,18 @@ array; the image is a data URL. A history image is that URL when
 `image` or `image_url` is a string, a data URL, or an object with
 `url`, `data`, or `base64`. A file that is not text, on the
 inference invoke path, is a note that names its media type, not the
-bytes, unless those bytes sniff as an image: then the part is the
-data URL. A part only labeled `image/*`, whose bytes are not an image,
-stays the note. An Agent image is the data URL, not that note. A tool
+bytes, unless the bytes are an image: raw bytes that sniff, a
+`data:image` URL, or base64 that decodes to an image become one data
+URL, encoded once. Raw bytes that are not base64 text are encoded
+once when the media type says `image/*`. A part only labeled
+`image/*`, whose text is not an image, stays the note. The same
+codec reads an inference image part and a tool-result image (`image`,
+`image_url`, or `input_image`, a string, a data URL, or an object
+with `url`, `data`, or `base64`). Several images in one message, or
+in consecutive messages, each stay. A truncated image part is left
+out (`agent image skipped reason=partial`) and the other images in
+that turn stay. An empty image part is left out (`reason=empty`).
+An Agent image is the data URL, not that note. A tool
 result that is an array of text and image parts keeps the images on
 the tool message. A history tool message takes its call id from the
 part's `toolCallId`, or from the message's `toolCallId`, `tool_call_id`,
@@ -184,7 +193,20 @@ when a live run asked the client for those blobs (a miss is `filled=0`).
 `history=blobs` when holes remain on a run that cannot ask, and
 `history=inline` when `conversation_state` already resolved. The
 BidiAppend line is `history=inline` because the invoke carried the
-transcript. A BidiAppend turn does not log `agent kv hydrate`. The same Agent run logs
+transcript. It ends with `image-bytes=`, the decoded size of those
+image parts. A BidiAppend turn does not log `agent kv hydrate`.
+Each kept picture also logs `agent image source=part`, `source=file`,
+or `source=tool` with `bytes=` and `mime=`. A picture left out logs
+`agent image skipped reason=` (`empty`, `partial`, `not-image`) and
+`source=`. The path, the data URL, and the bytes are not on the line.
+`agent tool round runnable=… skipped=… images=…` is logged when the
+gateway body ends. A round whose calls were all refused is asked
+again with the tool error and the images still on the chat; a second
+such round logs `agent tool round stop reason=bare` and stops. A call
+that can run is still one completing `tool_call_part`, and Cursor's
+loop continues. The append itself is read up to 96 MiB, including
+after gzip, so a burst of pictures is not refused at the 32 MiB
+catalog cap. The same Agent run logs
 `agent image source=path` or `agent image skipped` when a selected
 image was a path. Those lines do not include the path, the image
 bytes, or the tool result text. The route line includes `images=`,
@@ -227,7 +249,15 @@ invoke whose prior Read is a protobuf Struct (no field-4 string) and
 whose tool result is a protobuf Value object, so the gateway body
 contains that path, the result, and `reasoning_content`, while the
 log counts `history=inline`, `empty-args=0`, and `reasoning=1` and
-does not contain the result text, the same invoke filled from
+does not contain the result text, a BidiAppend invoke whose user
+turn has two images (one of them base64 wrapped with line breaks, one
+a file part) and whose tool result has two image parts, so the gateway
+body has each data URL once and `image-bytes=` is the decoded size, a
+truncated image part left out while its sibling stays, an empty Read
+on that invoke which is not sent and whose next gateway body still
+contains the image and `missing path` while the log shows
+`runnable=0 skipped=1 images=1` and then the description, the same
+invoke filled from
 `<parameter name="path">`, and a prose sentence that does not send a
 Read part,
 an Agent stream

@@ -472,6 +472,17 @@ func imageBlob(id []byte, mime string, prefetched map[string][]byte) (ContentPar
 }
 
 func imageBytesPart(data []byte, mime string) (ContentPart, bool) {
+	return normalizeImage(data, mime, true)
+}
+
+// normalizeImage is the one picture codec for a selected image, an
+// inference image or file part, and a tool-result image. Raw bytes that
+// sniff are base64-encoded once. A data URL is kept. Base64 that decodes
+// to an image is kept, whitespace removed, and not encoded again.
+// allowLabeled is the selected-image rule: a part whose mime is image/*
+// and whose bytes are neither of those is still encoded once. A file
+// part does not use that rule, so a label alone is not a picture.
+func normalizeImage(data []byte, mime string, allowLabeled bool) (ContentPart, bool) {
 	if len(data) == 0 {
 		return ContentPart{}, false
 	}
@@ -493,10 +504,68 @@ func imageBytesPart(data []byte, mime string) (ContentPart, bool) {
 			return imagePart(payload, mime)
 		}
 	}
-	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(mime)), "image/") {
+	if !allowLabeled || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(mime)), "image/") {
 		return ContentPart{}, false
 	}
 	return imagePart(base64.StdEncoding.EncodeToString(data), mime)
+}
+
+// stripB64Space removes the line breaks a large base64 payload is wrapped
+// with. The characters are not part of the picture.
+func stripB64Space(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' || r == ' ' {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// base64Alphabet reports whether s could be a base64 payload. Raw image
+// bytes that did not sniff fail it, so they are encoded once instead of
+// being pasted into the data URL as if they already were.
+func base64Alphabet(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case r == '+' || r == '/' || r == '=':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// imageByteCount is the decoded size of a data URL, or the URL's length
+// when it is not base64. The URL itself is not logged.
+func imageByteCount(part ContentPart) int {
+	const mark = ";base64,"
+	i := strings.Index(part.ImageURL, mark)
+	if i < 0 {
+		return len(part.ImageURL)
+	}
+	payload := part.ImageURL[i+len(mark):]
+	n := len(payload) / 4 * 3
+	if strings.HasSuffix(payload, "==") {
+		n -= 2
+	} else if strings.HasSuffix(payload, "=") {
+		n--
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+func noteImage(part ContentPart, source string) {
+	Note(fmt.Sprintf("agent image source=%s bytes=%d mime=%s", source, imageByteCount(part), sniffedOr(part.ImageURL, "")))
+}
+
+func noteImageSkip(reason, source string) {
+	Note("agent image skipped reason=" + reason + " source=" + source)
 }
 
 func imagePart(payload, mime string) (ContentPart, bool) {

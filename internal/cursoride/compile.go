@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // Kind is which arm of a RunInference client message was set.
@@ -432,7 +433,8 @@ func projectParts(raw []byte) (any, error) {
 	for _, one := range fieldBytes(fs, 1) {
 		pf, err := parseFields(one)
 		if err != nil {
-			return nil, err
+			noteImageSkip("partial", "part")
+			continue
 		}
 		var part []byte
 		var kind int
@@ -446,7 +448,10 @@ func projectParts(raw []byte) (any, error) {
 		}
 		inner, err := parseFields(part)
 		if err != nil {
-			return nil, err
+			if kind == 2 || kind == 3 {
+				noteImageSkip("partial", partSource(kind))
+			}
+			continue
 		}
 		switch kind {
 		case 1:
@@ -455,13 +460,23 @@ func projectParts(raw []byte) (any, error) {
 		case 2:
 			data, _ := fieldString(inner, 1)
 			mime, _ := fieldString(inner, 2)
-			parts = append(parts, ContentPart{Type: "image_url", ImageURL: imageDataURL(data, mime)})
+			img, reason := inferenceImage(data, mime)
+			if reason != "" {
+				noteImageSkip(reason, "part")
+				break
+			}
+			noteImage(img, "part")
+			parts = append(parts, img)
 		case 3:
 			data, _ := fieldString(inner, 1)
 			media, _ := fieldString(inner, 2)
 			if part, ok := fileImagePart(data, media); ok {
+				noteImage(part, "file")
 				parts = append(parts, part)
 				break
+			}
+			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(media)), "image/") && strings.TrimSpace(data) != "" {
+				noteImageSkip("not-image", "file")
 			}
 			parts = append(parts, ContentPart{Type: "text", Text: fileText(data, media)})
 		}
@@ -494,14 +509,60 @@ func imageDataURL(data, mime string) string {
 	return "data:" + mime + ";base64," + data
 }
 
+func partSource(kind int) string {
+	if kind == 3 {
+		return "file"
+	}
+	return "part"
+}
+
+// inferenceImage is InferenceImagePart. The part is a picture by the
+// protocol. Raw bytes are encoded once, a data URL and base64 of an
+// image are kept, and a wrapped base64 payload has its line breaks
+// removed. An empty part is skipped. A string that is already base64
+// but does not decode to a sniffed image is still the payload, not
+// encoded a second time.
+func inferenceImage(data, mime string) (ContentPart, string) {
+	if len(data) == 0 || (utf8.ValidString(data) && strings.TrimSpace(data) == "") {
+		return ContentPart{}, "empty"
+	}
+	if part, ok := normalizeImage([]byte(data), mime, false); ok {
+		return part, ""
+	}
+	payload := stripB64Space(data)
+	if payload == "" {
+		return ContentPart{}, "empty"
+	}
+	if !base64Alphabet(payload) {
+		part, ok := imagePart(base64.StdEncoding.EncodeToString([]byte(data)), mime)
+		if !ok {
+			return ContentPart{}, "not-image"
+		}
+		return part, ""
+	}
+	part, ok := imagePart(payload, mime)
+	if !ok {
+		return ContentPart{}, "not-image"
+	}
+	return part, ""
+}
+
 // fileImagePart is an inference file part whose bytes are an image.
-// A part only labeled image/*, with bytes that are not an image, stays
-// the media-type note: that label is not the picture.
+// Raw bytes, a data URL, and base64 of an image are the picture. Raw
+// bytes that are not base64 text are encoded once when the media type
+// says image/*. A part only labeled image/*, whose text is not an
+// image, stays the media-type note: that label is not the picture.
 func fileImagePart(data, media string) (ContentPart, bool) {
-	if sniffImageMime([]byte(data)) == "" {
+	if part, ok := normalizeImage([]byte(data), media, false); ok {
+		return part, true
+	}
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(media)), "image/") {
 		return ContentPart{}, false
 	}
-	return ContentPart{Type: "image_url", ImageURL: imageDataURL(data, media)}, true
+	if base64Alphabet(stripB64Space(data)) {
+		return ContentPart{}, false
+	}
+	return imagePart(base64.StdEncoding.EncodeToString([]byte(data)), media)
 }
 
 func fileText(data, media string) string {
@@ -697,48 +758,73 @@ func contentList(list []any) (string, []ContentPart, bool) {
 		case "text":
 			s, _ := obj["text"].(string)
 			if s == "" {
-				return "", nil, false
+				continue
 			}
 			if b.Len() > 0 {
 				b.WriteByte('\n')
 			}
 			b.WriteString(s)
-		case "image", "image_url":
+		case "image", "image_url", "input_image":
 			url := imageFromValue(obj)
 			if url == "" {
-				return "", nil, false
+				noteImageSkip("empty", "tool")
+				continue
 			}
 			if !hasImage(images, url) {
 				images = append(images, ContentPart{Type: "image_url", ImageURL: url})
 			}
 		default:
-			return "", nil, false
+			// A list that is not content parts stays JSON. One unknown
+			// part does not drop the images beside it.
+			if typ == "" && b.Len() == 0 && len(images) == 0 {
+				return "", nil, false
+			}
 		}
 	}
 	if b.Len() == 0 && len(images) == 0 {
 		return "", nil, false
 	}
+	for _, img := range images {
+		noteImage(img, "tool")
+	}
 	return b.String(), images, true
 }
 
 func imageFromValue(obj map[string]any) string {
-	if s, ok := obj["url"].(string); ok && s != "" {
-		return imageDataURL(s, "")
-	}
-	if img, ok := obj["image_url"].(map[string]any); ok {
-		if s, ok := img["url"].(string); ok && s != "" {
-			return imageDataURL(s, "")
+	mime := firstString(obj, "mime_type", "media_type", "mimeType", "mediaType")
+	for _, key := range []string{"url", "image", "image_url", "data", "base64"} {
+		switch v := obj[key].(type) {
+		case string:
+			if u := imageString(v, mime); u != "" {
+				return u
+			}
+		case map[string]any:
+			if u := imageFromValue(v); u != "" {
+				return u
+			}
 		}
 	}
-	data, _ := obj["data"].(string)
+	return ""
+}
+
+func imageString(data, mime string) string {
+	data = strings.TrimSpace(data)
 	if data == "" {
 		return ""
 	}
-	mime, _ := obj["mime_type"].(string)
-	if mime == "" {
-		mime, _ = obj["media_type"].(string)
+	if part, reason := inferenceImage(data, mime); reason == "" {
+		return part.ImageURL
 	}
-	return imageDataURL(data, mime)
+	return ""
+}
+
+func firstString(obj map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if s, ok := obj[k].(string); ok && strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
 }
 
 // CompileChat builds the gateway request for an invoke that belongs to
