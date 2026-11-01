@@ -135,19 +135,29 @@ func (p *Proxy) runAgentLoop(ctx context.Context, followups <-chan []byte, turn 
 	}
 	var execN uint32
 	execOf := map[uint32]string{}
+	// bare counts rounds whose calls were all refused by the facade.
+	// One such round is answered with a tool error so the model can
+	// retry or answer in text. A second is the model repeating that
+	// shape; the turn stops instead of spinning.
+	var bare int
 	for {
 		before := execN
-		sealed, done, err := p.agentGatewayRound(ctx, chat, write, &execN)
+		sealed, skipped, _, err := p.agentGatewayRound(ctx, chat, write, &execN)
 		if err != nil {
 			write(agentTextFrame("cursor ide: " + err.Error()))
 			break
 		}
-		if done {
+		if len(sealed) == 0 && len(skipped) == 0 {
 			break
 		}
 		if len(sealed) == 0 {
-			write(agentTextFrame("cursor ide: tool loop ended without a call"))
-			break
+			bare++
+			if bare > 1 {
+				Note("agent tool round stop reason=bare")
+				break
+			}
+		} else {
+			bare = 0
 		}
 		var calls []ToolCall
 		want := map[string]bool{}
@@ -157,15 +167,25 @@ func (p *Proxy) runAgentLoop(ctx context.Context, followups <-chan []byte, turn 
 			// agentGatewayRound numbers each exec from before+1, in order.
 			execOf[before+uint32(i)+1] = t.id
 		}
+		var skips []ChatMessage
+		for _, t := range skipped {
+			calls = append(calls, ToolCall{ID: t.id, Name: t.name, Arguments: t.args})
+			skips = append(skips, ChatMessage{
+				Role: "tool", ToolCallID: t.id, Content: piSkipReason(t.name, t.args),
+			})
+		}
 		chat.Messages = append(chat.Messages, ChatMessage{Role: "assistant", ToolCalls: calls})
+		chat.Messages = append(chat.Messages, skips...)
 
+		gotN := 0
+		closed := false
 		for len(want) > 0 {
 			if followups == nil {
 				break
 			}
 			payload, ok := <-followups
 			if !ok {
-				Note("agent tool loop eof without tool results")
+				closed = true
 				break
 			}
 			got := agentToolResultsFromPayload(payload, want, execOf)
@@ -175,10 +195,29 @@ func (p *Proxy) runAgentLoop(ctx context.Context, followups <-chan []byte, turn 
 			for _, m := range got {
 				chat.Messages = append(chat.Messages, m)
 				delete(want, m.ToolCallID)
+				gotN++
 			}
 		}
 		if len(want) > 0 {
-			break
+			// No result at all: the client will open a later Run whose
+			// conversation_state carries the exec. Inventing errors here
+			// would double them. A batch that already returned some
+			// results is closed, so the model sees every call before the
+			// next round. Official execs answer the whole batch.
+			if gotN == 0 {
+				if closed {
+					Note("agent tool loop eof without tool results")
+				}
+				break
+			}
+			missing := len(want)
+			for id := range want {
+				chat.Messages = append(chat.Messages, ChatMessage{
+					Role: "tool", ToolCallID: id, Content: "error: tool result did not arrive",
+				})
+				delete(want, id)
+			}
+			Note(fmt.Sprintf("agent tool round partial got=%d missing=%d", gotN, missing))
 		}
 		Note(fmt.Sprintf("agent tool loop model=%s messages=%d", chat.Model, len(chat.Messages)))
 	}
@@ -194,19 +233,21 @@ func drainFollowups(ch <-chan []byte) {
 	}
 }
 
-// agentGatewayRound runs one gateway chat completion. When the model ends
-// with tool calls, it emits composer tool frames and returns those calls.
-// done is true when the model finished without further tools.
-func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]byte), execN *uint32) (sealed []toolBuf, done bool, err error) {
+// agentGatewayRound runs one gateway chat completion. sealed is the calls
+// written as execs. skipped is the calls the Pi codec would not run; the
+// loop pairs those with a tool error instead of ending the turn. done is
+// true when nothing was executed, including a round whose calls were all
+// skipped and a round that finished in text.
+func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]byte), execN *uint32) (sealed, skipped []toolBuf, done bool, err error) {
 	noteRequestToolArgs(chat.Messages)
 	body, err := chat.JSON()
 	if err != nil {
-		return nil, false, errf("chat")
+		return nil, nil, false, errf("chat")
 	}
 	base, token := p.Gateway()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return nil, false, errf("gateway")
+		return nil, nil, false, errf("gateway")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
@@ -217,11 +258,11 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 	}
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return nil, false, errf("gateway")
+		return nil, nil, false, errf("gateway")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, false, fmt.Errorf("gateway status %d", resp.StatusCode)
+		return nil, nil, false, fmt.Errorf("gateway status %d", resp.StatusCode)
 	}
 	var asm toolAssembler
 	var said strings.Builder
@@ -243,9 +284,10 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 		}
 	})
 	text := said.String()
-	run := sealRound(&asm, text, func(msg string) { write(agentTextFrame(msg)) })
+	run, skipped := sealCalls(&asm, text, func(msg string) { write(agentTextFrame(msg)) })
+	Note(fmt.Sprintf("agent tool round runnable=%d skipped=%d images=%d", len(run), len(skipped), countChatImages(chat.Messages)))
 	if len(run) == 0 {
-		return nil, true, nil
+		return nil, skipped, true, nil
 	}
 	markers := markupMarkers(text)
 	for _, t := range run {
@@ -263,7 +305,7 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 		noteToolTrace("frames", t.name, t.args, t.frags, t.placeholders, t.fill, markers, frameState)
 	}
 	// Any run call needs follow-up frames (or ends one-shot when none arrive).
-	return run, false, nil
+	return run, skipped, false, nil
 }
 
 // sealRound closes asm once the gateway body has ended. A native call
@@ -273,18 +315,25 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 // here, on whichever entry read the body. The caller logs exec=written
 // after it puts the call on the wire.
 func sealRound(asm *toolAssembler, text string, say func(string)) []toolBuf {
+	run, _ := sealCalls(asm, text, say)
+	return run
+}
+
+func sealCalls(asm *toolAssembler, text string, say func(string)) (run, skipped []toolBuf) {
 	sealed := asm.seal()
 	fillEmptyToolArgs(sealed, text)
 	markers := markupMarkers(text)
-	var run []toolBuf
 	for _, t := range sealed {
 		ready := piCallReady(t.name, t.args)
 		state := "skip"
 		if ready {
 			state = "run"
 			run = append(run, t)
-		} else if strings.TrimSpace(t.args) != "" && !json.Valid([]byte(t.args)) && say != nil {
-			say("cursor ide: tool arguments are not json")
+		} else {
+			skipped = append(skipped, t)
+			if strings.TrimSpace(t.args) != "" && !json.Valid([]byte(t.args)) && say != nil {
+				say("cursor ide: tool arguments are not json")
+			}
 		}
 		noteToolTrace("seal", t.name, t.args, t.frags, t.placeholders, t.fill, markers, state)
 		if !ready {
@@ -292,7 +341,7 @@ func sealRound(asm *toolAssembler, text string, say func(string)) []toolBuf {
 		}
 	}
 	noteRound(len(sealed), len(run))
-	return run
+	return run, skipped
 }
 
 // noteRequestToolArgs records whether this gateway body is about to send

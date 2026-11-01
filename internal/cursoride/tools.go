@@ -218,16 +218,7 @@ func agentTools(run []field) []ToolSpec {
 }
 
 func builtinAgentTools() []ToolSpec {
-	return []ToolSpec{
-		{Name: "Shell", Description: "Run a shell command in the workspace.", Parameters: schema(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`)},
-		{Name: "Read", Description: "Read a file. offset is the 1-indexed line to start at; limit is how many lines to return. Omit either to read from the start or through the end.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"]}`)},
-		{Name: "Grep", Description: "Search files for a pattern.", Parameters: schema(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"}},"required":["pattern"]}`)},
-		{Name: "Delete", Description: "Delete a file.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
-		{Name: "Glob", Description: "Find files by a glob pattern.", Parameters: schema(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}`)},
-		{Name: "LS", Description: "List a directory.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"}}}`)},
-		{Name: "Edit", Description: "Replace text in a file.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}`)},
-		{Name: "Write", Description: "Write a file.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`)},
-	}
+	return nativeAgentTools()
 }
 
 func schema(s string) json.RawMessage {
@@ -540,97 +531,13 @@ func canonTool(name string) string {
 // Cards: read 61, shell 62, edit 63, write 64, grep 65, glob 66, ls 67.
 // Exec:  read 45, shell 46, edit 47, write 48, grep 49, glob 50, ls 51.
 func piFrame(name string, obj map[string]any) (card, exec int, args []byte, ok bool) {
-	switch canonTool(name) {
-	case "shell":
-		return 62, 46, bashPi(obj), true
-	case "read":
-		return 61, 45, readPi(obj), true
-	case "grep":
-		return 65, 49, grepPi(obj), true
-	case "glob":
-		return 66, 50, findPi(obj), true
-	case "ls":
-		return 67, 51, lsPi(obj), true
-	case "write":
-		return 64, 48, writePi(obj), true
-	case "edit":
-		if editAsWrite(obj) {
-			return 64, 48, writePi(obj), true
-		}
-		return 63, 47, editPi(obj), true
-	default:
-		return 0, 0, nil, false
-	}
-}
-
-func bashPi(obj map[string]any) []byte {
-	var b wbuf
-	putArg(&b, 1, obj, "command", "cmd")
-	return []byte(b)
-}
-
-// readPi is PiReadExecArgs. Cursor 3.27.22's cursor-agent-exec declares
-// "PiReadExecArgs|1 path 9|2 offset 5?|3 limit 5?": path, then an optional
-// int32 offset and limit. The executor treats offset as a 1-indexed line
-// and limit as a line count (slice from offset-1, length limit).
-func readPi(obj map[string]any) []byte {
-	var b wbuf
-	putArg(&b, 1, obj, "path", "file_path", "target_file")
-	putI32(&b, 2, obj, "offset")
-	putI32(&b, 3, obj, "limit")
-	return []byte(b)
-}
-
-func grepPi(obj map[string]any) []byte {
-	var b wbuf
-	putArg(&b, 1, obj, "pattern", "query")
-	putArg(&b, 2, obj, "path", "file_path")
-	putArg(&b, 3, obj, "glob", "glob_pattern")
-	return []byte(b)
-}
-
-func findPi(obj map[string]any) []byte {
-	var b wbuf
-	putArg(&b, 1, obj, "pattern", "glob_pattern", "glob", "query")
-	putArg(&b, 2, obj, "path", "target_directory")
-	return []byte(b)
-}
-
-func lsPi(obj map[string]any) []byte {
-	var b wbuf
-	putArg(&b, 1, obj, "path", "target_directory")
-	return []byte(b)
-}
-
-func writePi(obj map[string]any) []byte {
-	var b wbuf
-	putArg(&b, 1, obj, "path", "file_path")
-	putArg(&b, 2, obj, "content", "contents", "file_text", "stream_content")
-	return []byte(b)
-}
-
-// editPi is PiEditExecArgs: path (field 1) and repeated PiEditReplacement
-// (field 2). Cursor 3.27.22's cursor-agent-exec declares
-// "PiEditReplacement|1 old_text 9|2 new_text 9" and
-// "PiEditExecArgs|1 path 9|2 edits". That replacement has no replace_all
-// field, so a bool under that name is not encoded.
-func editPi(obj map[string]any) []byte {
-	var rep wbuf
-	putArg(&rep, 1, obj, "old_string", "oldText", "old_str")
-	if _, ok := argPresent(obj, "new_string", "newText", "new_str"); ok {
-		putArg(&rep, 2, obj, "new_string", "newText", "new_str")
-	} else {
-		putArg(&rep, 2, obj, "stream_content")
-	}
-	var b wbuf
-	putArg(&b, 1, obj, "path", "file_path")
-	if len(rep) > 0 {
-		b.msg(2, []byte(rep))
-	}
-	return []byte(b)
+	return encodeNativePi(name, obj)
 }
 
 func editAsWrite(obj map[string]any) bool {
+	if len(editPairs(obj)) > 0 {
+		return false
+	}
 	if argString(obj, "old_string", "oldText", "old_str", "new_string", "newText", "new_str") != "" {
 		return false
 	}
@@ -732,11 +639,10 @@ func piCallReady(name, args string) bool {
 		if editAsWrite(obj) {
 			return piCallReady("Write", args)
 		}
-		if !argNonBlank(obj, "path", "file_path") || !argNonBlank(obj, "old_string", "oldText", "old_str") {
+		if !argNonBlank(obj, "path", "file_path") || len(editPairs(obj)) == 0 {
 			return false
 		}
-		_, ok := argPresent(obj, "new_string", "newText", "new_str", "stream_content")
-		return ok
+		return true
 	default:
 		return true
 	}
@@ -763,6 +669,9 @@ func displayArgs(name, raw string) string {
 	case "shell":
 		if s, ok := argPresent(obj, "command", "cmd"); ok {
 			out["command"] = s
+		}
+		if n, ok := argSeconds(obj, "timeout"); ok {
+			out["timeout"] = n
 		}
 	case "read":
 		if s, ok := argPresent(obj, "path", "file_path", "target_file"); ok {
@@ -791,6 +700,7 @@ func displayArgs(name, raw string) string {
 		if s, ok := argPresent(obj, "glob", "glob_pattern"); ok {
 			out["glob"] = s
 		}
+		copyPiGrepFlags(obj, out)
 	case "glob":
 		if s, ok := argPresent(obj, "pattern", "glob_pattern", "glob", "query"); ok {
 			out["pattern"] = s
@@ -798,9 +708,17 @@ func displayArgs(name, raw string) string {
 		if s, ok := argPresent(obj, "path", "target_directory"); ok {
 			out["path"] = s
 		}
+		if n, ok := argI32(obj, "limit"); ok {
+			out["limit"] = n
+		}
 	case "ls", "delete":
 		if s, ok := argPresent(obj, "path", "file_path", "target_directory"); ok {
 			out["path"] = s
+		}
+		if canonTool(name) == "ls" {
+			if n, ok := argI32(obj, "limit"); ok {
+				out["limit"] = n
+			}
 		}
 	case "edit":
 		if editAsWrite(obj) {
@@ -809,11 +727,23 @@ func displayArgs(name, raw string) string {
 		if s, ok := argPresent(obj, "path", "file_path"); ok {
 			out["path"] = s
 		}
-		if s, ok := argPresent(obj, "old_string", "oldText", "old_str"); ok {
-			out["old_string"] = s
-		}
-		if s, ok := argPresent(obj, "new_string", "newText", "new_str", "stream_content"); ok {
-			out["new_string"] = s
+		if pairs := editPairs(obj); len(pairs) > 1 {
+			edits := make([]map[string]string, 0, len(pairs))
+			for _, pair := range pairs {
+				edits = append(edits, map[string]string{"old_string": pair[0], "new_string": pair[1]})
+			}
+			out["edits"] = edits
+		} else {
+			if s, ok := argPresent(obj, "old_string", "oldText", "old_str"); ok {
+				out["old_string"] = s
+			}
+			if s, ok := argPresent(obj, "new_string", "newText", "new_str", "stream_content"); ok {
+				out["new_string"] = s
+			}
+			if len(pairs) == 1 && out["old_string"] == nil {
+				out["old_string"] = pairs[0][0]
+				out["new_string"] = pairs[0][1]
+			}
 		}
 	default:
 		return raw

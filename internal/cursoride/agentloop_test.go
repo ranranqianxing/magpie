@@ -40,7 +40,7 @@ func TestAgentGatewayRoundWaitsWhenStreamEndsWithToolsOnly(t *testing.T) {
 		client:  http.DefaultClient,
 	}
 	var execN uint32
-	sealed, done, err := p.agentGatewayRound(context.Background(), Chat{
+	sealed, _, done, err := p.agentGatewayRound(context.Background(), Chat{
 		Model: "codex/gpt-5.6-luna", Messages: []ChatMessage{{Role: "user", Content: "go"}},
 	}, func([]byte) {}, &execN)
 	if err != nil || done || len(sealed) != 1 || sealed[0].id != "call_x" {
@@ -68,7 +68,7 @@ func TestAgentGatewayRoundFillsEmptyCallFromDSML(t *testing.T) {
 		client:  http.DefaultClient,
 	}
 	var frames [][]byte
-	sealed, done, err := p.agentGatewayRound(context.Background(), Chat{
+	sealed, _, done, err := p.agentGatewayRound(context.Background(), Chat{
 		Model: "deepseek/deepseek-v4.1-flash", Messages: []ChatMessage{{Role: "user", Content: "read it"}},
 	}, func(b []byte) { frames = append(frames, append([]byte(nil), b...)) }, new(uint32))
 	if err != nil || done || len(sealed) != 1 || sealed[0].name != "Read" || sealed[0].args != `{"path":"`+path+`"}` {
@@ -117,7 +117,7 @@ func TestAgentGatewayRoundFillsEmptyCallFromParameterTags(t *testing.T) {
 		client:  http.DefaultClient,
 	}
 	var frames [][]byte
-	sealed, done, err := p.agentGatewayRound(context.Background(), Chat{
+	sealed, _, done, err := p.agentGatewayRound(context.Background(), Chat{
 		Model: "deepseek/deepseek-v4.1-flash", Messages: []ChatMessage{{Role: "user", Content: "read it"}},
 	}, func(b []byte) { frames = append(frames, append([]byte(nil), b...)) }, new(uint32))
 	if err != nil || done || len(sealed) != 1 || sealed[0].name != "Read" {
@@ -175,7 +175,7 @@ func TestAgentGatewayRoundDoesNotExecEmptyRead(t *testing.T) {
 		client:  http.DefaultClient,
 	}
 	var frames [][]byte
-	sealed, done, err := p.agentGatewayRound(context.Background(), Chat{
+	sealed, _, done, err := p.agentGatewayRound(context.Background(), Chat{
 		Model: "deepseek/deepseek-v4.1-flash",
 		Messages: []ChatMessage{
 			{Role: "user", Content: "read it"},
@@ -247,7 +247,7 @@ func TestAgentGatewayRoundKeepsNonEmptyReadArguments(t *testing.T) {
 				client:  http.DefaultClient,
 			}
 			var frames [][]byte
-			sealed, done, err := p.agentGatewayRound(context.Background(), Chat{
+			sealed, _, done, err := p.agentGatewayRound(context.Background(), Chat{
 				Model: "deepseek/deepseek-v4.1-flash", Messages: []ChatMessage{{Role: "user", Content: "read it"}},
 			}, func(b []byte) { frames = append(frames, append([]byte(nil), b...)) }, new(uint32))
 			if err != nil || done || len(sealed) != 1 || sealed[0].args == "{}" {
@@ -529,6 +529,188 @@ func TestPiExecResultKeepsParallelCalls(t *testing.T) {
 	got = append(got, execToolResults(bash, want, nil)...)
 	if len(got) != 2 || got[0].ToolCallID != "call_a" || got[0].Content.(string) != "package a" || got[1].ToolCallID != "call_b" || got[1].Content.(string) != "listed" {
 		t.Fatalf("%+v", got)
+	}
+}
+
+func TestRunAgentLoopFeedsASkippedCallBack(t *testing.T) {
+	const image = "data:image/png;base64,aGk="
+	var mu sync.Mutex
+	var bodies [][]byte
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, b)
+		n := len(bodies)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		if n == 1 {
+			io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_r","function":{"name":"Read","arguments":"{}"}}]}}]}`+"\n\n")
+			io.WriteString(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+			io.WriteString(w, "data: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, `data: {"choices":[{"delta":{"content":"it is a picture"}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer gw.Close()
+	p := &Proxy{
+		CADir:   t.TempDir(),
+		Gateway: func() (string, string) { return gw.URL, "tok" },
+		client:  http.DefaultClient,
+	}
+	var out bytes.Buffer
+	turn := AgentTurn{
+		Tools: nativeAgentTools(),
+		Messages: []ChatMessage{{
+			Role: "user",
+			Content: []ContentPart{
+				{Type: "text", Text: "what is this"},
+				{Type: "image_url", ImageURL: image},
+			},
+		}},
+	}
+	p.runAgentLoop(context.Background(), nil, turn, Route{Model: "codex/gpt-5.6-luna"}, func(b []byte) { out.Write(b) })
+	if !strings.Contains(out.String(), "it is a picture") {
+		t.Fatalf("stream %q", out.Bytes())
+	}
+	payloads, framed := connectPayloads(out.Bytes())
+	if !framed {
+		t.Fatal("stream was not connect frames")
+	}
+	for _, p := range payloads {
+		fs, err := parseFields(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(fieldBytes(fs, 2)) > 0 {
+			t.Fatal("empty Read was executed")
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("gateway rounds %d", len(bodies))
+	}
+	second := string(bodies[1])
+	if !strings.Contains(second, "missing path") || !strings.Contains(second, image) || !strings.Contains(second, `"edits"`) {
+		t.Fatalf("second chat lost the error, the image, or the Pi edit schema: %s", second)
+	}
+	if !strings.Contains(Recent(), "agent tool round runnable=0 skipped=1 images=1") {
+		t.Fatalf("round trace:\n%s", Recent())
+	}
+}
+
+func TestRunAgentLoopClosesAPartialBatch(t *testing.T) {
+	var mu sync.Mutex
+	var bodies [][]byte
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, b)
+		n := len(bodies)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		if n == 1 {
+			io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"Read","arguments":"{\"path\":\"a.go\"}"}},{"index":1,"id":"call_b","function":{"name":"Read","arguments":"{\"path\":\"b.go\"}"}}]}}]}`+"\n\n")
+			io.WriteString(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+			io.WriteString(w, "data: [DONE]\n\n")
+			return
+		}
+		io.WriteString(w, `data: {"choices":[{"delta":{"content":"continued"}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer gw.Close()
+	p := &Proxy{
+		CADir:   t.TempDir(),
+		Gateway: func() (string, string) { return gw.URL, "tok" },
+		client:  http.DefaultClient,
+	}
+	followups := make(chan []byte, 1)
+	go func() {
+		followups <- piExecClient(1, "call_a", 46, "package a")
+		close(followups)
+	}()
+	var out bytes.Buffer
+	p.runAgentLoop(context.Background(), followups, AgentTurn{
+		Messages: []ChatMessage{{Role: "user", Content: "edit both"}},
+	}, Route{Model: "codex/gpt-5.6-luna"}, func(b []byte) { out.Write(b) })
+	if !strings.Contains(out.String(), "continued") {
+		t.Fatalf("stream %q", out.Bytes())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("gateway rounds %d", len(bodies))
+	}
+	second := string(bodies[1])
+	if !strings.Contains(second, "package a") || !strings.Contains(second, "tool result did not arrive") {
+		t.Fatalf("second chat %s", second)
+	}
+	if !strings.Contains(Recent(), "agent tool round partial got=1 missing=1") {
+		t.Fatalf("partial trace:\n%s", Recent())
+	}
+}
+
+func TestRunAgentLoopDoesNotInventResultsWhenNoneArrive(t *testing.T) {
+	var mu sync.Mutex
+	var n int
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"Shell","arguments":"{\"command\":\"ls\"}"}}]}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer gw.Close()
+	p := &Proxy{
+		CADir:   t.TempDir(),
+		Gateway: func() (string, string) { return gw.URL, "tok" },
+		client:  http.DefaultClient,
+	}
+	followups := make(chan []byte)
+	close(followups)
+	p.runAgentLoop(context.Background(), followups, AgentTurn{
+		Messages: []ChatMessage{{Role: "user", Content: "go"}},
+	}, Route{Model: "codex/gpt-5.6-luna"}, func([]byte) {})
+	mu.Lock()
+	defer mu.Unlock()
+	if n != 1 {
+		t.Fatalf("gateway rounds %d", n)
+	}
+}
+
+func TestRunAgentLoopStopsARepeatedBareCall(t *testing.T) {
+	var mu sync.Mutex
+	var n int
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_r","function":{"name":"Read","arguments":"{}"}}]}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer gw.Close()
+	p := &Proxy{
+		CADir:   t.TempDir(),
+		Gateway: func() (string, string) { return gw.URL, "tok" },
+		client:  http.DefaultClient,
+	}
+	p.runAgentLoop(context.Background(), nil, AgentTurn{
+		Messages: []ChatMessage{{Role: "user", Content: "read"}},
+	}, Route{Model: "codex/gpt-5.6-luna"}, func([]byte) {})
+	mu.Lock()
+	defer mu.Unlock()
+	if n != 2 {
+		t.Fatalf("gateway rounds %d", n)
+	}
+	if !strings.Contains(Recent(), "agent tool round stop reason=bare") {
+		t.Fatalf("stop trace:\n%s", Recent())
 	}
 }
 

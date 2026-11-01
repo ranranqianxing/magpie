@@ -109,13 +109,13 @@ func oneExecResult(raw []byte, want map[string]bool, execOf map[uint32]string) (
 	if !ok {
 		return ChatMessage{}, false
 	}
-	text, images := decodeExecBody(kind, body)
+	o := readExecOutcome(kind, body)
 	call, matched := callForExec(execID, uint32(n), want, execOf)
-	Note(fmt.Sprintf("agent exec result kind=%s matched=%t bytes=%d images=%d", kind, matched, len(text), len(images)))
+	Note(fmt.Sprintf("agent exec result kind=%s matched=%t bytes=%d images=%d status=%s truncated=%t", kind, matched, len(o.text), len(o.images), o.status, o.truncated))
 	if !matched {
 		return ChatMessage{}, false
 	}
-	return ChatMessage{Role: "tool", ToolCallID: call, Content: messageContent(text, images)}, true
+	return ChatMessage{Role: "tool", ToolCallID: call, Content: toolContent(o.text, o.images)}, true
 }
 
 func oneExecThrow(raw []byte, want map[string]bool, execOf map[uint32]string) (ChatMessage, bool) {
@@ -192,22 +192,8 @@ func execResultBody(fs []field) (kind string, body []byte, ok bool) {
 }
 
 func decodeExecBody(kind string, body []byte) (string, []ContentPart) {
-	fs, err := parseFields(body)
-	if err != nil {
-		return "", nil
-	}
-	if raws := fieldBytes(fs, 1); len(raws) > 0 {
-		return successText(kind, raws[0])
-	}
-	if raws := fieldBytes(fs, 2); len(raws) > 0 {
-		return failText("error: ", raws[0]), nil
-	}
-	if raws := fieldBytes(fs, 3); len(raws) > 0 {
-		return failText("rejected: ", raws[0]), nil
-	}
-	// A finished arm with no success, error, or rejected variant still
-	// closes the call. Leaving it open waits until the client gives up.
-	return "", nil
+	o := readExecOutcome(kind, body)
+	return o.text, o.images
 }
 
 func failText(prefix string, msg []byte) string {
@@ -256,17 +242,7 @@ func piEditSuccessText(msg []byte) string {
 	if err != nil {
 		return ""
 	}
-	out, _ := fieldString(fs, 1)
-	diff, _ := fieldString(fs, 2)
-	out = strings.TrimSpace(out)
-	diff = strings.TrimSpace(diff)
-	if out == "" {
-		return diff
-	}
-	if diff == "" || strings.Contains(out, diff) {
-		return out
-	}
-	return out + "\n" + diff
+	return piEditText(fs)
 }
 
 func shellSuccessText(msg []byte) string {

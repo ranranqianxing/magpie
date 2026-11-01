@@ -253,6 +253,74 @@ func TestEditReplaceAllIsNotAPiField(t *testing.T) {
 			t.Fatalf("replacement grew field %d", f.num)
 		}
 	}
+	req, _ := schema["required"].([]any)
+	if len(req) != 1 || req[0] != "path" {
+		t.Fatalf("edit required %#v", req)
+	}
+	if _, ok := props["edits"]; !ok {
+		t.Fatal("Edit schema has no edits array")
+	}
+}
+
+func TestEditBatchAndGrepFlagsReachThePiExec(t *testing.T) {
+	frames, ok := agentToolFrames("call_e", "Edit", `{"path":"a.go","edits":[{"old_string":"one","new_string":"two"},{"old_string":"three","new_string":""}]}`, 1)
+	if !ok || len(frames) != 2 {
+		t.Fatalf("frames %d ok=%v", len(frames), ok)
+	}
+	body := nested(t, execMessage(t, frames[1]), 47)
+	reps := fieldBytes(body, 2)
+	if len(reps) != 2 {
+		t.Fatalf("replacements %d", len(reps))
+	}
+	first, err := parseFields(reps[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := fieldString(first, 1); got != "one" {
+		t.Fatalf("first old %q", got)
+	}
+	second, err := parseFields(reps[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := fieldString(second, 1); got != "three" {
+		t.Fatalf("second old %q", got)
+	}
+	if got, ok := fieldString(second, 2); !ok || got != "" {
+		t.Fatalf("second new %q ok=%v", got, ok)
+	}
+	for _, f := range second {
+		if f.num != 1 && f.num != 2 {
+			t.Fatalf("replacement grew field %d", f.num)
+		}
+	}
+
+	grep, ok := agentToolFrames("call_g", "Grep", `{"pattern":"foo.bar","path":"src","ignore_case":true,"literal":true,"context":2,"limit":5}`, 2)
+	if !ok {
+		t.Fatal("grep")
+	}
+	gbody := nested(t, execMessage(t, grep[1]), 49)
+	if got, ok := fieldUint(gbody, 4); !ok || got != 1 {
+		t.Fatalf("ignore_case %d ok=%v", got, ok)
+	}
+	if got, ok := fieldUint(gbody, 5); !ok || got != 1 {
+		t.Fatalf("literal %d ok=%v", got, ok)
+	}
+	if got, ok := fieldUint(gbody, 6); !ok || got != 2 {
+		t.Fatalf("context %d ok=%v", got, ok)
+	}
+	if got, ok := fieldUint(gbody, 7); !ok || got != 5 {
+		t.Fatalf("limit %d ok=%v", got, ok)
+	}
+
+	shell, ok := agentToolFrames("call_s", "Shell", `{"command":"pwd","timeout":1.5}`, 3)
+	if !ok {
+		t.Fatal("shell")
+	}
+	sbody := nested(t, execMessage(t, shell[1]), 46)
+	if got, ok := fieldFloat(sbody, 2); !ok || got != 1.5 {
+		t.Fatalf("timeout %v ok=%v", got, ok)
+	}
 }
 
 func partialArgsText(t *testing.T, frame []byte) string {
