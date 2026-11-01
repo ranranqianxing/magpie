@@ -181,6 +181,30 @@ func UnwrapUnary(body []byte) (payload []byte, framed bool, err error) {
 	return body[5:], true, nil
 }
 
+// inspectUnary is UnwrapUnary for a request we may still forward.
+// A single uncompressed frame yields its payload. A gzipped connect
+// frame (flag bit 0) is decompressed so the model id can be read; the
+// caller forwards the original bytes when the id is not magpie's. A
+// length that is not one frame is returned as itself, the same way
+// UnwrapUnary does. Any other flag is an error and the caller forwards.
+func inspectUnary(body []byte) ([]byte, error) {
+	if len(body) < 5 {
+		return body, nil
+	}
+	flags := body[0]
+	n := binary.BigEndian.Uint32(body[1:5])
+	if uint64(n) != uint64(len(body)-5) {
+		return body, nil
+	}
+	if flags == 0 {
+		return body[5:], nil
+	}
+	if flags == 1 {
+		return gunzipUpTo(body[5:], "gzip", maxAppendBody)
+	}
+	return nil, fmt.Errorf("cursor ide: compressed catalog frame")
+}
+
 // MergeUnary appends extra, a protobuf message of the same type, to
 // upstream. Repeated fields concatenate, which is how Cursor's catalog
 // gains magpie's models without replacing Cursor's own. A framed upstream

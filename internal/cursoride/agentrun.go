@@ -46,6 +46,8 @@ type AgentTurn struct {
 // is one protobuf is read as that message. A gzipped connect frame (flag
 // bit 0) is decompressed. A trailer frame is skipped. A frame that does
 // not parse is unknown, so ok is false and the caller forwards the body.
+// A truncated conversation_state still returns the model id with the
+// error, so a catalog id can be refused and any other id forwarded.
 func ReadAgentRun(body []byte) (AgentTurn, bool, error) {
 	payloads, framed := connectPayloads(body)
 	if !framed {
@@ -54,6 +56,9 @@ func ReadAgentRun(body []byte) (AgentTurn, bool, error) {
 	var last error
 	for _, p := range payloads {
 		turn, ok, err := readAgentClient(p)
+		if err != nil && turn.ModelID != "" {
+			return turn, true, err
+		}
 		if err != nil {
 			last = err
 			continue
@@ -101,7 +106,9 @@ func readAgentClient(payload []byte) (AgentTurn, bool, error) {
 		blobs:  blobIndex(fieldBytes(rf, 17)),
 	}
 	if err := turn.rebuild(true); err != nil {
-		return AgentTurn{}, false, err
+		// ModelID is set. The caller refuses a catalog id and forwards
+		// every other one; dropping the id here made both a 400.
+		return turn, true, err
 	}
 	return turn, true, nil
 }

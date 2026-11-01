@@ -17,16 +17,6 @@ type connectFrameReader struct {
 	err error
 }
 
-// readRemainder is the request body after the last frame read. Used to
-// forward a streaming run without a follow-up pump eating the tail.
-func (fr *connectFrameReader) readRemainder() []byte {
-	if fr == nil || fr.r == nil {
-		return nil
-	}
-	b, _ := io.ReadAll(io.LimitReader(fr.r, int64(maxCatalogBody)+1))
-	return b
-}
-
 func newConnectFrameReader(r io.Reader) *connectFrameReader {
 	return &connectFrameReader{r: r}
 }
