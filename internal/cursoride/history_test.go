@@ -202,6 +202,102 @@ func TestReplayTurnsDoNotReplaceACompleteRoot(t *testing.T) {
 	}
 }
 
+func TestReplayTurnsKeepEveryEditAndAMissingResult(t *testing.T) {
+	id := make([]byte, 32)
+	id[0] = 4
+	var state wbuf
+	state.msg(1, id)
+	state.msg(8, agentTurnWithEdits("fix both"))
+	msgs, _, err := replayConversation([]byte(state), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) < 3 {
+		t.Fatalf("messages %d", len(msgs))
+	}
+	args := msgs[1].ToolCalls[0].Arguments
+	if !strings.Contains(args, "one") || !strings.Contains(args, "three") || !strings.Contains(args, "edits") {
+		t.Fatalf("args %s", args)
+	}
+	if msgs[2].Role != "tool" || msgs[2].Content.(string) != "error: old-text-absent" {
+		t.Fatalf("edit result %+v", msgs[2])
+	}
+	bare := msgsFromTurnStep(agentReadStep("", "c2"))
+	if len(bare) != 2 || bare[1].Content.(string) != "error: result missing" {
+		t.Fatalf("missing result %+v", bare)
+	}
+	cut := msgsFromTurnStep(truncatedStep())
+	if len(cut) != 1 || cut[0].Role != "assistant" || len(cut[0].ToolCalls) != 0 || cut[0].Content.(string) != truncatedStepNote {
+		t.Fatalf("truncated %+v", cut)
+	}
+}
+
+func msgsFromTurnStep(step []byte) []ChatMessage {
+	return messagesFromStep(step)
+}
+
+func agentTurnWithEdits(user string) []byte {
+	var um wbuf
+	um.str(1, user)
+	var args wbuf
+	args.str(1, "a.go")
+	var one wbuf
+	one.str(1, "one")
+	one.str(2, "two")
+	var two wbuf
+	two.str(1, "three")
+	two.str(2, "four")
+	args.msg(2, []byte(one))
+	args.msg(2, []byte(two))
+	var errMsg wbuf
+	errMsg.str(1, "old-text-absent")
+	var result wbuf
+	result.msg(2, []byte(errMsg))
+	var pi wbuf
+	pi.msg(1, []byte(args))
+	pi.msg(2, []byte(result))
+	var call wbuf
+	call.str(57, "c-edit")
+	call.msg(63, []byte(pi))
+	var step wbuf
+	step.msg(2, []byte(call))
+	var agent wbuf
+	agent.msg(1, []byte(um))
+	agent.msg(2, []byte(step))
+	var turn wbuf
+	turn.msg(1, []byte(agent))
+	return []byte(turn)
+}
+
+func agentReadStep(output, callID string) []byte {
+	var args wbuf
+	args.str(1, "a.go")
+	var pi wbuf
+	pi.msg(1, []byte(args))
+	if output != "" {
+		var success wbuf
+		success.str(1, output)
+		var result wbuf
+		result.msg(1, []byte(success))
+		pi.msg(2, []byte(result))
+	}
+	var call wbuf
+	call.str(57, callID)
+	call.msg(61, []byte(pi))
+	var step wbuf
+	step.msg(2, []byte(call))
+	return []byte(step)
+}
+
+func truncatedStep() []byte {
+	var trunc wbuf
+	var call wbuf
+	call.msg(34, []byte(trunc))
+	var step wbuf
+	step.msg(2, []byte(call))
+	return []byte(step)
+}
+
 func agentTurnWithRead(user, path, callID, output string) []byte {
 	var um wbuf
 	um.str(1, user)

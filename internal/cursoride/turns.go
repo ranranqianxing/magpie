@@ -159,6 +159,9 @@ func messagesFromToolStep(body []byte) []ChatMessage {
 	if id == "" {
 		id = "call-turn"
 	}
+	if len(fieldBytes(fs, 34)) > 0 {
+		return []ChatMessage{{Role: "assistant", Content: truncatedStepNote}}
+	}
 	for _, arm := range turnArms {
 		raws := fieldBytes(fs, arm.field)
 		if len(raws) == 0 {
@@ -172,9 +175,23 @@ func messagesFromToolStep(body []byte) []ChatMessage {
 			Role:      "assistant",
 			ToolCalls: []ToolCall{{ID: id, Name: name, Arguments: args}},
 		}}
-		if result != "" || len(images) > 0 {
+		// A Pi call without a result is not a finished exec. Replaying it
+		// as a bare assistant tool call makes the next gateway request
+		// dangle, and the model retries with empty arguments. A present
+		// result is kept even when its text is empty: that is a real
+		// success, not a missing one.
+		hasResult := false
+		if inner, err := parseFields(raws[0]); err == nil {
+			hasResult = len(fieldBytes(inner, 2)) > 0
+		}
+		if hasResult {
 			out = append(out, ChatMessage{
-				Role: "tool", ToolCallID: id, Content: messageContent(result, images),
+				Role: "tool", ToolCallID: id, Content: toolContent(result, images),
+			})
+		} else {
+			Note("agent history tool result=missing name=" + safeToolName(name))
+			out = append(out, ChatMessage{
+				Role: "tool", ToolCallID: id, Content: "error: result missing",
 			})
 		}
 		return out
@@ -250,31 +267,25 @@ func turnArgsJSON(arm turnArm, raw []byte) string {
 		}
 	case "Shell":
 		put("command", 1)
+		fillPiTurnArgs(arm.name, fs, obj)
 	case "Write":
 		put("path", 1)
 		put("content", 2)
 	case "Edit":
 		put("path", 1)
-		if reps := fieldBytes(fs, 2); len(reps) > 0 {
-			rf, err := parseFields(reps[0])
-			if err == nil {
-				if s, ok := fieldString(rf, 1); ok {
-					obj["old_string"] = s
-				}
-				if s, ok := fieldString(rf, 2); ok {
-					obj["new_string"] = s
-				}
-			}
-		}
+		fillPiTurnArgs(arm.name, fs, obj)
 	case "Grep":
 		put("pattern", 1)
 		put("path", 2)
 		put("glob", 3)
+		fillPiTurnArgs(arm.name, fs, obj)
 	case "Glob":
 		put("pattern", 1)
 		put("path", 2)
+		fillPiTurnArgs(arm.name, fs, obj)
 	case "LS":
 		put("path", 1)
+		fillPiTurnArgs(arm.name, fs, obj)
 	case "Delete":
 		put("path", 1)
 	}
