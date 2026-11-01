@@ -1,6 +1,7 @@
 package cursoride
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -39,6 +40,10 @@ type ChatMessage struct {
 	Content    any // string, or []ContentPart when the turn has an image
 	ToolCalls  []ToolCall
 	ToolCallID string
+	// Reasoning is assistant reasoning text the invoke carried.
+	// It is the gateway's reasoning_content. A signature with no text
+	// is not copied.
+	Reasoning string
 }
 
 // ContentPart is one user part. An image's URL is a data URL.
@@ -111,6 +116,7 @@ type outMessage struct {
 	Content    json.RawMessage `json:"content,omitempty"`
 	ToolCalls  []outTool       `json:"tool_calls,omitempty"`
 	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Reasoning  string          `json:"reasoning_content,omitempty"`
 }
 
 type outTool struct {
@@ -166,7 +172,7 @@ func (c Chat) JSON() ([]byte, error) {
 }
 
 func marshalMessage(m ChatMessage) (outMessage, error) {
-	om := outMessage{Role: m.Role, ToolCallID: m.ToolCallID}
+	om := outMessage{Role: m.Role, ToolCallID: m.ToolCallID, Reasoning: m.Reasoning}
 	for _, call := range m.ToolCalls {
 		args := call.Arguments
 		if args == "" {
@@ -370,10 +376,36 @@ func projectMessage(raw []byte) ([]ChatMessage, error) {
 		}
 		msg.ToolCalls = append(msg.ToolCalls, call)
 	}
-	if msg.Content == nil && len(msg.ToolCalls) == 0 {
+	if role == "assistant" {
+		msg.Reasoning = reasoningText(fs)
+	}
+	if msg.Content == nil && len(msg.ToolCalls) == 0 && msg.Reasoning == "" {
 		return nil, nil
 	}
 	return []ChatMessage{msg}, nil
+}
+
+// reasoningText is InferenceCoreMessage field 7. Each part's text is
+// field 2. A redacted signature (field 4) with no text is not a thought
+// the gateway can replay.
+func reasoningText(fs []field) string {
+	var b strings.Builder
+	for _, raw := range fieldBytes(fs, 7) {
+		pf, err := parseFields(raw)
+		if err != nil {
+			continue
+		}
+		s, _ := fieldString(pf, 2)
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(s)
+	}
+	return b.String()
 }
 
 func roleName(n int) (string, bool) {
@@ -489,14 +521,63 @@ func projectToolCall(raw []byte, index int) (ToolCall, error) {
 	}
 	id, _ := fieldString(fs, 1)
 	name, _ := fieldString(fs, 2)
-	args, _ := fieldString(fs, 4)
 	if id == "" {
 		id = fmt.Sprintf("call-%d", index+1)
 	}
-	if args == "" {
-		args = "{}"
+	return ToolCall{ID: id, Name: name, Arguments: toolCallArgs(fs)}, nil
+}
+
+// toolCallArgs is InferenceToolCall. Field 3 is the protobuf Struct the
+// official inference server reads. Field 4 is the raw JSON string some
+// invokes send beside it. A string that names fields wins, so an older
+// invoke that only set field 4 stays byte-for-byte. "{}" does not hide
+// the struct: that placeholder is how a call arrives before the object.
+func toolCallArgs(fs []field) string {
+	raw, _ := fieldString(fs, 4)
+	structured := ""
+	if blobs := fieldBytes(fs, 3); len(blobs) > 0 {
+		if obj, err := decodeStruct(blobs[0]); err == nil {
+			if s, err := jsonCompact(obj); err == nil {
+				structured = s
+			}
+		} else if looksJSON(blobs[0]) && json.Valid(blobs[0]) {
+			structured = string(bytesTrim(blobs[0]))
+		}
 	}
-	return ToolCall{ID: id, Name: name, Arguments: args}, nil
+	if toolArgsUseful(raw) {
+		return strings.TrimSpace(raw)
+	}
+	if toolArgsUseful(structured) {
+		return structured
+	}
+	if strings.TrimSpace(raw) != "" {
+		return strings.TrimSpace(raw)
+	}
+	if strings.TrimSpace(structured) != "" {
+		return strings.TrimSpace(structured)
+	}
+	return "{}"
+}
+
+func bytesTrim(b []byte) string {
+	return strings.TrimSpace(string(b))
+}
+
+// toolArgsUseful is JSON the model can read as arguments. "{}" and
+// "null" are placeholders. An array or a non-empty object is the call.
+func toolArgsUseful(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "{}" || s == "null" || !json.Valid([]byte(s)) {
+		return false
+	}
+	if s[0] != '{' {
+		return true
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal([]byte(s), &obj) != nil {
+		return false
+	}
+	return len(obj) > 0
 }
 
 func projectTool(raw []byte) ([]ChatMessage, error) {
@@ -519,10 +600,8 @@ func projectTool(raw []byte) ([]ChatMessage, error) {
 
 func toolResultBody(fs []field) (string, []ContentPart) {
 	if raw := fieldBytes(fs, 3); len(raw) > 0 {
-		if inner, err := parseFields(raw[len(raw)-1]); err == nil {
-			if s, ok := fieldString(inner, 3); ok {
-				return s, nil
-			}
+		if text, images, ok := toolResultValue(raw[len(raw)-1]); ok {
+			return text, images
 		}
 	}
 	var b strings.Builder
@@ -556,6 +635,110 @@ func toolResultBody(fs []field) (string, []ContentPart) {
 		}
 	}
 	return b.String(), images
+}
+
+// toolResultValue is InferenceToolResultPart.result, a protobuf Value.
+// A string stays that string. A list of text and image parts stays text
+// and images. Any other value is its JSON, which is the object an
+// official server would hand the model. A value that does not decode
+// is not a result: the caller tries the older parts field.
+func toolResultValue(raw []byte) (string, []ContentPart, bool) {
+	v, err := decodeValue(raw)
+	if err != nil || v == nil {
+		return "", nil, false
+	}
+	switch t := v.(type) {
+	case string:
+		return t, nil, true
+	case []any:
+		if text, images, ok := contentList(t); ok {
+			return text, images, true
+		}
+	case map[string]any:
+		if text, images, ok := contentList([]any{t}); ok {
+			return text, images, true
+		}
+	}
+	s, err := jsonCompact(v)
+	if err != nil {
+		return "", nil, false
+	}
+	return s, nil, true
+}
+
+// jsonCompact is one JSON value with HTML left as characters. The chat
+// body encodes the string again, so a '<' that was already escaped here
+// would reach the model as the letters \u003c.
+func jsonCompact(v any) (string, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	return strings.TrimRight(buf.String(), "\n"), nil
+}
+
+// contentList is a Value list of {type,text} or image parts. A list
+// that is not that shape is refused so the caller keeps the JSON.
+func contentList(list []any) (string, []ContentPart, bool) {
+	if len(list) == 0 {
+		return "", nil, false
+	}
+	var b strings.Builder
+	var images []ContentPart
+	for _, one := range list {
+		obj, ok := one.(map[string]any)
+		if !ok {
+			return "", nil, false
+		}
+		typ, _ := obj["type"].(string)
+		switch typ {
+		case "text":
+			s, _ := obj["text"].(string)
+			if s == "" {
+				return "", nil, false
+			}
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(s)
+		case "image", "image_url":
+			url := imageFromValue(obj)
+			if url == "" {
+				return "", nil, false
+			}
+			if !hasImage(images, url) {
+				images = append(images, ContentPart{Type: "image_url", ImageURL: url})
+			}
+		default:
+			return "", nil, false
+		}
+	}
+	if b.Len() == 0 && len(images) == 0 {
+		return "", nil, false
+	}
+	return b.String(), images, true
+}
+
+func imageFromValue(obj map[string]any) string {
+	if s, ok := obj["url"].(string); ok && s != "" {
+		return imageDataURL(s, "")
+	}
+	if img, ok := obj["image_url"].(map[string]any); ok {
+		if s, ok := img["url"].(string); ok && s != "" {
+			return imageDataURL(s, "")
+		}
+	}
+	data, _ := obj["data"].(string)
+	if data == "" {
+		return ""
+	}
+	mime, _ := obj["mime_type"].(string)
+	if mime == "" {
+		mime, _ = obj["media_type"].(string)
+	}
+	return imageDataURL(data, mime)
 }
 
 // CompileChat builds the gateway request for an invoke that belongs to

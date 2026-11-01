@@ -140,6 +140,128 @@ func TestDecideSeparatesMagpieFromCursor(t *testing.T) {
 	}
 }
 
+func TestCompileInlineHistoryKeepsOfficialInvokeFields(t *testing.T) {
+	thought := "kept-the-thought"
+	call := assistantStructCall("read it", "call_1", "Read", "", map[string]any{"path": "a.go"})
+	call = withReasoning(call, thought)
+	payload := invoke("inv-long",
+		call,
+		toolResultValueMsg("call_1", map[string]any{"content": "early-result-token"}),
+		toolResultValueMsg("call_2", []any{
+			map[string]any{"type": "text", "text": "line one"},
+			map[string]any{"type": "text", "text": "line two"},
+		}),
+		textMsg(1, "what was in the file"),
+	)
+	// The second tool message is a list. Its id is call_2, so the
+	// assistant call above is not its pair. The body still has to keep
+	// both results: a long invoke is the whole transcript.
+	chat, err := CompileChat(Route{Model: "deepseek/deepseek-v4.1-flash"}, "conv", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := chat.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Messages []struct {
+			Role       string          `json:"role"`
+			Content    json.RawMessage `json:"content"`
+			Reasoning  string          `json:"reasoning_content"`
+			ToolCallID string          `json:"tool_call_id"`
+			ToolCalls  []struct {
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Messages) != 4 {
+		t.Fatalf("messages %d %s", len(got.Messages), body)
+	}
+	args := got.Messages[0].ToolCalls
+	if got.Messages[0].Role != "assistant" || got.Messages[0].Reasoning != thought || len(args) != 1 || args[0].Function.Name != "Read" {
+		t.Fatalf("assistant %+v", got.Messages[0])
+	}
+	var obj map[string]any
+	if json.Unmarshal([]byte(args[0].Function.Arguments), &obj) != nil || obj["path"] != "a.go" {
+		t.Fatalf("struct args %s", args[0].Function.Arguments)
+	}
+	if string(got.Messages[1].Content) != `"{\"content\":\"early-result-token\"}"` && !strings.Contains(string(got.Messages[1].Content), "early-result-token") {
+		t.Fatalf("struct result %s", got.Messages[1].Content)
+	}
+	if !strings.Contains(string(got.Messages[2].Content), "line one") || !strings.Contains(string(got.Messages[2].Content), "line two") {
+		t.Fatalf("list result %s", got.Messages[2].Content)
+	}
+	if string(got.Messages[3].Content) != `"what was in the file"` {
+		t.Fatalf("user %s", got.Messages[3].Content)
+	}
+
+	// A raw JSON string that already names fields stays that string.
+	// "{}" does not: the struct is the call.
+	kept := invoke("inv-raw", assistantStructCall("", "call_9", "Read", `{"path": "kept.go"}`, map[string]any{"path": "other.go"}))
+	chat, err = CompileChat(Route{Model: "deepseek/deepseek-v4.1-flash"}, "conv", kept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err = chat.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `kept.go`) || strings.Contains(string(body), "other.go") {
+		t.Fatalf("raw args lost: %s", body)
+	}
+	placeholder := invoke("inv-ph", assistantStructCall("", "call_8", "Read", "{}", map[string]any{"path": "from-struct.go"}))
+	chat, err = CompileChat(Route{Model: "deepseek/deepseek-v4.1-flash"}, "conv", placeholder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err = chat.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "from-struct.go") {
+		t.Fatalf("placeholder hid the struct: %s", body)
+	}
+	angled := invoke("inv-angle", toolResultValueMsg("call_3", map[string]any{"content": "<file>"}))
+	chat, err = CompileChat(Route{Model: "deepseek/deepseek-v4.1-flash"}, "conv", angled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err = chat.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var angledGot struct {
+		Messages []struct {
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal(body, &angledGot) != nil || len(angledGot.Messages) != 1 || angledGot.Messages[0].Content != `{"content":"<file>"}` {
+		t.Fatalf("angle result %s", body)
+	}
+	img := invoke("inv-img-val", toolResultValueMsg("call_img", []any{
+		map[string]any{"type": "text", "text": "see"},
+		map[string]any{"type": "image_url", "url": "data:image/png;base64,aaaa"},
+	}))
+	chat, err = CompileChat(Route{Model: "deepseek/deepseek-v4.1-flash"}, "conv", img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err = chat.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "see") || !strings.Contains(string(body), "data:image/png;base64,aaaa") {
+		t.Fatalf("image value dropped: %s", body)
+	}
+}
+
 func TestUnknownInferenceRoleIsAnError(t *testing.T) {
 	var msg wbuf
 	msg.u32(1, 9)
@@ -218,6 +340,56 @@ func fileMsg(data, media string) wbuf {
 	var msg wbuf
 	msg.u32(1, 1)
 	msg.msg(3, parts)
+	return msg
+}
+
+func assistantStructCall(text, id, name, raw string, args map[string]any) wbuf {
+	var call wbuf
+	call.str(1, id)
+	call.str(2, name)
+	if args != nil {
+		call.msg(3, protoStruct(args))
+	}
+	if raw != "" {
+		call.str(4, raw)
+	}
+	var msg wbuf
+	msg.u32(1, 2)
+	if text != "" {
+		msg.str(2, text)
+	}
+	msg.msg(4, call)
+	return msg
+}
+
+func withReasoning(msg wbuf, text string) wbuf {
+	var part wbuf
+	part.str(2, text)
+	msg.msg(7, part)
+	return msg
+}
+
+func protoStruct(obj map[string]any) []byte {
+	var st wbuf
+	for k, one := range obj {
+		var entry wbuf
+		entry.str(1, k)
+		entry.msg(2, protoValue(one))
+		st.msg(1, entry)
+	}
+	return []byte(st)
+}
+
+func toolResultValueMsg(id string, v any) wbuf {
+	var part wbuf
+	part.str(1, id)
+	part.str(2, "Read")
+	part.msg(3, protoValue(v))
+	var content wbuf
+	content.msg(1, part)
+	var msg wbuf
+	msg.u32(1, 3)
+	msg.msg(6, content)
 	return msg
 }
 

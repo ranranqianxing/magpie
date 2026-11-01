@@ -324,7 +324,7 @@ func (p *Proxy) localAppend(w http.ResponseWriter, s *sess, raw []byte) {
 }
 
 func (p *Proxy) runChat(s *sess, chat Chat) {
-	Note("chat start model=" + chat.Model + " path=BidiAppend")
+	noteBidiHistory(chat)
 	defer Note("chat done model=" + chat.Model + " path=BidiAppend")
 	noteRequestToolArgs(chat.Messages)
 	s.push(invocationIdFrame(chat.InvocationID))
@@ -387,6 +387,58 @@ func (p *Proxy) runChat(s *sess, chat Chat) {
 		s.push(textFrame(chat.InvocationID, "", true))
 	}
 	s.push(endFrame(chat.InvocationID, ""))
+}
+
+// noteBidiHistory is the per-invoke line for the path injected Agent
+// chats actually take. The transcript is inside the invoke. There is
+// no KvServerMessage on RunInference, so history is inline. Counts are
+// what the gateway is about to be asked. Text, paths, and arguments
+// are not on the line.
+func noteBidiHistory(chat Chat) {
+	var calls, results, empty, reasoning, n int
+	for _, m := range chat.Messages {
+		if m.Reasoning != "" {
+			reasoning++
+			n += len(m.Reasoning)
+		}
+		switch c := m.Content.(type) {
+		case string:
+			n += len(c)
+		case []ContentPart:
+			for _, p := range c {
+				if p.Type == "text" {
+					n += len(p.Text)
+				}
+			}
+		}
+		if m.Role == "tool" {
+			results++
+		}
+		for _, c := range m.ToolCalls {
+			calls++
+			n += len(c.Arguments)
+			if callArgsEmpty(c.Arguments) {
+				empty++
+			}
+		}
+	}
+	Note(fmt.Sprintf("chat start model=%s path=BidiAppend history=inline messages=%d tools=%d calls=%d results=%d images=%d bytes=%d empty-args=%d reasoning=%d",
+		chat.Model, len(chat.Messages), len(chat.Tools), calls, results, countChatImages(chat.Messages), n, empty, reasoning))
+}
+
+// agentHistoryMode is how this AgentService/Run got its prompt.
+// kv means the body is still open and blob ids will be asked for.
+// blobs means holes remain on a run that cannot ask. inline means
+// conversation_state already resolved, the same word BidiAppend uses
+// when the invoke carried the transcript itself.
+func agentHistoryMode(turn AgentTurn) string {
+	if turn.liveKV {
+		return "kv"
+	}
+	if turn.MissingBlobs > 0 {
+		return "blobs"
+	}
+	return "inline"
 }
 
 // finishInferenceTools writes one completing tool_call_part per call that
@@ -571,7 +623,7 @@ func (p *Proxy) serveLocalAgentRun(w http.ResponseWriter, r *http.Request, turn 
 			drainFollowups(followups)
 		}()
 	}
-	Note("chat start model=" + route.Model + " path=AgentService/Run")
+	Note(fmt.Sprintf("chat start model=%s path=AgentService/Run history=%s", route.Model, agentHistoryMode(turn)))
 	defer Note("chat done model=" + route.Model + " path=AgentService/Run")
 	p.runAgentLoop(r.Context(), followups, turn, route, write)
 }
