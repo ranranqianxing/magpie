@@ -55,6 +55,14 @@ func TestPickerOmitsBadgesAndKeepsRouteIDs(t *testing.T) {
 	if v, ok := fieldUint(row, 14); !ok || v != 0 {
 		t.Fatalf("supports_max_mode = %d, present %v", v, ok)
 	}
+	// The compact picker (Use Multiple Models) keeps a row only when both
+	// of these are set. A named section alone is Show all models.
+	if v, ok := fieldUint(row, 2); !ok || v != 1 {
+		t.Fatalf("default_on = %d, present %v", v, ok)
+	}
+	if v, ok := fieldUint(row, 40); !ok || v != 1 {
+		t.Fatalf("visible_in_routed_model_view = %d, present %v", v, ok)
+	}
 	if v, ok := fieldUint(row, 10); !ok || v != 1 {
 		t.Fatalf("supports_images = %d, present %v", v, ok)
 	}

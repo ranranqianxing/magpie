@@ -169,6 +169,11 @@ func encodeModel(m Model) []byte {
 		b.str(36, v.slug)
 	}
 	b.u32(38, 1)
+	// visible_in_routed_model_view. Cursor's compact picker, including
+	// Use Multiple Models, lists a row only when this is set and
+	// default_on is set. A named-model section alone leaves the row in
+	// Show all models. Official rows keep the flag Cursor sent.
+	b.bool(40, true)
 	b.str(41, vendorLabel)
 	b.msg(42, encodeVendor())
 	return []byte(b)
