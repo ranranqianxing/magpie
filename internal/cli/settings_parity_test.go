@@ -167,6 +167,7 @@ var notYet = map[string]string{
 	"POST /api/agent-fast":                       A,  // agent_models.go
 	"POST /api/agent-models/{id}":                A,  // agent_models.go
 	"GET /api/agents/cli":                        A,  // api.go
+	"GET /api/agents/cursor-ide/log":             A,  // api.go
 	"GET /api/agents/install":                    A,  // api.go
 	"GET /api/agents/preview/{id}":               A,  // api.go
 	"GET /api/cli":                               A,  // api.go
