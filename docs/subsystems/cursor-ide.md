@@ -18,7 +18,7 @@ is the other path: ordinary Cursor, magpie's existing models.
 | Part | Responsibility | Source |
 | --- | --- | --- |
 | Rows Cursor lists | Build the protobuf appended to `AvailableModels`, `GetUsableModels`, `GetDefaultModel`, `GetDefaultModelForCli` and `GetDefaultModelNudgeData`. | [`catalog.go`](../../internal/cursoride/catalog.go) |
-| Which models | The catalog that agent is allowed to show (`provider.CatalogFor`, via `ForAgent`). A model hidden on the Agents page is not injected. The display name is the model's name. The route id is the catalog id the gateway already routes (`provider/model`, or a group's id). | [`from.go`](../../internal/cursoride/from.go) |
+| Which models | The catalog that agent is allowed to show (`provider.CatalogFor`, via `ForAgent`). A model hidden on the Agents page is not injected. The catalog name is the model's name. The picker shows that name with a Magpie suffix. The route id is the catalog id the gateway already routes (`provider/model`, or a group's id). | [`from.go`](../../internal/cursoride/from.go) |
 | What an inference id means | A bare route id, a variant string (`id[context=…,reasoning=…,fast=…]`) or a legacy slug (`id-200k-high-fast`) names that catalog entry. The same match is used for the id on `AgentService/Run`. Anything else is Cursor's own model. | [`route.go`](../../internal/cursoride/route.go), [`agentrun.go`](../../internal/cursoride/agentrun.go) |
 | The gateway request | An invoke's messages, or an Agent run's `conversation_state` plus the current user text and that turn's `selected_context`, become a `/v1/chat/completions` body: `model` is the route id, `reasoning_effort` is the level Cursor sent, `stream` is true. Tools on the invoke are copied. An Agent run also offers the built-in composer tools and any MCP tool the run defined. Those built-in tools are the Pi exec args Cursor runs, encoded and decoded by one codec. A follow-up `ExecClientMessage` is the tool result for the next round. | [`compile.go`](../../internal/cursoride/compile.go), [`history.go`](../../internal/cursoride/history.go), [`turns.go`](../../internal/cursoride/turns.go), [`attach.go`](../../internal/cursoride/attach.go), [`execresult.go`](../../internal/cursoride/execresult.go), [`tools.go`](../../internal/cursoride/tools.go), [`piface.go`](../../internal/cursoride/piface.go) |
 | The catalog HTTP call | `Handler` answers the five paths above. When an upstream reply is supplied it appends magpie's rows; otherwise it answers with those rows alone. | [`handler.go`](../../internal/cursoride/handler.go) |
@@ -41,15 +41,20 @@ administrator.
 
 Cursor paints `client_display_name` as the model's name and
 `model_picker_badges` as the blue capsule beside it. A capsule was where a
-provider host or a group label showed up. Rows from this package set:
+provider host or a group label showed up. An injected name is the catalog
+name plus ` · Magpie`, and the tagline under it is `Magpie`, so a row
+whose catalog name is Grok, Claude, or Composer is not the official row
+of that name. Rows from this package set:
 
 | Cursor field | Value |
 | --- | --- |
 | `name`, `server_model_name`, and each `model_names` entry | The catalog id. This is the id Cursor sends back and the gateway's `model`. |
-| `client_display_name`, `inputbox_short_model_name` | The model's name (`Entry.Name`, else the vendor model id). Not `Entry.Label`, which appends the provider. |
+| `client_display_name`, `inputbox_short_model_name`, variant display names | The model's name plus ` · Magpie` (`pickerDisplay`). A name that already ends with that suffix is not extended again. Not `Entry.Label`, which appends the provider. The same suffix is not written on `name`, `server_model_name`, `model_names`, the variant string, or the legacy slug. |
+| `tagline` | `Magpie`, on the row and on each variant. The tooltip's title is the suffixed display name, its secondary line is `Magpie`, and its markdown is that title, a break, then `Magpie`. |
+| `named_model_section_index` | `1` on every injected row, so Show all models keeps them in one section. The number is an index into Cursor's section table, not a title. The title the picker can read is the suffix, the tagline, and the vendor string. |
 | `model_picker_badges` | Absent. |
 | `visible_in_routed_model_view`, `default_on` | Both set on an injected row. Cursor's compact picker, including Use Multiple Models, lists a row only when both are set. A named-model section alone leaves the row under Show all models. Official rows on the IDE catalog keep the flag Cursor sent. On the Cloud Agents catalog request (`use_cloud_agent_effort_modes`), an official `default_on` row that is a named section, a cloud-effort row, a background-composer row, or a Cursor-vendor row gets `visible_in_routed_model_view` set when Cursor omitted it or sent it false. Auto, hidden, migrating, cmd-k-only, and disabled rows are not rewritten. |
-| `vendor` | `magpie`, for every row. A provider's own name is not copied: a provider added by its address is often named by that host. |
+| `vendor` | `Magpie`, for every row, with vendor id Cursor's slot. A provider's own name is not copied: a provider added by its address is often named by that host. |
 | credentials on a usable-model row | `cursor-magpie-local`, with no `base_url`. Not a provider key and not a gateway token (`magpie` / `magpie-<agent>`). The proxy routes by the model id. |
 
 A model that thinks offers its catalog levels as the `reasoning` parameter
