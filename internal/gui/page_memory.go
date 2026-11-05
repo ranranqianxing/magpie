@@ -4,20 +4,28 @@ import (
 	"runtime/debug"
 	"sync"
 	"time"
+
+	"github.com/yetone/magpie/internal/usage"
 )
 
 // A Sessions or Usage page's poll reads every session file's listing and
-// the request ledger again: ~330 MB allocated every 15 s to keep ~105 MB.
-// Go keeps the pages that freed, and its scavenger hands them back only
+// the request ledger again. That was ~330 MB allocated every 15 s to keep
+// ~105 MB; over 15k sessions and 400k calls (11-02) an unchanged poll is
+// ~12 MB of Sessions' and ~0.4 MB of Usage's, and one while a session
+// grows, which re-sums every session's stats, ~110 MB. Go keeps the pages
+// that freed, and its scavenger hands them back only
 // slowly, never while the next collection's goal covers them, so an open
 // window sat at ~340 MB in Activity Monitor between polls. The gateway
 // hands its requests' pages back once it rests (#3472), but the window's
 // reads aren't its requests. So once those reads have rested for
 // pageRest, what they left goes back at once, as the warm-up's does.
 
-// pageRest is how long the page reads rest before that: a poll's few
-// reads come within a second of one another.
-const pageRest = 3 * time.Second
+// pageRest is how long the page reads rest before that. It outlasts the
+// pages' polls (Usage every 10 s, Sessions every 15 s), so the pages go
+// back once a window stops polling, not between an open window's polls:
+// at 3 s every poll took back the pages the last one handed back, and
+// madvise and the collections it drove were ~40% of the CPU (#2278).
+const pageRest = 30 * time.Second
 
 var pageReads struct {
 	sync.Mutex
@@ -70,6 +78,8 @@ func releaseIfPagesRest() {
 	}
 	release := pageReads.release
 	pageReads.Unlock()
+	// what the request matching keeps for a poll's next read goes too
+	usage.ReleaseScratch()
 	if release != nil {
 		release()
 		return

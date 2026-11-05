@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/usage"
 )
 
 // A Kimi Code plan searches the web with its own key, as kimi-cli's
@@ -51,13 +53,13 @@ func canSearchFor(p provider.Provider) bool {
 
 // searchesOwn is whether p searches for its own models: by its Kimi Code
 // plan's or WorkBuddy plan's search service (#1798), or a Google sign-in's
-// own Gemini. Never with provider search Off in Settings (#1483), which
+// or an AI Studio key's own Gemini (geminiKeySearches). Never with provider search Off in Settings (#1483), which
 // leaves the search APIs alone, nor with plugins/search off.
 func searchesOwn(p provider.Provider) bool {
 	if !searchServed() || settings.Load().Searcher == "off" {
 		return false
 	}
-	return provider.KimiCodeSearch(p) != "" || wbSearches(p) || googleAccount(p) && searcherModel(p) != ""
+	return provider.KimiCodeSearch(p) != "" || wbSearches(p) || (googleAccount(p) || geminiKeySearches(p)) && searcherModel(p) != ""
 }
 
 // searchingOn is ctx for the searches made for a model of p.
@@ -78,10 +80,16 @@ func ownSearcher(ctx context.Context) (provider.Provider, bool) {
 // ownSearch searches with the conversation's own provider (ownSearcher).
 func (s *Server) ownSearch(ctx context.Context, p provider.Provider, query string) (string, []Hit, error) {
 	if provider.KimiCodeSearch(p) != "" {
-		return s.kimiSearch(ctx, p, query)
+		start := time.Now()
+		said, hits, err := s.kimiSearch(ctx, p, query)
+		logOwnSearch(ctx, p, provider.KimiCodeSearch(p), query, start, len(hits), err)
+		return said, hits, err
 	}
 	if wbSearches(p) {
-		return s.wbSearch(ctx, p, query)
+		start := time.Now()
+		said, hits, err := s.wbSearch(ctx, p, query)
+		logOwnSearch(ctx, p, p.Origin(ctx), query, start, len(hits), err)
+		return said, hits, err
 	}
 	ctx, cancel := context.WithTimeout(context.WithValue(ctx, searchingKey{}, true), searchTimeout)
 	defer cancel()
@@ -89,12 +97,23 @@ func (s *Server) ownSearch(ctx context.Context, p provider.Provider, query strin
 }
 
 // searchBy searches with one searcher: a Kimi Code plan by its search
-// service, any other by its model.
+// service, a ChatGPT account named with codexSearchModel by the backend's
+// search, any other by its model.
 func (s *Server) searchBy(ctx context.Context, p provider.Provider, model, query, effort string) (string, []Hit, error) {
 	if provider.KimiCodeSearch(p) != "" {
 		return s.kimiSearch(ctx, p, query)
 	}
+	if model == codexSearchModel && codexSearches(p) {
+		return s.codexSearchBy(ctx, p, query)
+	}
 	return s.searchWith(ctx, p, model, query, effort)
+}
+
+// logOwnSearch writes the request log's row of a search a plan's own
+// search service (Kimi Code's, WorkBuddy's) ran, at where (#3528): the
+// plan's provider by name, and how it ended.
+func logOwnSearch(ctx context.Context, p provider.Provider, where, query string, start time.Time, found int, err error) {
+	logSearch(ctx, usage.Record{Provider: p.ID, Requested: p.Name, Host: provider.HostOf(where)}, query, start, found, err)
 }
 
 // kimiSearch asks a Kimi Code plan's search service.

@@ -90,6 +90,7 @@ function maskPageOpen() {
 }
 function maskPageLoad(force) {
   maskDrawAll();
+  (prefs ? Promise.resolve() : loadSettings()).then(drawMaskAlert).catch(() => {});
   const sum = maskLoad(force)?.then(() => { drawMaskCard(); drawMaskList(); });
   const recs = maskL.read && force ? maskRefresh() : maskL.read ? null : maskFetch();
   return Promise.all([sum, recs]);
@@ -98,6 +99,15 @@ function maskDrawAll() {
   drawMaskCard();
   drawMaskList();
   if (maskO) drawMaskOne();
+}
+// the Masking alert (Must2333 on X): a notification when a value is
+// masked for the first time, off until turned on. Gateway mode leaves it
+// out, as it does the other alerts its desktop would show
+function drawMaskAlert() {
+  const s = prefs || {};
+  $("#maskPrefs").hidden = gatewayMode;
+  $("#maskAlertSegs").replaceChildren(segs([["off", t("Off")], ["on", t("On")]], s.maskAlert ? "on" : "off",
+    (v) => savePrefs({ ...prefsKeep(s), maskAlert: v === "on" }).then(drawMaskAlert)));
 }
 // while the page is on screen it keeps up with requests as they go
 setInterval(() => {
@@ -112,7 +122,7 @@ function drawMaskCard() {
   if (!box) return;
   // until the window's state is read, agents would show as their ids
   const on = maskOn(), sum = maskSumDays === maskDays && load.done ? maskSum : null;
-  const key = JSON.stringify([document.documentElement.lang, maskDays, on, sum, state?.agents?.length, (providers || maskProv)?.providers?.length]);
+  const key = JSON.stringify([document.documentElement.lang, maskDays, on, !!maskSettings().redactWords?.length, sum, state?.agents?.length, (providers || maskProv)?.providers?.length]);
   if (key === maskDrawn && box.firstChild) return;
   maskDrawn = key;
   // it moves when it first has numbers to say, and for other days: not
@@ -133,7 +143,7 @@ function drawMaskCard() {
     b.type = "button";
     b.onclick = maskTurnOn;
     head.append(b);
-  }
+  } else head.append(maskOffButton());
   if (sum?.requests || maskDays === 30) head.append(segs([["7", t("7 days")], ["30", t("30 days")]], String(maskDays), (v) => {
     maskDays = +v;
     try { localStorage.setItem("magpie.maskDays", v); } catch {}
@@ -201,11 +211,44 @@ function maskNone() {
   box.append(" ", link);
   return box;
 }
+// the way off, beside the way on (ZekeXiao on X: "脱敏好像只有一个打开
+// 开关，不能关？"). Both switches go off at once. Your own words mask with neither
+// on, and only Settings › Privacy can take them out, so with words the
+// button opens it there, and says so, rather than leave the page
+// saying off while words still mask
+function maskOffButton() {
+  const words = maskSettings().redactWords?.length;
+  const b = el("button", "text", t(words ? "Turn off in Settings" : "Turn off masking"));
+  b.type = "button";
+  if (words) {
+    b.title = t("Your own masked words still mask until you take them out, in Settings › Privacy");
+    b.onclick = (e) => openSettingsAt(e, "privacy");
+    return b;
+  }
+  b.onclick = () => {
+    b.disabled = true;
+    (prefs ? Promise.resolve() : loadSettings())
+      .then(() => {
+        // turned on again from this page, it comes back as it was
+        maskWasPersonal = !!prefs.redactPersonal;
+        return savePrefs({ ...prefsKeep(prefs), redact: false, redactPersonal: false });
+      })
+      .then(() => { maskDrawn = ""; drawMaskCard(); })
+      .finally(() => { b.disabled = false; });
+  };
+  return b;
+}
+let maskWasPersonal = false;
 function maskTurnOn(e) {
   const b = e.currentTarget;
   b.disabled = true;
   (prefs ? Promise.resolve() : loadSettings())
-    .then(() => savePrefs({ ...prefsKeep(prefs), redact: true }))
+    .then(() => {
+      const back = maskWasPersonal;
+      maskWasPersonal = false;
+      if (back) window.hideAccounts?.set(true, true);
+      return savePrefs({ ...prefsKeep(prefs), redact: true, ...(back ? { redactPersonal: true } : {}) });
+    })
     .then(() => { maskDrawn = ""; drawMaskCard(); })
     .finally(() => { b.disabled = false; });
 }
@@ -595,7 +638,7 @@ function maskOneOpen(key, r) {
   if (!key) return;
   maskTipOff();
   const o = maskO = { key, r: r || maskL.records.find((x) => x.key === key) || null, sent: undefined, leaves: null, vals: new Map(), view: "both", pick: "", open: new Set(), whole: new Set() };
-  $("#maskCard").hidden = $("#maskList").hidden = $("#maskDemo").hidden = true;
+  $("#maskCard").hidden = $("#maskList").hidden = $("#maskDemo").hidden = $("#maskPrefs").hidden = true;
   xqd?.wake();
   $("#maskOne").hidden = false;
   drawMaskOne();
@@ -625,6 +668,7 @@ function maskOneClose() {
   $("#maskOne").hidden = true;
   $("#maskOne").replaceChildren();
   $("#maskCard").hidden = $("#maskList").hidden = $("#maskDemo").hidden = false;
+  $("#maskPrefs").hidden = gatewayMode;
   xqd?.wake();
   drawMaskList();
 }
@@ -818,13 +862,17 @@ function maskContent(r, o, info) {
       fold.fold.push(l);
     }
   } else {
-    // only the lines around each value are left: the request's whole text
-    // was in memory, and is no longer
-    if (!r.blocked) sec.append(el("p", "msk-gone", o.vals.size
+    // only the lines around each value are left, while memory has the
+    // record: the request's whole text was in memory, and is no longer
+    items = maskSnipTexts(r).map((text) => ({ leaf: { path: "", role: "", text } }));
+    if (items.length && !r.blocked) sec.append(el("p", "msk-gone", o.vals.size
       ? t("This request's whole text is no longer in memory: magpie keeps it for the newest requests only. The lines around each value are still here.")
       : t("What was written is kept in memory only, and magpie has restarted since. Still here: each value's kind, length and first characters, and the line around each placeholder as the vendor got it.")));
-    items = maskSnipTexts(r).map((text) => ({ leaf: { path: "", role: "", text } }));
-    if (!items.length) sec.append(el("div", "msk-none", t("The text around them was kept in memory only, and magpie has restarted since")));
+    // after a restart nothing of the text is left, by design: the record on
+    // disk never holds it (maskrec), so no folder or volume brings it back
+    // (brianeee2 on X, in Docker). A request held back sent nothing, and
+    // its card says so.
+    else if (!items.length && !r.blocked) sec.append(el("p", "msk-gone", t("This request's text and the values masked in it were kept in memory only, never on disk, and magpie has restarted since. The record keeps each value's kind, length and first characters.")));
   }
   const list = el("div", "msk-msgs" + (view === "both" ? " both" : ""));
   if (view === "both") {

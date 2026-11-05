@@ -16,6 +16,7 @@ These pages describe current responsibilities, runtime paths, state, and contrac
 | Ordinary Cursor's Agents-page connection, model list and inference proxy | [Cursor IDE model injection](cursor-ide.md) |
 | Providers, keys, subscription accounts, refresh and allowance | [Providers and accounts](providers-accounts.md) |
 | Instructions, MCP servers, skills and RTK written into agents | [Library](library.md) |
+| One MCP server, magpie, given to every agent in place of the Library's servers | [MCP router](mcp-router.md) |
 | Tray, panel, window, `magpie web` and the page's JSON API | [GUI app shell](gui-shell.md) |
 | Encrypted backups and setup synchronization over WebDAV, S3 or GitHub | [Sync and backup](sync-backup.md) |
 

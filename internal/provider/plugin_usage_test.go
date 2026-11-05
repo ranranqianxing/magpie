@@ -376,7 +376,7 @@ func TestPluginAccountModels(t *testing.T) {
 // provider had, whatever the plugin calls itself.
 func TestMovedProviderName(t *testing.T) {
 	claudeHome(t)
-	for id, want := range map[string]string{CommandCodePlanID: "Command Code Plan", "grok": "Grok (SuperGrok)", "kiro": "Kiro"} {
+	for id, want := range map[string]string{CommandCodePlanID: "Command Code Plan", "grok": "Grok", "kiro": "Kiro"} {
 		if err := setMigration(id, func(m *Migration) { m.State = MovePlugin }); err != nil {
 			t.Fatal(err)
 		}
