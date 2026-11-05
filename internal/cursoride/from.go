@@ -19,10 +19,12 @@ func ForAgent(id string) []Model {
 
 // FromEntries copies catalog entries into Cursor rows.
 //
-// The display name is the model's own name (the user's rename when they
-// gave one). It is not Entry.Label, which appends the provider, and a
-// provider the user added by its address is often named by that host.
-// The provider's key and base URL are not read.
+// The catalog name is the model's own name (the user's rename when they
+// gave one). The Magpie picker suffix is added when the row is encoded,
+// not here, and it is not written on the route id. It is not Entry.Label,
+// which appends the provider, and a provider the user added by its
+// address is often named by that host. The provider's key and base URL
+// are not read.
 func FromEntries(es []provider.Entry) []Model {
 	out := make([]Model, 0, len(es))
 	for _, e := range es {

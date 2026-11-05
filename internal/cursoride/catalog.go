@@ -15,9 +15,10 @@ const LocalCredential = "cursor-magpie-local"
 //
 // ID is the gateway model id, "provider/model" or a routing group's id.
 // Cursor gets it as AvailableModel.name and server_model_name, and sends
-// that same id back on the inference request. Name is the black picker
-// text (client_display_name). It is the model's name, never a provider
-// host and never a routing-group label stuffed into a badge.
+// that same id back on the inference request. Name is the catalog name.
+// The picker shows it with a Magpie suffix (pickerDisplay). The suffix is
+// not written on the route id. Name is never a provider host and never a
+// routing-group label stuffed into a badge.
 type Model struct {
 	ID   string
 	Name string
@@ -68,8 +69,10 @@ func AvailableModels(models []Model) []byte {
 }
 
 // UsableModels is the protobuf appended to GetUsableModels. Each row is
-// agent.v1.ModelDetails: the route id, the display name, and the local
-// credential marker. Both of Cursor's usable-model paths take this shape.
+// agent.v1.ModelDetails: the route id, the picker display name, and the
+// local credential marker. Both of Cursor's usable-model paths take this
+// shape. The display name is the catalog name plus the Magpie suffix.
+// The route id is not.
 func UsableModels(models []Model) []byte {
 	var b wbuf
 	for _, m := range publishable(models) {
@@ -137,7 +140,7 @@ func publishable(models []Model) []Model {
 }
 
 func encodeModel(m Model) []byte {
-	disp := m.Name
+	disp := pickerDisplay(m.Name)
 	tip := encodeTooltip(disp)
 	contexts := contextChoices(m.Context)
 	efforts := effortChoices(m)
@@ -168,32 +171,63 @@ func encodeModel(m Model) []byte {
 		b.msg(30, v.body)
 		b.str(36, v.slug)
 	}
+	// named_model_section_index. Every injected row shares this index, so
+	// Show all models keeps them in one section. The number is an index
+	// into Cursor's own section table, not a title this package can set.
+	// A different index would point at a missing heading. The title the
+	// picker can read is the display-name suffix, the tagline, and the
+	// vendor string.
 	b.u32(38, 1)
+	// tagline, the gray line under the name. Official rows carry their
+	// own sentence. Injected rows all say Magpie.
+	b.str(39, pickerSubtitle)
 	// visible_in_routed_model_view. Cursor's compact picker, including
 	// Use Multiple Models, lists a row only when this is set and
 	// default_on is set. A named-model section alone leaves the row in
 	// Show all models. Official rows keep the flag Cursor sent.
 	b.bool(40, true)
-	b.str(41, vendorLabel)
+	b.str(41, pickerSubtitle)
 	b.msg(42, encodeVendor())
 	return []byte(b)
 }
 
-// vendorLabel is the vendor line on every injected row. One word, not
+// pickerSubtitle is the word every injected row shows as its vendor
+// line, its tagline, and the end of its display name. One word, not
 // each provider's name: a custom provider is often named by its host,
 // and that host is what Cursor's badges were painting in blue.
-const vendorLabel = "magpie"
+const pickerSubtitle = "Magpie"
+
+// pickerMark is appended to client_display_name, the input-box name,
+// and variant display names. Official rows are "Grok 4.7", "Claude …",
+// and "Composer …". The compact list shows those beside injected rows
+// and does not show the route id. The mark is not written on name or
+// server_model_name, which Cursor sends back as the route id.
+const pickerMark = " · " + pickerSubtitle
+
+func pickerDisplay(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return pickerSubtitle
+	}
+	if strings.HasSuffix(name, pickerMark) {
+		return name
+	}
+	return name + pickerMark
+}
 
 func encodeVendor() []byte {
 	var b wbuf
 	b.u32(1, 6) // Cursor's MODEL_VENDOR_ID_CURSOR, the slot these rows use
-	b.str(2, vendorLabel)
+	b.str(2, pickerSubtitle)
 	return []byte(b)
 }
 
-func encodeTooltip(markdown string) []byte {
+func encodeTooltip(display string) []byte {
 	var b wbuf
-	b.str(7, markdown)
+	b.str(1, display)
+	b.str(2, pickerSubtitle)
+	// Cursor's tooltip markdown is a title, then the one-line blurb.
+	b.str(7, display+"<br>"+pickerSubtitle)
 	return []byte(b)
 }
 
@@ -201,11 +235,12 @@ func encodeUsable(m Model) []byte {
 	var cred wbuf
 	cred.str(1, LocalCredential)
 	var b wbuf
+	shown := pickerDisplay(m.Name)
 	b.str(1, m.ID)
 	b.msg(2, nil) // thinking_details present, with nothing else in it
 	b.str(3, m.ID)
-	b.str(4, m.Name)
-	b.str(5, m.Name)
+	b.str(4, shown)
+	b.str(5, shown)
 	b.msg(8, cred)
 	return []byte(b)
 }
@@ -396,6 +431,7 @@ func encodeVariant(id, disp string, tip []byte, ctx contextChoice, effort effort
 		b.bool(5, true)
 	}
 	b.msg(6, tip)
+	b.str(7, pickerSubtitle)
 	b.str(8, shown)
 	b.str(9, repr)
 	b.str(11, slug)
