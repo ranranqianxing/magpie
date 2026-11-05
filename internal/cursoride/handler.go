@@ -147,6 +147,15 @@ func (h *Handler) merge(w http.ResponseWriter, r *http.Request, body, extra []by
 		writeProto(w, extra, "application/proto")
 		return
 	}
+	// The Cloud Agents window sets use_cloud_agent_effort_modes on this
+	// call. Its compact list then keeps a row only when
+	// visible_in_routed_model_view is set. Official rows on that reply
+	// often omit it, so they drop once injected rows set it. The IDE
+	// picker does not send use_cloud_agent_effort_modes, and that reply
+	// is left as Cursor wrote it.
+	if r.URL.Path == PathAvailableModels && cloudCatalogRequest(catalogRequestPlain(r, body)) {
+		up = promoteCloudCompact(up)
+	}
 	merged, err := MergeUnary(up, extra)
 	if err != nil {
 		note("merge-fail")
@@ -158,6 +167,14 @@ func (h *Handler) merge(w http.ResponseWriter, r *http.Request, body, extra []by
 		ctype = "application/proto"
 	}
 	writeProto(w, merged, ctype)
+}
+
+// catalogRequestPlain is the catalog request body with an HTTP gzip
+// layer removed, so the effort-mode flag can be read. The bytes sent
+// upstream stay the body the client sent.
+func catalogRequestPlain(r *http.Request, body []byte) []byte {
+	plain, _ := gunzipRequest(body, r.Header.Get("Content-Encoding"))
+	return plain
 }
 
 func writeProto(w http.ResponseWriter, body []byte, contentType string) {
