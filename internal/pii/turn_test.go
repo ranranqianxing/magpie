@@ -27,6 +27,15 @@ func waitFor(t *testing.T, what string, ok func() bool) {
 	}
 }
 
+// waitForStart waits for the stand-in to be up. A wait on a first request
+// spends its bar on the stand-in's start too, and on a loaded machine the
+// start alone ate the whole of it (#3860): the waits that time a request
+// wait for the start line first, so their bar times only the request.
+func waitForStart(t *testing.T, log string) {
+	t.Helper()
+	waitFor(t, "the fake pf-serve starting", func() bool { return len(fakeLines(t, log, "start")) >= 1 })
+}
+
 // within10s runs f, and fails the test when it hasn't returned in 10s: what
 // it waits on is a request stuck for an hour.
 func within10s[T any](t *testing.T, what string, f func() T) T {
@@ -66,6 +75,7 @@ func TestStatusAndStopDontWaitForARequest(t *testing.T) {
 	classifyTimeout = func(int) time.Duration { return time.Hour }
 	t.Cleanup(func() { classifyTimeout = was })
 	stuck := findAsync(context.Background(), "hi Alice")
+	waitForStart(t, log)
 	waitFor(t, "the request reaching pf-serve", func() bool { return len(fakeLines(t, log, "request")) == 1 })
 	if st := within10s(t, "Now", Now); !st.Running || st.Loading {
 		t.Fatalf("Now = %+v, want running", st)
@@ -106,6 +116,7 @@ func TestWaiterLeavesWhenItsContextEnds(t *testing.T) {
 	t.Cleanup(func() { classifyTimeout = was })
 	ahead, cancelAhead := context.WithCancel(context.Background())
 	first := findAsync(ahead, "hi Alice")
+	waitForStart(t, log)
 	waitFor(t, "the first request reaching pf-serve", func() bool { return len(fakeLines(t, log, "request")) == 1 })
 
 	ctx, cancel := context.WithCancelCause(context.Background())
@@ -136,6 +147,7 @@ func TestQueuedRequestReadsWhatTheOneAheadLearned(t *testing.T) {
 	log := fakeInstall(t, "slow", false)
 	history := []string{"hi Alice", "nothing here", "Bob and Alice"}
 	first := findAsync(context.Background(), history...)
+	waitForStart(t, log)
 	waitFor(t, "the first request reaching pf-serve", func() bool { return len(fakeLines(t, log, "request")) == 1 })
 	second := findAsync(context.Background(), history...)
 	a, b := <-first, <-second
@@ -376,5 +388,56 @@ func TestStoppedRequestKeepsWhatWasRead(t *testing.T) {
 	}
 	if len(got) != 2 || !reflect.DeepEqual(got[0], []redact.Found{{Start: 10, End: 15, Label: "private_person", Score: 0.9}}) || len(got[1]) != 0 {
 		t.Fatalf("got %v, want the history's Alice and nothing for the unread text", got)
+	}
+}
+
+// wangwu25685333 on X (10-29): requests of a few lines waited 8.5s for
+// the model behind a fresh session's long system prompt, one chunk of
+// each long request ahead of them. Now the one with the least left to
+// read goes next: a short request that comes while one long request is
+// on the model and another waits goes before either's next chunk.
+func TestShortRequestGoesBeforeLongOnes(t *testing.T) {
+	r := newReader(t, guardChunk)
+	gate := make(chan struct{})
+	r.during = func(n int) { <-gate }
+	// four texts of a chunk each
+	long := func(cs string) []string {
+		var out []string
+		for _, c := range cs {
+			out = append(out, strings.Repeat(string(c)+" ", guardChunk/2-8))
+		}
+		return out
+	}
+	first, second, short := long("abcd"), long("efgh"), "hi Alice, the build is green"
+	done := make(chan string, 3)
+	run := func(name string, texts []string) {
+		go func() {
+			if _, err := r.find(context.Background(), texts); err != nil {
+				t.Error(name, err)
+			}
+			done <- name
+		}()
+	}
+	asked := func() int { r.mu.Lock(); defer r.mu.Unlock(); return len(r.asked) }
+	run("first", first)
+	waitFor(t, "the first long request on the model", func() bool { return asked() == 1 })
+	run("second", second)
+	waitFor(t, "the second long request waiting", func() bool { return r.waiting.Load() == 1 })
+	run("short", []string{short})
+	waitFor(t, "the short request waiting", func() bool { return r.waiting.Load() == 2 })
+	for range 9 {
+		gate <- struct{}{}
+	}
+	for range 3 {
+		<-done
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.asked) != 9 || r.asked[1] != short {
+		var order []string
+		for _, s := range r.asked {
+			order = append(order, s[:min(8, len(s))])
+		}
+		t.Fatalf("read in the order %q: want the short request second", order)
 	}
 }

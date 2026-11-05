@@ -15,13 +15,19 @@ import (
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/backup"
+	"github.com/yetone/magpie/internal/browsermcp"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/claudebridge"
+	"github.com/yetone/magpie/internal/claudecode"
+	"github.com/yetone/magpie/internal/claudetui"
+	"github.com/yetone/magpie/internal/codexrelay"
 	"github.com/yetone/magpie/internal/davsync"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/imagemcp"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/notices"
+	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/profile"
@@ -61,10 +67,13 @@ const usage = `magpie — one place to pick every agent's model
   magpie save <name>              snapshot every agent's settings as a profile
   magpie use <name>               apply a profile
   magpie profiles                 list profiles
+  magpie rename <old> <new>       rename a profile
   magpie rm <name>                delete a profile
 
   magpie backup [--no-keys] [--no-library] [file]    providers, keys, settings, profiles, agent models and the library in one file, sealed with a passphrase
   magpie restore [--no-agents] [--no-library] <file> put a backup in on this machine
+                                                     --sign-ins on backup: the subscriptions' and plugins' sign-ins too, sealed (off unless given); --no-sign-ins on restore leaves them out
+  magpie uninstall [--yes]                           disconnect every agent, putting back what each had, then remove magpie's service and files
   magpie webdav [on <address>|set k=v…|now|off]      the same, kept the same on every computer through a WebDAV folder (magpie webdav help)
   magpie s3 [on s3://<bucket>[/<prefix>]|set k=v…|now|off]   the same through an S3-compatible bucket: AWS, R2, B2, MinIO… (magpie s3 help)
   magpie github [on github://<owner>/<repo>[/<folder>]|set k=v…|now|off]   the same in an encrypted GitHub repository (magpie github help)
@@ -84,21 +93,23 @@ const usage = `magpie — one place to pick every agent's model
   magpie visible [<agent> <family|provider|group>,… | all | --only-picked | --show-new]
                                   which models an agent is shown: families (magpie provider/group set <id> family=…),
                                   or only the models ticked for it, a new one off until it is ticked
-  magpie search [add <api> <key>|rm <api>]   Tavily, Brave, Exa, Firecrawl, You.com, DeepSeek or SearXNG for web search when no provider can search
+  magpie search [add <api> <key>|rm <api>]   Tavily, Brave, Exa, Firecrawl, You.com, DeepSeek, Doubao Search (Volcengine), Yuanbao Search (Tencent Cloud) or SearXNG for web search when no provider can search
   magpie groups                   routing groups: several models agents pick as one, group/<id>
-  magpie group add <name> models=<m1>,<m2> [routing=smart|order|rotate|usage|pace|weight|free|fast] [stays=auto|session|turn|off]
+  magpie group add <name> models=<m1>,<m2> [routing=smart|order|rotate|usage|pace|weight|free|fast|cheap|drain|expiring] [stays=auto|session|turn|off]
   magpie group <id> | set <id> k=v… | rm <id>   show, change or remove one (magpie group help for more)
   magpie accounts [agent] [--json]  every subscription magpie knows, with each one's allowance used and when it resets
   magpie accounts add <agent>     sign in to one more Claude, ChatGPT or Google (Gemini CLI, Antigravity) subscription
   magpie accounts add copilot [--host <name>.ghe.com]   one more Copilot account, on github.com or an enterprise's GHE.com
   magpie accounts discovery [on|off]   read agents' sign-ins (default on; MAGPIE_NO_ACCOUNTS=1 disables too)
-  magpie accounts import <codex|claude|antigravity|factory> <file>... [--yes]   bring in accounts from other tools' files (Codex's auth.json, Cockpit Tools, CLIProxyAPI, Sub2API); the tool a ChatGPT or Claude file came from is signed out of it
-  magpie accounts switch <agent> <email>   sign the agent in to another of them
-  magpie accounts refresh         renew the saved ChatGPT sign-ins now (the gateway does it daily)
+  magpie accounts import <codex|claude|antigravity|factory> <file>... [--yes]   bring in accounts from other tools' files (Codex's auth.json, Cockpit Tools, CLIProxyAPI, Sub2API, claude-swap); the tool a ChatGPT or Claude file came from is signed out of it
+  magpie accounts switch <agent> <email|name>   sign the agent in to another of them, by its email or the name you gave it
+  magpie accounts switch <claude|codex> next   to the next account in order with room, or the one with the most left
+  magpie accounts refresh         renew the saved ChatGPT and Claude sign-ins now (the gateway does it every 8 days)
   magpie accounts checkin         WorkBuddy's daily check-in (签到) for each WorkBuddy account, now (Settings can do it daily)
   magpie accounts project <gemini|antigravity> <email> <project>   the Google Cloud project a Google account's requests go to
   magpie accounts alias <agent> <email> [<name>|--clear]   a name of your own for an account, shown on its card, in the menu bar and in magpie quota
   magpie accounts switch-only codex [on|off]   only switch Codex's own sign-in to an account with room; its requests go straight to OpenAI, never through magpie
+  magpie accounts switch-only claude [on|off]  only switch Claude Code's own sign-in to an account with room; magpie serves no requests on the Claude accounts
   magpie claude-code [install [--yes]|remove]   the Claude Code a Claude subscription runs; install downloads Anthropic's own build, checked against its manifest, for a server or container without one
   magpie plugin [add <package>|rm|update|on|off|login <provider>|logout <provider>]
                                   OpenCode provider plugins and pi packages: subscriptions signed in to, and served, through a plugin
@@ -117,10 +128,18 @@ const usage = `magpie — one place to pick every agent's model
   magpie heap [<file>]            a Go heap profile of the running magpie, with its memory numbers, for a report of it using too much memory
   magpie cpu [<file>] [--seconds N]   a Go CPU profile of the running magpie over 30s (5..120) while you use it, for a report of it using too much CPU
   magpie goroutines [<file>]      every goroutine of the running magpie, its stack and how long it waited, for a report of it stuck at something
-  magpie gateway-key list|add <name>|rotate <id>|remove <id>   manage the keys clients use to call a shared gateway
+  magpie log [--path] [-n N] [-f]  where magpie's logs are, to send with a report: the app's (app.log), the service's; -n prints the app log's last N lines, -f follows it
+  magpie gateway-key list|add <name> [--read-only]|rotate <id> [--key -]|remove <id>   manage the keys clients use to call a shared gateway
   magpie gateway-key limit <id> [list|off|reset [n]|remove <n>|[add] day|week|month|<N>d|<N>h --tokens N --cost USD --cache-reads]   a key's own limits, and what it used
   magpie gateway-key models <id> [all|<provider>/<model>|<provider>/* ...]   the models a key may use, every one unless it names some
   magpie gateway-key quotas <id> [on|off]   whether a key held to a budget, models or accounts is told the quotas of what it may use
+  magpie gateway-key access <id> [read-only|full]   read-only: the key reads quotas and usage (GET /, /v1/magpie/quotas, /v1/magpie/usage) and uses no model, MCP server or write
+  magpie gateway-key move <id> <place>   put a key at a place in the list (from 1), the order list and the app show them in
+  magpie gateway-key issue --ttl 1h [--name n] [--models a,b] [--accounts a,b] [--tokens N] [--cost USD] [--read-only] [--from <id>] [--json]
+                                         a short-lived key (1m to 30 days) that stops working by itself; --from holds it to a key that issues keys; prints the key
+  magpie gateway-key issuer <id> [on|off]   let a key issue short-lived keys under itself (POST /v1/magpie/keys with it), each held to its models, accounts, limits and life
+  magpie gateway-key oidc add --key <id> --repo owner/name [--ref refs/heads/main] [--environment name] [--claim name=value]… [--ttl 1h] [--issuer URL] [--audience aud]
+                                         let a CI job's OIDC token (GitHub Actions by default) be traded for a key issued under <id> (POST /v1/magpie/keys/oidc); oidc list | remove <rule id>
   magpie mcp image                the image and video generation MCP server an agent is given from the library (stdio)
   magpie tools [<name>]           the tools magpie's MCP servers give agents (images, vision, web search, plugins'), with their parameters
   magpie tool <name> [--<param> <value>…] [<words>] [-o <file|folder>] [--json]   call one through the running magpie; an image or video it makes is saved
@@ -130,6 +149,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie sessions [--model <m>] [--folder <f>] [--json]   the latest Claude Code, Codex, OpenCode and Pi sessions, with what each cost
   magpie sessions --days N|today|all [--model <m>] [--folder <f>] [--json]
                                   what every session spent, day by day, with the top models and folders (7 days)
+  magpie sessions read [on|off all|<agent>…]   which agents' session history magpie may read (none until allowed)
   magpie quota [<provider>] [--json]  what is left of every subscription, plan and key balance
   magpie quota wait <provider|account> [--timeout <d>] [--quiet]
                                   block until that subscription (any of its accounts) or account has allowance again
@@ -138,6 +158,8 @@ const usage = `magpie — one place to pick every agent's model
   magpie statusline [<provider|account>]   one line for Claude Code's status line: the session's model and each account's windows
   magpie sync                     refresh the model catalog and vendor model lists
   magpie agents                   list every supported agent
+  magpie settings [list|get <key>|set <key> <value>|reset <key>] [--json]
+                                  every setting the window's Settings page saves, read and set as it saves them (magpie settings help)
   magpie update [check] [--proxy <url>] [--mirror <prefix>]
                                   install the newest release (check: only say if there is one); --proxy: an
                                   http(s):// or socks5:// proxy for it; --mirror: a GitHub download mirror put
@@ -261,6 +283,24 @@ var startUp = func() {
 	release()
 }
 
+// servesPages is whether magpie run with args serves plugins' pages,
+// and so runs the services they talk to (plugin.ServePages): the app,
+// tray, web, serve and the TUI do; a command that does its work and
+// ends doesn't.
+func servesPages(args []string) bool {
+	if len(args) == 0 {
+		return true
+	}
+	if strings.HasPrefix(strings.ToLower(args[0]), "magpie:") {
+		return hasGUI
+	}
+	switch args[0] {
+	case "tui", "web", "serve", "tray", "app", "gui", "panel", "-Embedding":
+		return true
+	}
+	return false
+}
+
 func run(args []string) error {
 	// a command that saved a provider or a group ends with the agents'
 	// files written, which its save no longer waits for; and a test's run
@@ -296,6 +336,11 @@ func run(args []string) error {
 		// the running magpie's goroutines: asks it, and moves nothing here
 		return goroutinesCmd(args[1:])
 	}
+	if len(args) > 0 && (args[0] == "log" || args[0] == "logs") {
+		// where magpie's logs are, and the app log's last lines: reads
+		// files, and moves nothing
+		return logCmd(args[1:])
+	}
 	if len(args) == 2 && args[0] == agent.DryRunArg {
 		// an agent disconnected on a copy of its files under a temporary
 		// home, for the Agents page to show what disconnecting changes
@@ -313,17 +358,49 @@ func run(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
 		case "mcp":
+			if len(args) > 1 && args[1] == "browser" {
+				return browsermcp.Run(args[2:])
+			}
+			if len(args) > 1 && args[1] == "search" {
+				return browsermcp.RunSearch(args[2:])
+			}
+			if len(args) > 1 && args[1] == "vision" {
+				return browsermcp.RunVision(args[2:])
+			}
 			return imagemcp.Run(args[1:])
 		case "claude-mcp-helper": // internal: stdio MCP subprocess spawned by Claude Code
 			return claudebridge.RunMCP(args[1:])
+		case claudetui.Command: // internal: Claude Code's interactive mode for the bridge
+			// it ends its Claude Code and removes its files on SIGINT,
+			// SIGTERM and SIGHUP itself: magpie dying of the signal first
+			// left them behind
+			leaveSignals()
+			return claudetui.Run(args[1:])
 		case "statusline":
 			return statuslineCmd(args)
 		case "tools":
 			return toolsCmd(args[1:])
 		case "tool":
 			return toolCmd(args[1:])
+		case codexrelay.Command: // internal: what a quitting magpie leaves for Codex's open threads
+			return codexrelay.Main(args[1:], gateway.CodexRelay())
+		case "uninstall":
+			// what the app starts as it quits from Settings › Uninstall
+			// magpie: nothing is made again before its folders go
+			if len(args) > 1 && args[1] == "--data-after" {
+				return uninstallData(args[2:])
+			}
 		}
 	}
+	// magpie serve beside another magpie serving the gateway (the app, a
+	// service, the copy an update left) waits for the port before it moves
+	// or starts anything, rather than doing it all to fail to bind (#4938)
+	if len(args) > 0 && args[0] == "serve" && plainServe(args[1:]) {
+		awaitGatewayFree(gatewayFreeEvery)
+	}
+	// a command that serves no pages starts a plugin host beside the
+	// app's, whose page services it leaves to the app (#5187)
+	plugin.ServePages(servesPages(args))
 	startUp()
 	// a provider added, edited or removed, or a list fetched anew, reaches
 	// the model lists agents keep in files of their own, behind the save
@@ -338,6 +415,9 @@ func run(args []string) error {
 	// a Codex that reaches magpie for account failover alone is handed
 	// only its own models (#1385)
 	gateway.CodexOwnOnly = agent.CodexOwnOnly
+	// what magpie writes into an agent's TOML, YAML or dotenv config says
+	// so in a comment, for whoever reads it once magpie is gone
+	agent.MarkWritten()
 	// the Codex app's titles, descriptions and summaries, which it asks
 	// for on a model of its own, on the model of magpie's picked beside
 	// its ChatGPT sign-in rather than on that account (atom_Ray on X)
@@ -350,6 +430,8 @@ func run(args []string) error {
 	gateway.CodexDesktopChanged = agent.SyncCatalogSoon
 	// the setup kept the same on every computer, by whichever serves
 	gateway.WhileServing = append(gateway.WhileServing, davsync.Run)
+	// and the setup backed up into a folder here by itself (jwaitq)
+	gateway.WhileServing = append(gateway.WhileServing, backup.RunAuto)
 	// and dsh's patch lists, which dsh reads live: a route left behind by
 	// something else writing the file fails every session there until
 	// magpie writes its own list again
@@ -363,6 +445,10 @@ func run(args []string) error {
 	// and Claude Science's daemon, which a restart of the computer ends,
 	// started on the gateway again while it is connected
 	gateway.WhileServing = append(gateway.WhileServing, agent.KeepClaudeScience)
+	// and the Claude Code magpie downloaded for a machine with none (a
+	// server's, a container's), at Claude Code's newest release: its runs
+	// turn its own updater off
+	gateway.WhileServing = append(gateway.WhileServing, claudecode.KeepCurrent)
 	// and the request archive, when it is on, goes to the bucket sync is to
 	gateway.ArchiveBucket = func() (gateway.Putter, bool) {
 		if b, ok := davsync.S3Bucket(); ok {
@@ -442,7 +528,7 @@ func run(args []string) error {
 		fmt.Println(green.Render("✓"), "catalog saved to", catalog.CachePath())
 		refreshLive(ctx)
 		return nil
-	case "save", "use", "rm", "profiles":
+	case "save", "use", "rm", "rename", "profiles":
 		return profiles(args)
 	case "import":
 		return importCmd(args[1:])
@@ -484,6 +570,8 @@ func run(args []string) error {
 		return backupCmd(args[1:])
 	case "restore":
 		return restoreCmd(args[1:])
+	case "uninstall":
+		return uninstallCmd(args[1:])
 	case "webdav", "dav":
 		return webdavCmd(args[1:])
 	case "plugin", "plugins":
@@ -494,6 +582,8 @@ func run(args []string) error {
 		return githubCmd(args[1:])
 	case "claude-code":
 		return claudeCodeCmd(args[1:])
+	case "settings":
+		return settingsCmd(args[1:])
 	}
 
 	// the agent of a plugin that is gone (deleted on disk) is no agent
@@ -520,11 +610,16 @@ func run(args []string) error {
 				// Lody takes only a gateway on this computer's loopback
 				return fmt.Errorf("%s takes magpie only at a loopback address, and the gateway is at %s: nothing was opened", a.Name, gateway.URL())
 			}
+			// handed over only when something here opens it, or nothing
+			// opens and nothing says so (sungt, 10-29)
+			openApp := func(u string) error { return appLink(u, func(u string) error { openInBrowser(u); return nil }) }
+			handOver := openApp
 			if a.ID == "lody" {
 				// Lody on Linux is run with the link (agent.OpenLody)
-				_ = agent.OpenLody(link, func(u string) error { openInBrowser(u); return nil })
-			} else {
-				openInBrowser(link)
+				handOver = func(u string) error { return agent.OpenLody(u, openApp) }
+			}
+			if err := handOver(link); err != nil {
+				return fmt.Errorf("%w. Open %s once or install it again, then run this again", err, a.Name)
 			}
 			fmt.Println(green.Render("✓"), bold.Render(a.Name), muted.Render("opened to add magpie — confirm it there"))
 			fmt.Println(muted.Render("  " + link))
@@ -884,6 +979,17 @@ func profiles(args []string) error {
 			return err
 		}
 		fmt.Println(green.Render("✓"), "deleted profile", bold.Render(args[1]))
+		return nil
+	case "rename":
+		// a flag is never taken for a name to write (magpie snow --help
+		// wrote "--help" into a profile)
+		if len(args) != 3 || strings.HasPrefix(args[2], "-") {
+			return fmt.Errorf("usage: magpie rename <old> <new>")
+		}
+		if err := profile.Rename(args[1], args[2]); err != nil {
+			return err
+		}
+		fmt.Println(green.Render("✓"), "renamed profile", bold.Render(args[1]), "to", bold.Render(args[2]))
 		return nil
 	}
 	return nil

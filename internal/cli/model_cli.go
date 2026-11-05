@@ -59,6 +59,17 @@ const modelUsage = `usage:
                                                  id of its own for a provider that has since been deleted,
                                                  and says when there was no name of its own to take away
   magpie model wires                             the names your vendors are asked for models by
+  magpie model id <provider/model>               the id magpie lists the model by, and the provider's own
+  magpie model id <provider/model> <id>          list the model by this id at that provider, e.g.
+                                                 relay-a/deepseek-v4.1-flash-1017 deepseek-v4.1-flash: agents,
+                                                 /v1/models, routing groups, the groups magpie finds, gateway keys
+                                                 and Usage all use it, and relay-a is still asked for
+                                                 deepseek-v4.1-flash-1017. One id is one model of a provider: the
+                                                 latest model given an id has it, and a model of the provider's
+                                                 own with that id is not listed while another is. A provider of
+                                                 your own (a key) only
+  magpie model id <provider/model> --reset       list it by the provider's own id again
+  magpie model ids                               the models you list by an id of your own
   magpie model names                             the models you named or narrowed
   magpie model alias <model> <name>              count the model's usage under another model id in Usage,
                                                  Sessions and the usage summaries, e.g. deepseek-v4.1-flash
@@ -82,14 +93,18 @@ const modelUsage = `usage:
                                                  own, a name you gave a model just as you wrote it, "Opus 5.5",
                                                  the others as on; off, "Sol" alone — but two a list would name
                                                  the same keep it
-  magpie model compact [on|off|<size>]           whether Codex and Claude Code compact a long conversation at
-                                                 272K: on, as by default, for a model of a longer window (in
-                                                 Claude Code, a Claude model runs to its own); off, at the
-                                                 model's whole window, 1M for a [1m] one; a size such as 500k
-                                                 compacts there instead. The app's Long conversations,
-                                                 in Codex's and Claude Code's settings on the Agents page,
+  magpie model compact [on|off|<size>]           whether Codex, Claude Code and Grok Build compact a long
+                                                 conversation at 272K: on, as by default, for a model of a
+                                                 longer window (in Claude Code, a Claude model runs to its
+                                                 own); off, at the model's whole window, 1M for a [1m] one; a
+                                                 size such as 500k compacts there instead. The app's Long
+                                                 conversations, in Codex's, Claude Code's and Grok Build's
+                                                 settings on the Agents page,
                                                  is the same switch; a provider's own Compact at (its
                                                  editor) comes before it
+  magpie model compact <agent> [every|off|<size>] codex, claude or grok's own Long conversations: every
+                                                 follows the one above; off runs to the whole window; a
+                                                 size compacts there
 
   Each is looked for in this order: this model, then <provider id>/*, then the provider's own
   list, then models.dev. --reset removes only the first, and says so when a <provider id>/* value
@@ -138,6 +153,10 @@ func modelCmd(args []string) error {
 		return modelSpec(args[1:])
 	case "specs":
 		return modelSpecs()
+	case "id":
+		return modelID(args[1:])
+	case "ids":
+		return modelIDs()
 	case "alias":
 		return modelUsageAlias(args[1:])
 	case "aliases":
@@ -686,11 +705,14 @@ func modelSuffix(args []string) error {
 // sets it: off is the app's Full window, every model run to its whole
 // window; a size is compacting there (#876).
 func modelCompact(args []string) error {
+	if len(args) > 0 && slices.Contains(settings.CompactAgents, args[0]) {
+		return agentCompact(args[0], args[1:])
+	}
 	if len(args) == 0 {
 		if s := settings.Load(); s.FullContext {
-			fmt.Println("off", muted.Render("· Codex and Claude Code run a conversation to the model's whole window · magpie model compact on"))
+			fmt.Println("off", muted.Render("· Codex, Claude Code and Grok Build run a conversation to the model's whole window · magpie model compact on"))
 		} else {
-			fmt.Println("on", muted.Render(fmt.Sprintf("· Codex and Claude Code compact at %dK on a longer window; in Claude Code a Claude model runs to its own · magpie model compact off", s.Compact()/1000)))
+			fmt.Println("on", muted.Render(fmt.Sprintf("· Codex, Claude Code and Grok Build compact at %dK on a longer window; in Claude Code a Claude model runs to its own · magpie model compact off", s.Compact()/1000)))
 		}
 		return nil
 	}
@@ -707,18 +729,61 @@ func modelCompact(args []string) error {
 		if err := provider.SetCompactAt(n); err != nil {
 			return err
 		}
-		fmt.Println(green.Render("✓"), fmt.Sprintf("Codex and Claude Code compact at %dK on a longer window", settings.Load().Compact()/1000))
+		fmt.Println(green.Render("✓"), fmt.Sprintf("Codex, Claude Code and Grok Build compact at %dK on a longer window", settings.Load().Compact()/1000))
 		return nil
 	}
 	if err := provider.SetFullContext(full); err != nil {
 		return err
 	}
 	if full {
-		fmt.Println(green.Render("✓"), "Codex and Claude Code run a conversation to the model's whole window", muted.Render("· every turn sends all of it"))
+		fmt.Println(green.Render("✓"), "Codex, Claude Code and Grok Build run a conversation to the model's whole window", muted.Render("· every turn sends all of it"))
 	} else {
-		fmt.Println(green.Render("✓"), fmt.Sprintf("Codex and Claude Code compact at %dK again", settings.Load().Compact()/1000))
+		fmt.Println(green.Render("✓"), fmt.Sprintf("Codex, Claude Code and Grok Build compact at %dK again", settings.Load().Compact()/1000))
 	}
 	return nil
+}
+
+// agentCompact says or sets an agent's own Long conversations
+// (settings.AgentCompacts): every follows the one above for every agent,
+// off runs to the whole window, a size compacts there.
+func agentCompact(agent string, args []string) error {
+	if len(args) == 0 {
+		s := settings.Load()
+		own, has := s.AgentCompacts[agent]
+		switch a := s.ForAgent(agent); {
+		case !has:
+			fmt.Println("every", muted.Render(fmt.Sprintf("· %s follows every agent's (%s) · magpie model compact %s <size>|off", agent, compactWords(a), agent)))
+		case own.Full:
+			fmt.Println("off", muted.Render(fmt.Sprintf("· %s runs a conversation to the model's whole window · magpie model compact %s every", agent, agent)))
+		default:
+			fmt.Println(fmt.Sprintf("%dK", a.Compact()/1000), muted.Render(fmt.Sprintf("· %s's own · magpie model compact %s every", agent, agent)))
+		}
+		return nil
+	}
+	var c *settings.AgentCompact
+	switch strings.ToLower(args[0]) {
+	case "every", "all", "default":
+	case "off", "no", "false", "full":
+		c = &settings.AgentCompact{Full: true}
+	default:
+		n, err := provider.ParseTokens(args[0])
+		if err != nil || n <= 0 {
+			return fmt.Errorf("magpie model compact %s every|off|<size such as 500k>, not %q", agent, args[0])
+		}
+		c = &settings.AgentCompact{At: n}
+	}
+	if err := provider.SetAgentCompact(agent, c); err != nil {
+		return err
+	}
+	fmt.Println(green.Render("✓"), agent+":", compactWords(settings.Load().ForAgent(agent)))
+	return nil
+}
+
+func compactWords(s settings.Settings) string {
+	if s.FullContext {
+		return "the model's whole window"
+	}
+	return fmt.Sprintf("compacts at %dK on a longer window", s.Compact()/1000)
 }
 
 func modelNames() error {

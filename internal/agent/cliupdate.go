@@ -27,6 +27,8 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/desktopdir"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/proc"
@@ -65,6 +67,14 @@ type CLI struct {
 	// 0.162.1 listed with no codex on PATH and no ~/.codex). False when
 	// the terminal's PATH can't be told.
 	OffPath bool `json:"offPath,omitempty"`
+	// InDesktop: no Claude Code of its own is found here, and Claude
+	// Desktop is, which includes one for its Code tab that reads the
+	// same ~/.claude (cybercaius: the card stayed after Claude Code was
+	// uninstalled and Desktop installed again, with nothing saying why).
+	// DesktopVersion is that copy's newest version, "" until Desktop has
+	// fetched it.
+	InDesktop      bool   `json:"inDesktop,omitempty"`
+	DesktopVersion string `json:"desktopVersion,omitempty"`
 }
 
 // cliSpec is where an agent's CLI is published.
@@ -661,7 +671,7 @@ var grokReleases = []string{"https://x.ai/cli/", "https://storage.googleapis.com
 // installer's GROK_CHANNEL or grok update --alpha, kept under [cli] in its
 // config.toml (stable when none).
 func grokLatest() string {
-	dir := os.Getenv("GROK_HOME")
+	dir := appdir.Getenv("GROK_HOME")
 	if dir == "" {
 		home, _ := os.UserHomeDir()
 		dir = filepath.Join(home, ".grok")
@@ -796,16 +806,39 @@ func (a *Agent) cliBin() (string, cliSpec) {
 		return "", spec
 	}
 	bin := binAt(a.Bin)
-	if bin == "" {
-		bin = proc.FindTool(a.Bin)
-	}
-	if bin == "" {
-		return "", spec
+	if !a.binsOwn(bin) {
+		// a launcher of another program's is not the CLI: where else a
+		// user's tools are installed, then (VS Code's copilot shim, #3269)
+		if at := proc.FindTool(a.Bin); a.binsOwn(at) {
+			bin = at
+		} else {
+			return "", spec
+		}
 	}
 	if abs, err := filepath.Abs(bin); err == nil {
 		bin = abs
 	}
 	return bin, spec
+}
+
+// BinPath is where the agent's own program is, as Detected finds its Bin,
+// else where cliBin looks for one with no Bin (Grok Build's); "" for an
+// agent in a WSL distro and one with no program here (a desktop app).
+func (a *Agent) BinPath() string {
+	if a.WSL != "" {
+		return ""
+	}
+	if a.Bin == "" {
+		bin, _ := a.cliBin()
+		return bin
+	}
+	if bin := binAt(a.Bin); a.binsOwn(bin) {
+		return bin
+	}
+	if bin := proc.FindTool(a.Bin); a.binsOwn(bin) {
+		return bin
+	}
+	return ""
 }
 
 // CLI is the agent's CLI: its version, the newest, and whether magpie can
@@ -815,7 +848,10 @@ func (a *Agent) CLI() (c CLI, ok bool) {
 	c.App = a.AppVersion()
 	bin, spec := a.cliBin()
 	if bin == "" {
-		return c, c.App != ""
+		if a.ID == "claude" && a.WSL == "" {
+			c.InDesktop, c.DesktopVersion = claudeInDesktop()
+		}
+		return c, c.App != "" || c.InDesktop
 	}
 	real, u := installedAt(spec, bin)
 	c.Version = installedVersion(real)
@@ -828,6 +864,28 @@ func (a *Agent) CLI() (c CLI, ok bool) {
 	c.Latest = latestVersion(u)
 	c.Update = c.Version != "" && c.Latest != "" && Newer(c.Latest, c.Version)
 	return c, true
+}
+
+// claudeInDesktop says whether Claude Desktop is here, with the newest
+// Claude Code it keeps for its Code tab (desktopdir.ClaudeCode): its
+// bundle on a Mac, its folders or its install elsewhere (its detect).
+func claudeInDesktop() (here bool, version string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false, ""
+	}
+	for _, v := range desktopdir.ClaudeCode(desktopdir.OS, home, os.Getenv) {
+		if version == "" || Newer(v, version) {
+			version = v
+		}
+	}
+	if version != "" {
+		return true, version
+	}
+	if desktopdir.OS == "darwin" {
+		return appHere("Claude.app"), ""
+	}
+	return claudeDesktop(home).Detected(), ""
 }
 
 // InstalledVersion is what the agent's CLI on PATH says its version is: ""

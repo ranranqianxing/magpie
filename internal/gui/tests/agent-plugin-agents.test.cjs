@@ -1,10 +1,11 @@
 // Run with Node's test runner and Playwright on the module path; see README.md.
 // The owner: 因为我们支持Agent插件了，这里是不是也应该显示插件中有更多？
-// Install another agent counts the agents a suggested plugin adds, not
-// installed here, beside the ones with an install command, and ends with
-// one row naming them that opens Plugins at its Agents. With no install
-// command left, the section is there for the plugins' agents alone; with
-// no plugin agent left, it has no such row. In the window, wide and
+// Install another agent ends with one row naming the agents a suggested
+// plugin adds, not installed here, that opens Plugins at its Agents. The
+// owner: 插件中还有更多，不应该折叠在安装更多Agent里. So the row is in
+// sight with the commands folded, and the header counts the commands
+// only. With no install command left, the row is there alone, no header;
+// with no plugin agent left, there is no such row. In the window, wide and
 // narrow, in every language, both engines. No backend: the API is faked.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
@@ -66,6 +67,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const ctl = { installs: INSTALLS, agents: AGENTS };
         const page = await (await browser.newContext({ viewport: { width, height: 760 } })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, ctl));
@@ -73,8 +75,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const inst = page.locator("#agentsInstall");
         const head = inst.locator(".ag-install-head");
         const count = (n) => said(page, lang, "Install another agent ({n})", { n });
-        await page.waitForFunction((want) => document.querySelector("#agentsInstall .ag-install-head")?.textContent === want, await count(5));
+        await page.waitForFunction((want) => document.querySelector("#agentsInstall .ag-install-head")?.textContent === want, await count(2));
+        await page.waitForFunction(() => document.querySelector("#agentsInstall .ag-install-plugins"));
+        // folded, the plugins' row is in sight under the header
+        assert.equal(await head.getAttribute("aria-expanded"), "false");
+        assert.equal(await inst.locator(".ag-install-row").count(), 1, "folded, only the plugins' row");
+        assert(await inst.locator(".ag-install-plugins").isVisible(), "the plugins' row is folded away");
+        const gap = await inst.evaluate((s) => s.querySelector(".ag-install-plugins").getBoundingClientRect().top - s.querySelector(".ag-install-head").getBoundingClientRect().bottom);
+        assert(gap >= 4 && gap <= 10, "the plugins' row sits " + gap + "px under the header");
         await head.click();
+        await inst.locator(".ag-install-note").waitFor();
         // the commands first, then one row for the plugins' agents
         const rows = inst.locator(".ag-install-row");
         assert.equal(await rows.count(), 3);
@@ -118,11 +128,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         ctl.installs = [];
         const p2 = await (await browser.newContext({ viewport: { width, height: 760 } })).newPage();
         p2.setDefaultTimeout(5000);
+        p2.setDefaultNavigationTimeout(60000);
         p2.on("pageerror", (e) => errors.push(e.message));
         await p2.route("**/*", server(lang, ctl));
         await p2.goto("http://magpie.test/");
-        await p2.waitForFunction((want) => document.querySelector("#agentsInstall .ag-install-head")?.textContent === want, await said(p2, lang, "Install another agent ({n})", { n: 3 }));
-        await p2.locator("#agentsInstall .ag-install-head").click();
+        await p2.locator("#agentsInstall .ag-install-plugins").waitFor();
+        assert.equal(await p2.locator("#agentsInstall .ag-install-head").count(), 0, "a header over no commands");
         assert.equal(await p2.locator("#agentsInstall .ag-install-row").count(), 1);
         assert.equal(await p2.locator("#agentsInstall .ag-install-note").count(), 0, "a note about commands with none");
         await p2.context().close();
@@ -131,6 +142,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         Object.assign(ctl, { installs: INSTALLS, agents: [] });
         const p3 = await (await browser.newContext({ viewport: { width, height: 760 } })).newPage();
         p3.setDefaultTimeout(5000);
+        p3.setDefaultNavigationTimeout(60000);
         p3.on("pageerror", (e) => errors.push(e.message));
         await p3.route("**/*", server(lang, ctl));
         await p3.goto("http://magpie.test/");

@@ -123,10 +123,12 @@ var moreRules = []rule{
 		fold: []string{"users", "documents and settings"}, back: 12, ahead: 100},
 
 	// user@host as a shell prompt has it (user@host:~$, [user@host ~]$) or
-	// as ssh, scp and rsync are given it; git@github.com is no one's
-	{cat: "userhost", groups: []string{"USERNAME", "HOSTNAME"}, groupOK: []func(string) bool{userOK, hostOK}, markers: []string{"@"},
+	// as ssh, scp and rsync are given it; git@github.com is no one's; a
+	// package pinned at its version,
+	// js-tokens@4.0.0: in pnpm-lock.yaml, is no login (notPackagePin)
+	{cat: "userhost", groups: []string{"USERNAME", "HOSTNAME"}, groupOK: []func(string) bool{userOK, hostOK}, markers: []string{"@"}, at: notPackagePin,
 		re: regexp.MustCompile(`(?m)(?:^|[^A-Za-z0-9._%+-])(` + unixUser + `)@(` + hostRe + `)(?::[~/]|:[ \t]*$|[ \t]+[~/]|[ \t]*[$%#>][ \t]|[ \t]*[$%#>]$)`)},
-	{cat: "userhost", groups: []string{"USERNAME", "HOSTNAME"}, groupOK: []func(string) bool{userOK, hostOK}, markers: []string{"@"},
+	{cat: "userhost", groups: []string{"USERNAME", "HOSTNAME"}, groupOK: []func(string) bool{userOK, hostOK}, markers: []string{"@"}, at: notPackagePin,
 		re: regexp.MustCompile(`(?i:\b(?:ssh|scp|sftp|rsync|mosh|ssh-copy-id))\b[^\n@]{0,80}?[ \t"'](` + unixUser + `)@(` + hostRe + `)`)},
 	// hostname: x, HOSTNAME=x, a line with the value alone after it; or
 	// ssh config's HostName x, indented under its Host
@@ -136,7 +138,7 @@ var moreRules = []rule{
 		fold: []string{"name", "主机", "主機", "計算機", "コンピュータ"}},
 	// User: x, USER=x, a line with the name alone after it; or ssh config's
 	// User x, indented under its Host
-	{kind: "USERNAME", cat: "userhost", anyGroup: true, ok: lineUserOK,
+	{kind: "USERNAME", cat: "userhost", anyGroup: true, ok: lineUserOK, at: notLineIdent,
 		re: regexp.MustCompile(`(?m)^[ \t]*["']?(?:(?i:user[ \t_-]?name|login[ \t_-]?name|user|login|logname)|用户名|用戶名|ユーザー名)["']?` +
 			`[ \t]*[:=：][ \t]*(?:["'](` + lineUser + `)["'][ \t]*[,;]?|(` + lineUser + `))[ \t]*$|^[ \t]+User[ \t]+(` + lineUser + `)[ \t]*$`),
 		fold: []string{"user", "login", "logname", "用户", "用戶", "ユーザー"}},
@@ -350,7 +352,146 @@ func inCode(v string) bool {
 	return codeObjects[first] || notUsers[last] || notNames[last] || publicHosts[last] || last == "login" || last == "username"
 }
 
-func lineUserOK(v string) bool { return userOK(v) && !inCode(v) && !chatWords[strings.ToLower(v)] }
+// notPackagePin says the user or the host of user@host at s[a:b] is not
+// half of a package pinned at its version: pnpm-lock.yaml lists each
+// package as js-tokens@4.0.0: on a line of its own, which is a shell
+// prompt's shape, and the package and its version went as a user and a
+// host (dniray on Discord, v0.1.1917). A host that is an address
+// (alice@10.0.0.5) is a host still.
+func notPackagePin(s string, a, b int) bool {
+	if b < len(s) && s[b] == '@' {
+		// the user: what follows the @ is the host
+		e := b + 1
+		for e < len(s) && strings.IndexByte(alnum+"-.", s[e]) >= 0 {
+			e++
+		}
+		return !versionHost(strings.TrimRight(s[b+1:e], "."))
+	}
+	return !(a > 0 && s[a-1] == '@' && versionHost(s[a:b]))
+}
+
+// versionHostRe is a release's version as a host's characters can
+// spell it: 4.0.0, 18.2.0-rc.0.
+var versionHostRe = regexp.MustCompile(`^v?\d+(?:\.\d+)+(?:-[0-9A-Za-z.-]+)?$`)
+
+// versionHost says h, after a user's @, is a version and not a host: no
+// host's name is numbers and dots alone, but an address is.
+func versionHost(h string) bool {
+	if !versionHostRe.MatchString(h) {
+		return false
+	}
+	_, err := netip.ParseAddr(h)
+	return err != nil
+}
+
+func lineUserOK(v string) bool {
+	l := strings.ToLower(v)
+	return userOK(v) && !inCode(v) && !chatWords[l] && !identParts[l]
+}
+
+// identParts are the words of a variable's or a type's name that holds a
+// user, and never a login of its own: user = current_user, user:
+// UserInfo, login = loginName.
+var identParts = map[string]bool{
+	"user": true, "users": true, "usr": true, "username": true, "name": true, "names": true, "login": true, "logname": true,
+	"account": true, "acct": true, "owner": true, "author": true, "member": true, "person": true, "profile": true,
+	"current": true, "cur": true, "default": true, "target": true, "new": true, "old": true, "my": true, "the": true,
+	"obj": true, "object": true, "info": true, "id": true, "model": true, "data": true, "record": true, "entity": true,
+	"row": true, "item": true, "input": true, "arg": true, "args": true, "param": true, "value": true, "val": true,
+	"str": true, "type": true, "dto": true, "db": true, "auth": true, "session": true, "self": true,
+}
+
+// notLineIdent says the value of a "User:" line at s[a:b] is written out,
+// not a variable's or a type's name in code. Unquoted, a value made of
+// words (current_user, UserInfo, loginName, user_obj) one of which is
+// identParts is code's: an assignment, a type annotation, a Go struct's
+// field (Tomyu_2034 on X: masking took variable names for user names). A
+// quoted value is a string, written out, whatever its words; and a login
+// of words of its own (deploy_bot, john_doe) is masked still.
+func notLineIdent(s string, a, b int) bool {
+	if a > 0 && (s[a-1] == '"' || s[a-1] == '\'') {
+		return true
+	}
+	w := identWords(s[a:b])
+	if len(w) < 2 {
+		return true
+	}
+	for _, x := range w {
+		if identParts[strings.ToLower(x)] {
+			return false
+		}
+	}
+	return true
+}
+
+// nameAlone says the user name known at s[a:b] (a value a rule found in a
+// home folder, user@host or a "User:" line, matched again as known) is
+// the user's name there, not a name in code that happens to be the same
+// word. A user name such as developer or workspace1 is also a variable's,
+// a parameter's or a key's, and was masked as one: def run(developer,
+// developer_dir), "developer": true, const developer = 1 (Tomyu_2034 on
+// X). It is the name where it stands as a word of its own in text: a
+// path's part, name@host, a git author, ls -l's owner, uid=501(name),
+// prose, a quoted string. It is code's where it is
+//   - joined to a name's other parts: _, $, a letter or a digit beside
+//     it, or a . or - with one past it (developer_dir, self.developer,
+//     developer.go, developer-config);
+//   - declared, assigned or called: const developer, def developer,
+//     developer = 1, developer(…), developer[…], developer :=;
+//   - a JSON key: "developer": …;
+//   - a parameter: unquoted between ( or , and , ) or : (run(developer,
+//     x), f(developer: str)), but for an id's (uid=501(developer)).
+func nameAlone(s string, a, b int) bool {
+	identByte := func(c byte) bool { return wordByte(c) || c == '$' }
+	if a > 0 && identByte(s[a-1]) || b < len(s) && identByte(s[b]) {
+		return false
+	}
+	if a > 1 && (s[a-1] == '.' || s[a-1] == '-') && identByte(s[a-2]) || b+1 < len(s) && (s[b] == '.' || s[b] == '-') && identByte(s[b+1]) {
+		return false
+	}
+	quoted := a > 0 && b < len(s) && (s[a-1] == '"' || s[a-1] == '\'') && s[b] == s[a-1]
+	if quoted {
+		// a key: "developer": …, with what is between the quote and the
+		// colon a space at most
+		rest := strings.TrimLeft(s[b+1:], " \t")
+		return !strings.HasPrefix(rest, ":")
+	}
+	if a > 0 && (s[a-1] == '"' || s[a-1] == '\'' || s[a-1] == '`') {
+		return true // a string's first word
+	}
+	rest := strings.TrimLeft(s[b:], " \t")
+	if rest != "" && (rest[0] == '(' || rest[0] == '[' || rest[0] == '=' || strings.HasPrefix(rest, ":=")) {
+		return false
+	}
+	head := strings.TrimRight(s[:a], " \t")
+	if len(head) < a {
+		// a space before it: a keyword that declares it
+		for _, kw := range declWords {
+			if strings.HasSuffix(head, kw) && (len(head) == len(kw) || !identByte(head[len(head)-len(kw)-1])) {
+				return false
+			}
+		}
+	}
+	if strings.HasSuffix(head, " =") || strings.HasSuffix(head, "\t=") || strings.HasSuffix(head, ":=") {
+		// what an assignment gives: x = developer (--author=developer and
+		// USER=developer are a command's and an environment's, written out)
+		return false
+	}
+	if head != "" && (head[len(head)-1] == '(' || head[len(head)-1] == ',') && paramRest.MatchString(rest) {
+		// but uid=501(developer) gid=20(staff): id's output names the user
+		return head[len(head)-1] == '(' && len(head) > 1 && head[len(head)-2] >= '0' && head[len(head)-2] <= '9'
+	}
+	return true
+}
+
+// paramRest is what is after a parameter's name in a list: the list goes
+// on or ends, or the parameter's type comes first (developer: str,
+// developer string, developer *Config).
+var paramRest = regexp.MustCompile(`^(?:[,):]|[*\[\]]*[A-Za-z_][\w.*\[\]]*[ \t]*[,)])`)
+
+// declWords, before a name with a space, declare it.
+var declWords = []string{"const", "let", "var", "val", "def", "func", "fn", "function", "class", "struct", "interface", "enum", "return", "import", "typeof"}
+
 func lineHostOK(v string) bool { return hostOK(v) && !inCode(v) }
 
 // chatWords are what a "User:" line in a chat's transcript says on its own.

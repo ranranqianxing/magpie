@@ -80,6 +80,7 @@ type gRequest struct {
 		ResponseSchema     json.RawMessage `json:"responseSchema,omitempty"`
 		ResponseJSONSchema json.RawMessage `json:"responseJsonSchema,omitempty"`
 		ThinkingConfig     *gThinking      `json:"thinkingConfig,omitempty"`
+		ImageConfig        json.RawMessage `json:"imageConfig,omitempty"`
 	} `json:"generationConfig,omitempty"`
 }
 
@@ -105,6 +106,22 @@ func (tc *gThinking) effort() string {
 	return ""
 }
 
+// geminiBodyEffort is the reasoning a Gemini request's generationConfig
+// asks for through its thinkingConfig, as parseGemini reads it (#4529):
+// the level it names, else its budget as the level it is nearest. ""
+// when it asks for none, or there is no thinkingConfig.
+func geminiBodyEffort(body []byte) string {
+	var g struct {
+		GenerationConfig *struct {
+			ThinkingConfig *gThinking `json:"thinkingConfig"`
+		} `json:"generationConfig"`
+	}
+	if decodeJSON(geminiCamel(body), &g) != nil || g.GenerationConfig == nil || g.GenerationConfig.ThinkingConfig == nil {
+		return ""
+	}
+	return g.GenerationConfig.ThinkingConfig.effort()
+}
+
 // buildGemini is a generateContent body for an upstream that speaks Gemini
 // itself (Factory's /api/llm/g). The contents are the ones Code Assist
 // sends inside its envelope. systemInstruction has no role: droid sends
@@ -116,7 +133,7 @@ func buildGemini(r *Request, model string) ([]byte, error) {
 		return nil, err
 	}
 	req["model"] = model
-	return marshalBody(req)
+	return marshalBody(req, "")
 }
 
 // geminiRequest is the request inside the Code Assist envelope that
@@ -225,6 +242,11 @@ func parseGemini(body []byte) (*Request, error) {
 		if tc := gc.ThinkingConfig; tc != nil {
 			r.Effort = tc.effort()
 			r.Thinking = r.Effort != ""
+		}
+		// the size and shape of the image asked for, which only an
+		// upstream that speaks Gemini takes (#3820)
+		if ic := gc.ImageConfig; len(ic) > 0 && string(ic) != "null" {
+			r.ImageConfig = ic
 		}
 		// structured output, asked for in the upstream's own field
 		// (Format) and in words as well: a Gemini client doesn't know

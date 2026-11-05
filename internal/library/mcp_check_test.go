@@ -65,6 +65,12 @@ func TestFakeMCPServer(t *testing.T) {
 		time.Sleep(time.Minute)
 		os.Exit(0)
 	}
+	// a server that needs its token, as GitHub's does: it exits when the
+	// token isn't the one MAGPIE_FAKE_MCP_WANT names
+	if want, ok := os.LookupEnv("MAGPIE_FAKE_MCP_WANT"); ok && os.Getenv("MAGPIE_FAKE_MCP_TOKEN") != want {
+		fmt.Fprintf(os.Stderr, "Error: bad token %q\n", os.Getenv("MAGPIE_FAKE_MCP_TOKEN"))
+		os.Exit(4)
+	}
 	// ok: a log line on stdout first, as some servers write
 	fmt.Println("server starting on stdio")
 	sc := bufio.NewScanner(os.Stdin)
@@ -72,9 +78,31 @@ func TestFakeMCPServer(t *testing.T) {
 		var m struct {
 			ID     *int   `json:"id"`
 			Method string `json:"method"`
+			Params struct {
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
+				Meta      json.RawMessage `json:"_meta"`
+			} `json:"params"`
 		}
 		json.Unmarshal(sc.Bytes(), &m)
 		switch m.Method {
+		case "tools/call":
+			// the hub's: "die" ends the server mid-call, "slow" never
+			// answers, any other tool says its name, its arguments and the
+			// process it ran in, and the _meta it came with if any
+			switch m.Params.Name {
+			case "die":
+				fmt.Fprintln(os.Stderr, "Error: lost the database")
+				os.Exit(5)
+			case "slow":
+				continue
+			}
+			said := fmt.Sprintf("%s %s pid=%d", m.Params.Name, m.Params.Arguments, os.Getpid())
+			if len(m.Params.Meta) > 0 {
+				said += " meta=" + string(m.Params.Meta)
+			}
+			text, _ := json.Marshal(said)
+			fmt.Printf(`{"jsonrpc":"2.0","id":%d,"result":{"content":[{"type":"text","text":%s}]}}`+"\n", *m.ID, text)
 		case "initialize":
 			fmt.Printf(`{"jsonrpc":"2.0","id":%d,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"}}}`+"\n", *m.ID)
 		case "notifications/initialized":
@@ -263,6 +291,9 @@ func mcpHandler(t *testing.T, sse bool, seen *http.Header) http.HandlerFunc {
 			}
 			*seen = r.Header.Clone()
 			reply = fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"tools":[{"name":"a"},{"name":"b"}]}}`, *m.ID)
+		case "tools/call":
+			// the hub's: the tool's name back, in the session it was sent in
+			reply = fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"content":[{"type":"text","text":"remote %s"}]}}`, *m.ID, r.Header.Get("Mcp-Session-Id"))
 		}
 		if sse {
 			w.Header().Set("Content-Type", "text/event-stream")
