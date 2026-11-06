@@ -6,6 +6,19 @@ import "strings"
 // The Cloud Agents window sets it. The IDE agent picker does not.
 const useCloudAgentEffortModes = 12
 
+// Automations asks AvailableModels on its own call, then drops a row
+// whose visible_in_routed_model_view is set (excludeRoutedModels),
+// aside from the Auto names. The workbench and the molten engine both
+// send scope AUTOMATIONS together with use_parameterized_automations_models.
+// for_automations is the same call when a client sets that field.
+// The compact pickers do not send any of these.
+const (
+	fieldForAutomations           = 9
+	fieldModelsScope              = 10
+	fieldParameterizedAutomations = 15
+	scopeAutomations              = 2
+)
+
 // Routed-view fields on AvailableModel. The compact list keeps a row
 // only when visible_in_routed_model_view and default_on are both set.
 const (
@@ -51,6 +64,29 @@ func cloudCatalogRequest(body []byte) bool {
 		return false
 	}
 	v, ok := lastVarint(fs, useCloudAgentEffortModes)
+	return ok && v == 1
+}
+
+// automationsCatalogRequest reports whether body is an Automations
+// AvailableModels call. A framed body is read as its payload. A body
+// this package cannot parse is not that call: a failed read is
+// unknown, and the compact lists are the ones that need the routed flag.
+func automationsCatalogRequest(body []byte) bool {
+	payload, _, err := UnwrapUnary(body)
+	if err != nil {
+		return false
+	}
+	fs, err := parseFields(payload)
+	if err != nil {
+		return false
+	}
+	if v, ok := lastVarint(fs, fieldForAutomations); ok && v == 1 {
+		return true
+	}
+	if v, ok := lastVarint(fs, fieldModelsScope); ok && v == scopeAutomations {
+		return true
+	}
+	v, ok := lastVarint(fs, fieldParameterizedAutomations)
 	return ok && v == 1
 }
 

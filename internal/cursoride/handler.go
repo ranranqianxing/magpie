@@ -86,7 +86,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	models := h.models()
 	switch r.URL.Path {
 	case PathAvailableModels:
-		h.merge(w, r, body, AvailableModels(models))
+		h.merge(w, r, body, availableExtra(r, body, models))
 	case PathUsableModels, PathUsableModelsAI:
 		h.merge(w, r, body, UsableModels(models))
 	case PathDefaultModel:
@@ -152,8 +152,11 @@ func (h *Handler) merge(w http.ResponseWriter, r *http.Request, body, extra []by
 	// visible_in_routed_model_view is set. Official rows on that reply
 	// often omit it, so they drop once injected rows set it. The IDE
 	// picker does not send use_cloud_agent_effort_modes, and that reply
-	// is left as Cursor wrote it.
-	if r.URL.Path == PathAvailableModels && cloudCatalogRequest(catalogRequestPlain(r, body)) {
+	// is left as Cursor wrote it. Automations is its own call and then
+	// drops a row that has the flag, so that call is not promoted even
+	// when it also carries the cloud field.
+	plain := catalogRequestPlain(r, body)
+	if r.URL.Path == PathAvailableModels && cloudCatalogRequest(plain) && !automationsCatalogRequest(plain) {
 		up = promoteCloudCompact(up)
 	}
 	merged, err := MergeUnary(up, extra)
@@ -167,6 +170,18 @@ func (h *Handler) merge(w http.ResponseWriter, r *http.Request, body, extra []by
 		ctype = "application/proto"
 	}
 	writeProto(w, merged, ctype)
+}
+
+// availableExtra is the protobuf appended to AvailableModels.
+// Automations drops a row that has visible_in_routed_model_view, so
+// that call leaves the flag unset. The IDE and Cloud Agents calls
+// set it. A request this package cannot parse keeps the flag: that
+// read is unknown, and the compact lists are the ones that need it.
+func availableExtra(r *http.Request, body []byte, models []Model) []byte {
+	if automationsCatalogRequest(catalogRequestPlain(r, body)) {
+		return availableModels(models, false)
+	}
+	return AvailableModels(models)
 }
 
 // catalogRequestPlain is the catalog request body with an HTTP gzip
