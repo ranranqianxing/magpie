@@ -64,8 +64,11 @@ func runReady(modelID, effort string, context int) []byte {
 	if knownEffort(effort) {
 		meta.str(30, effort)
 	}
-	if context > 0 {
-		meta.u32(32, uint32(context))
+	// agent_token_limit. Cursor sets this from the model's context
+	// window. A value that does not fit the int32 is left unset, which
+	// is the client's own 200k fallback, not a wrapped window.
+	if n, ok := contextLimit(context); ok {
+		meta.u32(32, n)
 	}
 	for _, m := range promptModes {
 		var one wbuf

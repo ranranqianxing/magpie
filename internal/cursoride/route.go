@@ -21,9 +21,11 @@ type Parameter struct {
 //
 // Model is the catalog id, sent as the chat body's "model". Effort is the
 // level Cursor asked for, "" when it named none and "none" when it asked
-// for none. ContextTokens and Fast are what the picker sent. This slice's
-// chat body carries Model and Effort; ContextTokens and Fast stay on the
-// route for the proxy that will honor them.
+// for none. ContextTokens is the catalog window when the request names
+// none, or the context parameter when it names one. Fast is what the
+// picker sent. This slice's chat body carries Model and Effort.
+// ContextTokens is agent_token_limit on run_ready. Fast stays on the
+// route and is not a chat field.
 type Route struct {
 	Model         string
 	DisplayName   string
@@ -69,6 +71,13 @@ func RouteModel(models []Model, modelID string, params []Parameter) (Route, bool
 
 func finish(m Model, params []Parameter) (Route, bool, error) {
 	r := Route{Model: m.ID, DisplayName: m.Name}
+	// A request that names no context keeps the catalog window. An
+	// explicit context parameter, including one saved from an older
+	// picker, replaces it. An unknown window stays 0 until a parameter
+	// sets one.
+	if n, ok := contextLimit(m.Context); ok {
+		r.ContextTokens = int(n)
+	}
 	for _, p := range params {
 		switch strings.ToLower(strings.TrimSpace(p.ID)) {
 		case "effort", "reasoning", "reasoning_effort":
@@ -147,8 +156,11 @@ func slugParams(id, modelID string, efforts []effortChoice) ([]Parameter, bool) 
 	if len(parts) < 1 || len(parts) > 3 {
 		return nil, false
 	}
+	// A known window has no context parameter, so its slug is the id
+	// plus an effort and fast. An older slug still starts with a
+	// context size, and that size wins over the catalog window.
 	if _, ok := parseTokenCount(parts[0]); !ok {
-		return nil, false
+		return effortFastSuffix(parts, efforts)
 	}
 	params := []Parameter{{ID: "context", Value: parts[0]}}
 	switch len(parts) {
@@ -169,6 +181,29 @@ func slugParams(id, modelID string, efforts []effortChoice) ([]Parameter, bool) 
 		return append(params,
 			Parameter{ID: "reasoning", Value: parts[1]},
 			Parameter{ID: "fast", Value: "true"}), true
+	}
+}
+
+func effortFastSuffix(parts []string, efforts []effortChoice) ([]Parameter, bool) {
+	switch len(parts) {
+	case 1:
+		if parts[0] == "fast" {
+			return []Parameter{{ID: "fast", Value: "true"}}, true
+		}
+		if !effortListed(parts[0], efforts) {
+			return nil, false
+		}
+		return []Parameter{{ID: "reasoning", Value: parts[0]}}, true
+	case 2:
+		if !effortListed(parts[0], efforts) || parts[1] != "fast" {
+			return nil, false
+		}
+		return []Parameter{
+			{ID: "reasoning", Value: parts[0]},
+			{ID: "fast", Value: "true"},
+		}, true
+	default:
+		return nil, false
 	}
 }
 

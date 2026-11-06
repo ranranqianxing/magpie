@@ -1,6 +1,9 @@
 package cursoride
 
-import "strings"
+import (
+	"math"
+	"strings"
+)
 
 // LocalCredential is the api key placed on a usable-model row.
 //
@@ -29,8 +32,13 @@ type Model struct {
 	// and high, which is what magpie tells an agent in that case.
 	Efforts []string
 	Images  bool
-	// Context is the prompt window in tokens, when known. A size the
-	// fixed list does not already name is one more context choice.
+	// Context is the prompt window in tokens, when known. A size that
+	// fits context_token_limit is that field, and the route's context
+	// when the request names none. It is not a menu of other sizes.
+	// Zero, or a size that does not fit the int32, is an unknown
+	// window: the picker then offers the preset sizes, and 200k is the
+	// default, which is the limit Cursor uses when agent_token_limit
+	// is absent.
 	Context int
 }
 
@@ -40,8 +48,10 @@ type contextChoice struct{ value, label string }
 
 const defaultContext = "200k"
 
-// contextPresets are the context sizes Cursor's picker is given for a
-// magpie model. The words are the parameter values Cursor sends back.
+// contextPresets are the context sizes offered when the catalog does
+// not name a window. The words are the parameter values Cursor sends
+// back. 200k is the default, matching the limit Cursor uses when
+// agent_token_limit is absent. A known window is not one of these.
 var contextPresets = []contextChoice{
 	{"200k", "200K"},
 	{"356k", "356K"},
@@ -164,6 +174,12 @@ func encodeModel(m Model, routed bool) []byte {
 	b.bool(9, m.Reasoning)
 	b.bool(10, m.Images)
 	b.bool(14, false)
+	// context_token_limit. The agent host copies this onto the model
+	// when it is set. A known catalog window is that limit. An unknown
+	// window is left unset, rather than a size this model does not have.
+	if n, ok := contextLimit(m.Context); ok {
+		b.u32(15, n)
+	}
 	b.str(17, disp)
 	b.str(18, m.ID)
 	b.bool(19, true)
@@ -258,19 +274,27 @@ func encodeUsable(m Model) []byte {
 	return []byte(b)
 }
 
+// contextChoices is the context parameter, when the window is unknown.
+// A window contextLimit accepts is context_token_limit and is not also
+// a menu: Cursor's own local-provider rows offer a context parameter
+// only for a real long-context split, which this catalog does not have.
+// Zero and a size that does not fit the int32 are unknown, so they
+// still offer the presets, with 200k as the default.
 func contextChoices(tokens int) []contextChoice {
-	out := append([]contextChoice(nil), contextPresets...)
-	if tokens <= 0 {
-		return out
+	if _, ok := contextLimit(tokens); ok {
+		return nil
 	}
-	for _, c := range out {
-		n, ok := parseTokenCount(c.value)
-		if ok && n == tokens {
-			return out
-		}
+	return append([]contextChoice(nil), contextPresets...)
+}
+
+// contextLimit is a window that fits agent_token_limit, an int32, and
+// context_token_limit. A value that does not fit is unknown: it is not
+// truncated into a different window.
+func contextLimit(n int) (uint32, bool) {
+	if n <= 0 || n > math.MaxInt32 {
+		return 0, false
 	}
-	out = append(out, contextChoice{value: itoa(tokens), label: formatTokenCount(tokens) + " (Custom)"})
-	return out
+	return uint32(n), true
 }
 
 func effortChoices(m Model) []effortChoice {
@@ -330,8 +354,11 @@ func defaultEffort(efforts []effortChoice) string {
 }
 
 func encodeParameters(contexts []contextChoice, efforts []effortChoice) [][]byte {
-	out := [][]byte{encodeEnumParam("context", "Context",
-		"Context size used to trigger conversation compaction.", contexts, false)}
+	var out [][]byte
+	if len(contexts) > 0 {
+		out = append(out, encodeEnumParam("context", "Context",
+			"Context size used to trigger conversation compaction.", contexts, false))
+	}
 	if len(efforts) > 0 {
 		vals := make([]contextChoice, len(efforts))
 		for i, e := range efforts {
@@ -395,8 +422,12 @@ func encodeVariants(id, disp string, tip []byte, contexts []contextChoice, effor
 	if len(axes) == 0 {
 		axes = []effortChoice{{}}
 	}
+	ctxs := contexts
+	if len(ctxs) == 0 {
+		ctxs = []contextChoice{{}}
+	}
 	var out []variant
-	for _, ctx := range contexts {
+	for _, ctx := range ctxs {
 		for _, effort := range axes {
 			for _, fast := range fastChoices {
 				out = append(out, encodeVariant(id, disp, tip, ctx, effort, fast, def))
@@ -408,7 +439,7 @@ func encodeVariants(id, disp string, tip []byte, contexts []contextChoice, effor
 
 func encodeVariant(id, disp string, tip []byte, ctx contextChoice, effort effortChoice, fast bool, defEffort string) variant {
 	var suffix []string
-	if ctx.value != defaultContext {
+	if ctx.value != "" && ctx.value != defaultContext {
 		suffix = append(suffix, ctx.label)
 	}
 	if effort.value != "" {
@@ -421,14 +452,24 @@ func encodeVariant(id, disp string, tip []byte, ctx contextChoice, effort effort
 	if len(suffix) > 0 {
 		shown = disp + ` <span style="color: var(--cursor-text-tertiary);">` + strings.Join(suffix, " ") + `</span>`
 	}
-	isDef := ctx.value == defaultContext && !fast && effort.value == defEffort
+	// An empty context is the known-window case: there is no context
+	// parameter, so that variant is the default context.
+	contextDefault := ctx.value == "" || ctx.value == defaultContext
+	isDef := contextDefault && !fast && effort.value == defEffort
 	var b wbuf
-	b.msg(1, encodeParamValue("context", ctx.value))
-	repr := id + "[context=" + ctx.value
-	slug := id + "-" + ctx.value
+	repr := id + "["
+	slug := id
+	sep := ""
+	if ctx.value != "" {
+		b.msg(1, encodeParamValue("context", ctx.value))
+		repr += "context=" + ctx.value
+		sep = ","
+		slug += "-" + ctx.value
+	}
 	if effort.value != "" {
 		b.msg(1, encodeParamValue("reasoning", effort.value))
-		repr += ",reasoning=" + effort.value
+		repr += sep + "reasoning=" + effort.value
+		sep = ","
 		slug += "-" + effort.value
 	}
 	fastWord := "false"
@@ -437,7 +478,7 @@ func encodeVariant(id, disp string, tip []byte, ctx contextChoice, effort effort
 		slug += "-fast"
 	}
 	b.msg(1, encodeParamValue("fast", fastWord))
-	repr += ",fast=" + fastWord + "]"
+	repr += sep + "fast=" + fastWord + "]"
 	b.str(2, shown)
 	if isDef {
 		b.bool(4, true)
@@ -489,16 +530,6 @@ func parseTokenCount(value string) (int, bool) {
 		return 0, false
 	}
 	return n * mult, true
-}
-
-func formatTokenCount(n int) string {
-	if n >= 1_000_000 && n%1_000_000 == 0 {
-		return itoa(n/1_000_000) + "M"
-	}
-	if n >= 1_000 && n%1_000 == 0 {
-		return itoa(n/1_000) + "K"
-	}
-	return itoa(n)
 }
 
 func itoa(n int) string {

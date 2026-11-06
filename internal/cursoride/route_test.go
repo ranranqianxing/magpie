@@ -1,6 +1,9 @@
 package cursoride
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func catalog() []Model {
 	return []Model{
@@ -60,6 +63,87 @@ func TestVariantStringAndLegacySlugResolve(t *testing.T) {
 	if err != nil || !ok || r.Model != "oppo/deepseek-flash-v3" {
 		t.Fatalf("longer id %+v ok=%v err=%v", r, ok, err)
 	}
+}
+
+func TestKnownWindowIsTheRouteContext(t *testing.T) {
+	models := []Model{{
+		ID: "oppo/deepseek-flash", Name: "flash",
+		Reasoning: true, Efforts: []string{"low", "high"}, Context: 128000,
+	}}
+	r, ok, err := RouteModel(models, "oppo/deepseek-flash", nil)
+	if err != nil || !ok || r.ContextTokens != 128000 || r.Effort != "" {
+		t.Fatalf("bare %+v ok=%v err=%v", r, ok, err)
+	}
+	r, ok, err = RouteModel(models, "oppo/deepseek-flash[reasoning=high,fast=false]", nil)
+	if err != nil || !ok || r.ContextTokens != 128000 || r.Effort != "high" || r.Fast {
+		t.Fatalf("variant %+v ok=%v err=%v", r, ok, err)
+	}
+	r, ok, err = RouteModel(models, "oppo/deepseek-flash-high-fast", nil)
+	if err != nil || !ok || r.ContextTokens != 128000 || r.Effort != "high" || !r.Fast {
+		t.Fatalf("slug %+v ok=%v err=%v", r, ok, err)
+	}
+	r, ok, err = RouteModel(models, "oppo/deepseek-flash[context=500k,reasoning=low,fast=true]", nil)
+	if err != nil || !ok || r.ContextTokens != 500_000 || r.Effort != "low" || !r.Fast {
+		t.Fatalf("override %+v ok=%v err=%v", r, ok, err)
+	}
+	r, ok, err = RouteModel(catalog(), "plain/m", nil)
+	if err != nil || !ok || r.ContextTokens != 0 {
+		t.Fatalf("unknown window %+v ok=%v err=%v", r, ok, err)
+	}
+	atMax := []Model{{ID: "wide/m", Name: "W", Context: math.MaxInt32}}
+	r, ok, err = RouteModel(atMax, "wide/m", nil)
+	if err != nil || !ok || r.ContextTokens != math.MaxInt32 {
+		t.Fatalf("max int32 window %+v ok=%v err=%v", r, ok, err)
+	}
+}
+
+func TestRunReadyUsesTheCatalogWindow(t *testing.T) {
+	if got := agentTokenLimit(t, runReady("oppo/deepseek-flash", "high", 128000)); got != 128000 {
+		t.Fatalf("agent_token_limit = %d", got)
+	}
+	if got := agentTokenLimit(t, runReady("plain/m", "", 0)); got != 0 {
+		t.Fatalf("unknown window sent agent_token_limit %d", got)
+	}
+	if got := agentTokenLimit(t, runReady("plain/m", "", 200000)); got != 200000 {
+		t.Fatalf("preset agent_token_limit = %d", got)
+	}
+	if got := agentTokenLimit(t, runReady("wide/m", "", math.MaxInt32)); got != math.MaxInt32 {
+		t.Fatalf("max int32 agent_token_limit = %d", got)
+	}
+	over := math.MaxInt32
+	over++
+	if over > 0 && agentTokenLimit(t, runReady("wide/m", "", over)) != 0 {
+		t.Fatal("oversized window was sent as agent_token_limit")
+	}
+}
+
+func agentTokenLimit(t *testing.T, frame []byte) uint64 {
+	t.Helper()
+	if len(frame) < 5 || frame[0] != 0 {
+		t.Fatalf("frame %d", len(frame))
+	}
+	fs, err := parseFields(frame[5:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := fieldBytes(fs, 2)
+	if len(ready) != 1 {
+		t.Fatalf("run_ready = %d", len(ready))
+	}
+	rf, err := parseFields(ready[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := fieldBytes(rf, 4)
+	if len(meta) != 1 {
+		t.Fatalf("metadata = %d", len(meta))
+	}
+	mf, err := parseFields(meta[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, _ := fieldUint(mf, 32)
+	return v
 }
 
 func TestBadParameterOnOurModelIsAnError(t *testing.T) {
