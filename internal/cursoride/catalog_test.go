@@ -1,6 +1,7 @@
 package cursoride
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -66,17 +67,16 @@ func TestPickerOmitsBadgesAndKeepsRouteIDs(t *testing.T) {
 	if v, ok := fieldUint(row, 10); !ok || v != 1 {
 		t.Fatalf("supports_images = %d, present %v", v, ok)
 	}
+	if v, ok := fieldUint(row, 15); !ok || v != 128000 {
+		t.Fatalf("context_token_limit = %d, present %v", v, ok)
+	}
 	ids := paramIDs(t, row)
-	if strings.Join(ids, ",") != "context,reasoning,fast" {
+	if strings.Join(ids, ",") != "reasoning,fast" {
 		t.Fatalf("parameters = %q", ids)
 	}
 	efforts := enumValues(t, row, "reasoning")
 	if strings.Join(efforts, ",") != "low,high" {
 		t.Fatalf("efforts = %q, want the catalog's levels", efforts)
-	}
-	contexts := enumValues(t, row, "context")
-	if len(contexts) != 6 || contexts[5] != "128000" {
-		t.Fatalf("contexts = %q", contexts)
 	}
 	var defs, reprs int
 	for _, vraw := range fieldBytes(row, 30) {
@@ -89,7 +89,7 @@ func TestPickerOmitsBadgesAndKeepsRouteIDs(t *testing.T) {
 		}
 		repr, _ := fieldString(vf, 9)
 		reprs++
-		if !strings.HasPrefix(repr, m.ID+"[context=") || strings.Contains(repr, m.Name) {
+		if strings.Contains(repr, "context=") || strings.Contains(repr, m.Name) || !strings.HasPrefix(repr, m.ID+"[") {
 			t.Fatalf("variant %q does not route by the model id", repr)
 		}
 		shown, _ := fieldString(vf, 2)
@@ -97,14 +97,14 @@ func TestPickerOmitsBadgesAndKeepsRouteIDs(t *testing.T) {
 			t.Fatalf("variant display leaked a host: %s", shown)
 		}
 	}
-	// 6 contexts, 2 efforts, fast on and off.
-	if reprs != 24 || defs != 1 {
+	// The 128k window is not a menu. 2 efforts, fast on and off.
+	if reprs != 4 || defs != 1 {
 		t.Fatalf("variants = %d, defaults = %d", reprs, defs)
 	}
 }
 
 func TestQuietModelHasNoEffortAxis(t *testing.T) {
-	raw := AvailableModels([]Model{{ID: "plain/m", Name: "Plain", Context: 200000}})
+	raw := AvailableModels([]Model{{ID: "plain/m", Name: "Plain"}})
 	fs, err := parseFields(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -116,11 +116,13 @@ func TestQuietModelHasNoEffortAxis(t *testing.T) {
 	if v, ok := fieldUint(row, 9); !ok || v != 0 {
 		t.Fatalf("supports_thinking = %d, present %v", v, ok)
 	}
+	if _, ok := fieldUint(row, 15); ok {
+		t.Fatal("unknown window invented context_token_limit")
+	}
 	ids := paramIDs(t, row)
 	if strings.Join(ids, ",") != "context,fast" {
 		t.Fatalf("parameters = %q", ids)
 	}
-	// 200000 is the 200k preset, so it is not added again.
 	if n := len(enumValues(t, row, "context")); n != 5 {
 		t.Fatalf("contexts = %d", n)
 	}
@@ -143,6 +145,63 @@ func TestQuietModelHasNoEffortAxis(t *testing.T) {
 	}
 	if defs != 1 {
 		t.Fatalf("defaults = %d", defs)
+	}
+}
+
+func TestKnownWindowIsNotAContextMenu(t *testing.T) {
+	raw := AvailableModels([]Model{{ID: "plain/m", Name: "Plain", Context: 200000}})
+	fs, err := parseFields(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := parseFields(fieldBytes(fs, 2)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := fieldUint(row, 15); !ok || v != 200000 {
+		t.Fatalf("context_token_limit = %d, present %v", v, ok)
+	}
+	ids := paramIDs(t, row)
+	if strings.Join(ids, ",") != "fast" {
+		t.Fatalf("parameters = %q", ids)
+	}
+	var defs int
+	for _, vraw := range fieldBytes(row, 30) {
+		vf, err := parseFields(vraw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		repr, _ := fieldString(vf, 9)
+		if strings.Contains(repr, "context=") {
+			t.Fatalf("known window still offers a context menu: %s", repr)
+		}
+		if _, ok := fieldUint(vf, 4); ok {
+			defs++
+			if repr != "plain/m[fast=false]" {
+				t.Fatalf("default variant = %s", repr)
+			}
+		}
+	}
+	if defs != 1 {
+		t.Fatalf("defaults = %d", defs)
+	}
+	body, err := CompileChat(Route{Model: "plain/m", ContextTokens: 200000}, "c", invoke("inv", textMsg(1, "hi")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawJSON, err := body.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(rawJSON, &top); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := top["context"]; ok {
+		t.Fatalf("chat body gained a context field: %s", rawJSON)
+	}
+	if _, ok := top["context_tokens"]; ok {
+		t.Fatalf("chat body gained context_tokens: %s", rawJSON)
 	}
 }
 
