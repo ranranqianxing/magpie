@@ -32,12 +32,13 @@ type Model struct {
 	// and high, which is what magpie tells an agent in that case.
 	Efforts []string
 	Images  bool
-	// Context is the prompt window in tokens, when known. It is
-	// context_token_limit on the row, and the route's context when the
-	// request names none. It is not a menu of other sizes. Zero means
-	// the window is unknown: the picker then offers the preset sizes,
-	// and 200k is the default, which is the limit Cursor uses when
-	// agent_token_limit is absent.
+	// Context is the prompt window in tokens, when known. A size that
+	// fits context_token_limit is that field, and the route's context
+	// when the request names none. It is not a menu of other sizes.
+	// Zero, or a size that does not fit the int32, is an unknown
+	// window: the picker then offers the preset sizes, and 200k is the
+	// default, which is the limit Cursor uses when agent_token_limit
+	// is absent.
 	Context int
 }
 
@@ -274,12 +275,13 @@ func encodeUsable(m Model) []byte {
 }
 
 // contextChoices is the context parameter, when the window is unknown.
-// A known window is context_token_limit and is not also a menu: Cursor's
-// own local-provider rows offer a context parameter only for a real
-// long-context split, which this catalog does not have. The presets are
-// what an unknown window still offers, with 200k as the default.
+// A window contextLimit accepts is context_token_limit and is not also
+// a menu: Cursor's own local-provider rows offer a context parameter
+// only for a real long-context split, which this catalog does not have.
+// Zero and a size that does not fit the int32 are unknown, so they
+// still offer the presets, with 200k as the default.
 func contextChoices(tokens int) []contextChoice {
-	if tokens > 0 {
+	if _, ok := contextLimit(tokens); ok {
 		return nil
 	}
 	return append([]contextChoice(nil), contextPresets...)

@@ -63,9 +63,9 @@ medium and high. One that does not think has no effort axis. When the
 catalog names a window, that size is `context_token_limit` (field 15) and
 there is no context parameter: Cursor's agent host copies the field onto
 the model, and a menu of other sizes would name windows this model does
-not have. When the catalog names no window, the picker still offers 200k,
-356k, 500k, 800k and 1m, and 200k is the default. A value that does not
-fit the int32 is left unset. Fast is on the picker because Cursor's
+not have. When the catalog names no window, or names one that does not
+fit the int32, field 15 stays unset and the picker still offers 200k,
+356k, 500k, 800k and 1m, and 200k is the default. Fast is on the picker because Cursor's
 variant id carries it (`fast=true` / `fast=false`); the chat body does not
 grow a field for it.
 
@@ -252,7 +252,7 @@ An empty catalog encodes no default model. Cursor is not given a stand-in.
 
 ## Verification
 
-`go test ./internal/cursoride` covers the picker fields, a catalog window of 128000 that is `context_token_limit` and the route's context when the request names none (no context menu, and the chat JSON still has no context field) while a model with no window still offers 200k–1m and leaves `context_token_limit` unset, the route ids, the
+`go test ./internal/cursoride` covers the picker fields, a catalog window of 128000 that is `context_token_limit` and the route's context when the request names none (no context menu, and the chat JSON still has no context field) while a model with no window, and one whose window does not fit the int32, still offer 200k–1m and leave `context_token_limit` unset, the route ids, the
 chat body, the catalog HTTP replies, the CA files, a CONNECT that injects
 a catalog row, a local run whose gateway stream comes back as text and
 thinking frames, a gzipped BidiAppend forwarded without `Content-Encoding`,
@@ -384,7 +384,7 @@ and Windows Agent chat still shows `Unknown model ID`.
 
 Fast is on the route and is not a field of the chat body. A known
 catalog window is `context_token_limit` and `agent_token_limit`, not a
-menu, and it is not a field of the chat body either. An unknown window
+menu, and it is not a field of the chat body either. An unknown window, including one that does not fit the int32,
 still has the 200k–1m parameter, which is also not a chat-body field.
 There is no Hammers module in this repo; the gateway has no
 equivalent of Cursor's fast switch, and its `max_tokens` is an output cap,

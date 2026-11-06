@@ -2,6 +2,7 @@ package cursoride
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 )
@@ -202,6 +203,28 @@ func TestKnownWindowIsNotAContextMenu(t *testing.T) {
 	}
 	if _, ok := top["context_tokens"]; ok {
 		t.Fatalf("chat body gained context_tokens: %s", rawJSON)
+	}
+}
+
+func TestOversizedWindowKeepsThePresetMenu(t *testing.T) {
+	over := int64(math.MaxInt32) + 1
+	if int64(int(over)) != over {
+		t.Skip("int cannot represent MaxInt32+1")
+	}
+	raw := AvailableModels([]Model{{ID: "wide/m", Name: "Wide", Context: int(over)}})
+	fs, err := parseFields(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := parseFields(fieldBytes(fs, 2)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fieldUint(row, 15); ok {
+		t.Fatal("oversized window set context_token_limit")
+	}
+	if got := strings.Join(enumValues(t, row, "context"), ","); got != "200k,356k,500k,800k,1m" {
+		t.Fatalf("contexts = %q", got)
 	}
 }
 
