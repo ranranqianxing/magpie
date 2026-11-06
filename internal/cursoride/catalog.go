@@ -57,13 +57,22 @@ var fastChoices = [2]bool{false, true}
 // AvailableModelsResponse.AvailableModel. model_picker_badges (field 48)
 // is left out; Cursor draws that field as the blue capsule beside the name.
 func AvailableModels(models []Model) []byte {
+	return availableModels(models, true)
+}
+
+// availableModels encodes the injected catalog. routed sets
+// visible_in_routed_model_view. The IDE and Cloud Agents compact
+// lists keep a row only when that flag and default_on are both set.
+// Automations is a different AvailableModels call, and its client
+// drops a row that has the flag. That call leaves the flag unset.
+func availableModels(models []Model, routed bool) []byte {
 	models = publishable(models)
 	var b wbuf
 	for _, m := range models {
 		b.str(1, m.ID)
 	}
 	for _, m := range models {
-		b.msg(2, encodeModel(m))
+		b.msg(2, encodeModel(m, routed))
 	}
 	return []byte(b)
 }
@@ -139,7 +148,7 @@ func publishable(models []Model) []Model {
 	return out
 }
 
-func encodeModel(m Model) []byte {
+func encodeModel(m Model, routed bool) []byte {
 	disp := pickerDisplay(m.Name)
 	tip := encodeTooltip(disp)
 	contexts := contextChoices(m.Context)
@@ -185,7 +194,11 @@ func encodeModel(m Model) []byte {
 	// Use Multiple Models, lists a row only when this is set and
 	// default_on is set. A named-model section alone leaves the row in
 	// Show all models. Official rows keep the flag Cursor sent.
-	b.bool(40, true)
+	// Automations reads the same field the other way: excludeRoutedModels
+	// drops a row that has it. That request leaves the field unset.
+	if routed {
+		b.bool(40, true)
+	}
 	b.str(41, pickerSubtitle)
 	b.msg(42, encodeVendor())
 	return []byte(b)

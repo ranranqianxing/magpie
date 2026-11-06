@@ -282,9 +282,240 @@ func TestAutomationsRequestDoesNotPromote(t *testing.T) {
 	if routedOn(t, rowByName(t, string(payload), "grok-4.7")) {
 		t.Fatal("automations catalog stamped visible_in_routed_model_view onto an official row")
 	}
-	if !routedOn(t, rowByName(t, string(payload), "oppo/deepseek-flash")) {
-		t.Fatal("magpie row was dropped from the automations catalog")
+	row := rowByName(t, string(payload), "oppo/deepseek-flash")
+	if routedPresent(t, row) {
+		t.Fatal("automations catalog set visible_in_routed_model_view on a magpie row")
 	}
+	if !defaultOn(t, row) {
+		t.Fatal("automations catalog cleared default_on")
+	}
+}
+
+// TestAutomationsKeepsMagpieBesideOfficialRows is the call Cursor's
+// Automations picker actually sends: use_model_parameters,
+// use_parameterized_automations_models, and scope AUTOMATIONS. It does
+// not set for_automations. The client then drops a row that has
+// visible_in_routed_model_view. The compact lists are other calls and
+// still get the flag.
+func TestAutomationsKeepsMagpieBesideOfficialRows(t *testing.T) {
+	var req wbuf
+	req.bool(5, true)
+	req.u32(10, scopeAutomations)
+	req.bool(15, true)
+	plain := officialRow("grok-4.7", "Grok 4.7", nil)
+	marked := officialRow("composer-2.5", "Composer 2.5", func(b *wbuf) { b.bool(40, true) })
+	h := &Handler{
+		Models: func() []Model { return []Model{{ID: "oppo/deepseek-flash", Name: "Grok 4.7", Context: 128000}} },
+		Upstream: func(*http.Request, []byte) (int, []byte, string, error) {
+			return 200, catalogMessage(plain, marked), "application/proto", nil
+		},
+	}
+	rec := post(t, h, PathAvailableModels, frameOf([]byte(req)))
+	payload := catalogPayload(t, rec)
+	if !bytes.Contains(payload, plain) || !bytes.Contains(payload, marked) {
+		t.Fatal("automations merge rewrote an official row")
+	}
+	if routedOn(t, rowByName(t, string(payload), "grok-4.7")) {
+		t.Fatal("an official row that omitted the flag gained it")
+	}
+	if !routedOn(t, rowByName(t, string(payload), "composer-2.5")) {
+		t.Fatal("an official row Cursor marked routed was cleared")
+	}
+	row := rowByName(t, string(payload), "oppo/deepseek-flash")
+	if routedPresent(t, row) {
+		t.Fatal("magpie row would be dropped by excludeRoutedModels")
+	}
+	fs := mustParse(t, string(row))
+	if got, _ := fieldString(fs, 1); got != "oppo/deepseek-flash" {
+		t.Fatalf("route id = %q", got)
+	}
+	if got, _ := fieldString(fs, 18); got != "oppo/deepseek-flash" {
+		t.Fatalf("server_model_name = %q", got)
+	}
+	if got, _ := fieldString(fs, 17); got != "Grok 4.7 · Magpie" {
+		t.Fatalf("display = %q", got)
+	}
+}
+
+func TestAutomationsSignalsEachOmitTheRoutedFlag(t *testing.T) {
+	cases := []struct {
+		name string
+		edit func(*wbuf)
+	}{
+		{"for-automations", func(b *wbuf) { b.bool(fieldForAutomations, true) }},
+		{"scope", func(b *wbuf) { b.u32(fieldModelsScope, scopeAutomations) }},
+		{"parameterized", func(b *wbuf) { b.bool(fieldParameterizedAutomations, true) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var req wbuf
+			req.bool(5, true)
+			tc.edit(&req)
+			payload := catalogReply(t, frameOf([]byte(req)), officialRow("grok-4.7", "Grok 4.7", nil))
+			if routedPresent(t, rowByName(t, string(payload), "oppo/deepseek-flash")) {
+				t.Fatal("magpie row kept visible_in_routed_model_view")
+			}
+			if routedOn(t, rowByName(t, string(payload), "grok-4.7")) {
+				t.Fatal("official row gained visible_in_routed_model_view")
+			}
+		})
+	}
+}
+
+func TestOtherScopesKeepTheRoutedFlag(t *testing.T) {
+	cases := []struct {
+		name  string
+		scope uint32
+	}{
+		{"unspecified", 0},
+		{"user", 1},
+		{"admin", 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var req wbuf
+			req.bool(5, true)
+			req.bool(9, false)
+			req.u32(10, tc.scope)
+			req.bool(15, false)
+			payload := catalogReply(t, frameOf([]byte(req)), officialRow("grok-4.7", "Grok 4.7", nil))
+			if !routedOn(t, rowByName(t, string(payload), "oppo/deepseek-flash")) {
+				t.Fatal("compact catalog lost visible_in_routed_model_view")
+			}
+			if routedOn(t, rowByName(t, string(payload), "grok-4.7")) {
+				t.Fatal("a non-cloud catalog stamped an official row")
+			}
+		})
+	}
+}
+
+func TestAutomationsPlusCloudDoesNotPromote(t *testing.T) {
+	var req wbuf
+	req.bool(12, true)
+	req.u32(10, scopeAutomations)
+	req.bool(15, true)
+	grok := officialRow("grok-4.7", "Grok 4.7", nil)
+	payload := catalogReply(t, frameOf([]byte(req)), grok)
+	if got := rowByName(t, string(payload), "grok-4.7"); !bytes.Equal(got, grok) {
+		t.Fatal("automations call rewrote the official row because the cloud flag was also set")
+	}
+	if routedPresent(t, rowByName(t, string(payload), "oppo/deepseek-flash")) {
+		t.Fatal("automations call set the routed flag because the cloud flag was also set")
+	}
+}
+
+func TestGzippedAutomationsRequestOmitsRoutedFlag(t *testing.T) {
+	var req wbuf
+	req.bool(5, true)
+	req.u32(10, scopeAutomations)
+	req.bool(15, true)
+	var z bytes.Buffer
+	zw := gzip.NewWriter(&z)
+	if _, err := zw.Write(frameOf([]byte(req))); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	grok := officialRow("grok-4.7", "Grok 4.7", nil)
+	h := &Handler{
+		Models: func() []Model { return []Model{deepseek()} },
+		Upstream: func(_ *http.Request, body []byte) (int, []byte, string, error) {
+			if automationsCatalogRequest(body) {
+				t.Fatal("gzipped automations request was parsed without decompressing")
+			}
+			return 200, catalogMessage(grok), "application/proto", nil
+		},
+	}
+	rec := httptest.NewRecorder()
+	httpReq := httptest.NewRequest(http.MethodPost, PathAvailableModels, bytes.NewReader(z.Bytes()))
+	httpReq.Header.Set("Content-Encoding", "gzip")
+	h.ServeHTTP(rec, httpReq)
+	payload := catalogPayload(t, rec)
+	if routedPresent(t, rowByName(t, string(payload), "oppo/deepseek-flash")) {
+		t.Fatal("gzipped automations request kept the routed flag")
+	}
+	if routedOn(t, rowByName(t, string(payload), "grok-4.7")) {
+		t.Fatal("gzipped automations request stamped an official row")
+	}
+}
+
+func TestAutomationsUpstreamFailOmitsRoutedFlag(t *testing.T) {
+	var req wbuf
+	req.u32(10, scopeAutomations)
+	h := &Handler{
+		Models: func() []Model { return []Model{deepseek()} },
+		Upstream: func(*http.Request, []byte) (int, []byte, string, error) {
+			return 503, []byte("down"), "", nil
+		},
+	}
+	rec := post(t, h, PathAvailableModels, frameOf([]byte(req)))
+	payload := catalogPayload(t, rec)
+	row := rowByName(t, string(payload), "oppo/deepseek-flash")
+	if routedPresent(t, row) {
+		t.Fatal("a failed automations upstream still set the routed flag")
+	}
+	if got, _ := fieldString(mustParse(t, string(row)), 1); got != "oppo/deepseek-flash" {
+		t.Fatalf("route id = %q", got)
+	}
+}
+
+func TestUnreadableCatalogRequestKeepsRoutedFlag(t *testing.T) {
+	h := &Handler{
+		Models: func() []Model { return []Model{deepseek()} },
+		Upstream: func(*http.Request, []byte) (int, []byte, string, error) {
+			return 200, catalogMessage(officialRow("grok-4.7", "Grok 4.7", nil)), "application/proto", nil
+		},
+	}
+	// Not a protobuf message. A failed read is not an Automations call.
+	rec := post(t, h, PathAvailableModels, []byte{0xff, 0xff, 0xff, 0xff, 0x0f})
+	payload := catalogPayload(t, rec)
+	if !routedOn(t, rowByName(t, string(payload), "oppo/deepseek-flash")) {
+		t.Fatal("an unreadable catalog request dropped the routed flag")
+	}
+}
+
+func catalogReply(t *testing.T, req, official []byte) []byte {
+	t.Helper()
+	h := &Handler{
+		Models: func() []Model { return []Model{deepseek()} },
+		Upstream: func(*http.Request, []byte) (int, []byte, string, error) {
+			return 200, catalogMessage(official), "application/proto", nil
+		},
+	}
+	return catalogPayload(t, post(t, h, PathAvailableModels, req))
+}
+
+func catalogPayload(t *testing.T, rec *httptest.ResponseRecorder) []byte {
+	t.Helper()
+	if rec.Code != 200 {
+		t.Fatalf("status %d %s", rec.Code, rec.Body.Bytes())
+	}
+	payload, _, err := UnwrapUnary(rec.Body.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+func routedPresent(t *testing.T, row []byte) bool {
+	t.Helper()
+	fs, err := parseFields(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ok := lastVarint(fs, fieldRoutedView)
+	return ok
+}
+
+func defaultOn(t *testing.T, row []byte) bool {
+	t.Helper()
+	fs, err := parseFields(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, ok := lastVarint(fs, fieldDefaultOn)
+	return ok && v == 1
 }
 
 func mustParse(t *testing.T, payload string) []field {
