@@ -19,13 +19,13 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -73,7 +73,13 @@ type verdict struct {
 	// choice a decision model named — kept even when no intent came of
 	// it, so the trace tells "said none" from an answer the rules
 	// couldn't take (#4598)
-	Said   string
+	Said string
+	// Topic: the answer is of topics a message may be none of (a decision
+	// model's intent answer), not levels every message is at. Jev's
+	// likeliest intent is kept in Intent as it said it, and the group's
+	// own sure of it applied where it is known (intentOf): a chat model's
+	// answer is already the one of it that counts.
+	Topic  bool
 	Effort string  // the reasoning the turn wants; "" when not asked
 	Score  float64 // how hard the classifier took the turn to be, from 0 (low) to 3 (xhigh)
 	Sure   float64 // how confident Jev was of the intent, from 0 to 1
@@ -389,7 +395,7 @@ func writePrior(b *strings.Builder, prev before) {
 	}
 }
 
-var firstNumber = regexp.MustCompile(`\d+`)
+var firstNumber = lazyre.New(`\d+`)
 
 // readIntent is the intent a classifier's answer names: its first number,
 // 0 for none. The number is given back as it was said (said), so the

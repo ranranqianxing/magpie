@@ -24,7 +24,7 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
-// magpie's image generation, the model Settings › Images › Image generation
+// magpie's image generation, the model Settings › Models › Images › Image generation
 // names, is also an MCP server the gateway serves itself, beside image
 // recognition's (JonahFu on X): Magpie Image (internal/imagemcp) is a stdio
 // server the Library gives an agent on this computer, which a gateway in
@@ -81,7 +81,8 @@ func ImageToolProps(images string) map[string]any {
 		"size":             map[string]any{"type": "string", "description": "WIDTHxHEIGHT (1024x1024, 1536x1024, 1024x1536) or an aspect ratio (16:9). Default: the model's."},
 		"n":                map[string]any{"type": "integer", "minimum": 1, "maximum": 4, "description": "How many images (default 1)."},
 		"reference_images": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Images to edit or draw from: " + images + "."},
-		"quality":          map[string]any{"type": "string", "description": "low, medium, high or auto, for models that take it."},
+		"quality":          map[string]any{"type": "string", "description": "low, medium, high, xhigh, max or auto, for models that take it (xhigh and max: GPT Image 2.5 and later)."},
+		"complexity":       map[string]any{"type": "string", "description": "low, medium or high: how much detail GPT Image 2.6 and later put in (default high)."},
 		"background":       map[string]any{"type": "string", "description": "transparent, opaque or auto, for models that take it."},
 	}
 }
@@ -140,7 +141,7 @@ func imageMCPTools(r *http.Request) []any {
 		map[string]any{
 			"name":  GenerateImageTool,
 			"title": "Generate image",
-			"description": "Generate an image from a text prompt, or edit/combine images given as reference_images, with the image model set in Magpie (Settings → Images → Image generation) or the one model names. " +
+			"description": "Generate an image from a text prompt, or edit/combine images given as reference_images, with the image model set in Magpie (Settings → Models → Images → Image generation) or the one model names. " +
 				"The image comes back in the answer and at a URL Magpie keeps it at for an hour (the link opens without a header, in a browser too, until it expires); nothing is saved in your project, so save it there yourself if you need it. " +
 				"When it is not ready within about 20 seconds, the answer is an id to wait on with " + GenerationResultTool + " instead. Write a detailed prompt: subject, style, composition, colours, any text to render exactly.",
 			"inputSchema": ro(ImageToolProps(imageMCPFrom+"s"), false),
@@ -211,7 +212,7 @@ func (s *Server) imageMCPCall(r *http.Request, m mcpMessage) (any, map[string]an
 			"protocolVersion": mcpVersion(m),
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "magpie-image", "title": "Magpie Image", "version": Version},
-			"instructions":    GenerateImageTool + " draws with the image model set in magpie (Settings → Images → Image generation) and " + GenerateVideoTool + " makes a short video; images come back in the answer and at a URL, videos at a URL, nothing is saved in your project.",
+			"instructions":    GenerateImageTool + " draws with the image model set in magpie (Settings → Models → Images → Image generation) and " + GenerateVideoTool + " makes a short video; images come back in the answer and at a URL, videos at a URL, nothing is saved in your project.",
 		}, nil
 	case "ping":
 		return map[string]any{}, nil
@@ -264,7 +265,7 @@ func imageGenOff() (map[string]any, bool) {
 	if settings.Load().ImageGen != "off" {
 		return nil, false
 	}
-	return toolResult("Image generation is off in magpie: pick a model for it in Settings → Images → Image generation", true), true
+	return toolResult("Image generation is off in magpie: pick a model for it in Settings → Models → Images → Image generation", true), true
 }
 
 // imageMCPDraw starts generate_image's drawing and answers with what it
@@ -280,6 +281,7 @@ func (s *Server) imageMCPDraw(r *http.Request, raw json.RawMessage) map[string]a
 		N          int      `json:"n"`
 		References []string `json:"reference_images"`
 		Quality    string   `json:"quality"`
+		Complexity string   `json:"complexity"`
 		Background string   `json:"background"`
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
@@ -298,7 +300,7 @@ func (s *Server) imageMCPDraw(r *http.Request, raw json.RawMessage) map[string]a
 		}
 		req["model"] = ref
 	}
-	for k, v := range map[string]string{"size": a.Size, "quality": a.Quality, "background": a.Background} {
+	for k, v := range map[string]string{"size": a.Size, "quality": a.Quality, "complexity": a.Complexity, "background": a.Background} {
 		if v != "" {
 			req[k] = v
 		}
@@ -748,11 +750,9 @@ func (s *Server) imageMCPFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", f.mime)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "private, max-age=3600")
-	w.Header().Set("Content-Length", strconv.Itoa(len(f.data)))
-	if r.Method == http.MethodHead {
-		return
-	}
-	w.Write(f.data)
+	// ranges, which a player asks a video in (Safari only plays an MP4
+	// served so)
+	http.ServeContent(w, r, "", f.made, bytes.NewReader(f.data))
 }
 
 // imageMCPBase is the address the agent reaches the gateway at, for the

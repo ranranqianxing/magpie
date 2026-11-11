@@ -24,6 +24,7 @@ import (
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/filememo"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/sessions"
@@ -132,7 +133,7 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 			agents[a.ID] = a
 			drawn.WriteString(a.ID + "\x00" + a.SharedName() + "\x00" + a.Icon + "\x00")
 		}
-		out := sessionsJSON{Sessions: []sessionJSON{}, Terminal: runtime.GOOS == "darwin" && !isWeb(w),
+		out := sessionsJSON{Sessions: []sessionJSON{}, Terminal: terminalHere() && !isWeb(w),
 			Dirs: []string{}}
 		for _, d := range sessions.Dirs() {
 			out.Dirs = append(out.Dirs, tilde(d))
@@ -143,8 +144,7 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 		// told so without the rows being made, encoded and hashed again,
 		// ~60% of an unchanged poll's ~22 MB over ~17k real sessions
 		logV, logKnown := usage.LogVersion()
-		aliases := provider.UsageAliases()
-		now := listTag{log: logV, drawn: drawn.String(), aliases: aliases}
+		now := listTag{log: logV, drawn: drawn.String(), names: provider.UsageNamesKey()}
 		made := -1
 		listTags.Lock()
 		if t, ok := listTags.m[n]; ok && logKnown && t.same(now) && r.Header.Get("X-Magpie-Had") == t.tag {
@@ -268,33 +268,7 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 		defer sessions.ShareListing()()
 		q := r.URL.Query()
 		n, _ := strconv.Atoi(q.Get("days"))
-		st := statsFor(n)
-		out := st.Overview(q.Get("agent"), q.Get("model"), q.Get("cwd"), 8)
-		period := usage.All
-		if n > 0 {
-			if p, ok := usage.RangeOf(st.From, st.To); ok {
-				period = p
-			}
-		}
-		needCodex := false
-		for key, top := range out.Top {
-			out.Top[key] = slices.Clone(top)
-			for i := range out.Top[key] {
-				if out.Top[key][i].Agent == "codex" {
-					needCodex = true
-				}
-			}
-		}
-		if needCodex {
-			modelEffort := usage.CodexModelEffort(period)
-			for key, top := range out.Top {
-				for i := range top {
-					addCodexSummaryModelEffort(&top[i], modelEffort)
-				}
-				out.Top[key] = top
-			}
-		}
-		writeJSON(rw, out)
+		writeOverview(rw, max(0, n), q.Get("agent"), q.Get("model"), q.Get("cwd"))
 	}))
 	// progress is how far the reading of the session files has got, for
 	// the page to show while its first read takes a while.
@@ -408,8 +382,8 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, err)
 			return
 		}
-		if runtime.GOOS != "darwin" || isWeb(w) {
-			fail(rw, errors.New("opening Terminal is only for the Mac app"))
+		if !terminalHere() || isWeb(w) {
+			fail(rw, errors.New("opening a terminal is only for the desktop app"))
 			return
 		}
 		s, ok := sessions.Find(in.Agent, in.ID)
@@ -444,8 +418,8 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, err)
 			return
 		}
-		if runtime.GOOS != "darwin" || isWeb(w) {
-			fail(rw, errors.New("opening Terminal is only for the Mac app"))
+		if !terminalHere() || isWeb(w) {
+			fail(rw, errors.New("opening a terminal is only for the desktop app"))
 			return
 		}
 		run, name := "", ""
@@ -478,8 +452,8 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, err)
 			return
 		}
-		if in.Open && (runtime.GOOS != "darwin" || isWeb(w)) {
-			fail(rw, errors.New("opening Terminal is only for the Mac app"))
+		if in.Open && (!terminalHere() || isWeb(w)) {
+			fail(rw, errors.New("opening a terminal is only for the desktop app"))
 			return
 		}
 		s, ok := sessions.Find(in.Agent, in.ID)
@@ -617,15 +591,15 @@ var listTags struct {
 var listsRowed atomic.Int64
 
 type listTag struct {
-	made    int    // sessions.ListUnless's listing
-	log     uint64 // usage.LogVersion
-	drawn   string // the agents' names and icons, and the folders
-	aliases map[string]string
-	tag     string
+	made  int    // sessions.ListUnless's listing
+	log   uint64 // usage.LogVersion
+	drawn string // the agents' names and icons, and the folders
+	names string // usage aliases and found groups' public ids
+	tag   string
 }
 
 func (t listTag) same(u listTag) bool {
-	return t.log == u.log && t.drawn == u.drawn && maps.Equal(t.aliases, u.aliases)
+	return t.log == u.log && t.drawn == u.drawn && t.names == u.names
 }
 
 // sameStats is whether a and b would be sent the same: a read again
@@ -635,6 +609,98 @@ func sameStats(a, b sessions.Stats) bool {
 	return a.From == b.From && a.To == b.To && slices.Equal(a.Keys, b.Keys) && reflect.DeepEqual(a.Days, b.Days)
 }
 
+// overviewKey is what an overview's answer is made from: the stats it
+// was summed from (statsForGen's gen, which moves only when they do) and
+// the page's filters. The Codex rows' model and effort are added after.
+type overviewKey struct {
+	days              int
+	gen               uint64
+	agent, model, cwd string
+}
+
+// overviews are the last few overviews sent, encoded. The Sessions page
+// asks for one on every 15s poll, and summing a long history's 34k
+// sessions by tool and skill again, to the same answer, was ~36 ms of CPU
+// an ask.
+var overviews struct {
+	sync.Mutex
+	m map[overviewKey]*overviewKept
+}
+
+type overviewKept struct {
+	out   sessions.Overview // before the Codex rows' model and effort
+	codex bool              // a top row is Codex's
+	// the CodexModelEffort map body was made with, held so that a new one
+	// is never told from it by an address the old one gave back
+	effort map[string][]sessions.ModelEffort
+	body   []byte
+}
+
+// overviewsMade counts the overviews summed, for tests.
+var overviewsMade atomic.Int64
+
+const overviewsKept = 8
+
+func writeOverview(rw http.ResponseWriter, days int, agentID, model, cwd string) {
+	if model != "" {
+		if alias := provider.UsageAlias(); alias != nil {
+			model = alias(model)
+		}
+	}
+	st, gen := statsForGen(days)
+	key := overviewKey{days, gen, agentID, model, cwd}
+	overviews.Lock()
+	k := overviews.m[key]
+	overviews.Unlock()
+	if k == nil {
+		overviewsMade.Add(1)
+		k = &overviewKept{out: st.Overview(agentID, model, cwd, 8)}
+		for _, top := range k.out.Top {
+			for i := range top {
+				k.codex = k.codex || top[i].Agent == "codex"
+			}
+		}
+	}
+	var effort map[string][]sessions.ModelEffort
+	if k.codex {
+		period := usage.All
+		if days > 0 {
+			if p, ok := usage.RangeOf(st.From, st.To); ok {
+				period = p
+			}
+		}
+		effort = usage.CodexModelEffort(period)
+	}
+	body := k.body
+	if body == nil || reflect.ValueOf(effort).UnsafePointer() != reflect.ValueOf(k.effort).UnsafePointer() {
+		out := k.out
+		out.Top = make(map[string][]sessions.Summary, len(k.out.Top))
+		for by, top := range k.out.Top {
+			top = slices.Clone(top)
+			if k.codex {
+				for i := range top {
+					addCodexSummaryModelEffort(&top[i], effort)
+				}
+			}
+			out.Top[by] = top
+		}
+		b, err := json.Marshal(out)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		body = append(b, '\n')
+		overviews.Lock()
+		if overviews.m == nil || len(overviews.m) >= overviewsKept && overviews.m[key] == nil {
+			overviews.m = map[overviewKey]*overviewKept{} // the page asks a few at a time; the rest were left behind
+		}
+		overviews.m[key] = &overviewKept{out: k.out, codex: k.codex, effort: effort, body: body}
+		overviews.Unlock()
+	}
+	rw.Header().Set("Content-Type", "application/json")
+	_, _ = rw.Write(body)
+}
+
 func statsFor(days int) sessions.Stats {
 	st, _ := statsForGen(days)
 	return st
@@ -642,6 +708,7 @@ func statsFor(days int) sessions.Stats {
 
 func statsForGen(days int) (sessions.Stats, uint64) {
 	days = max(0, days)
+	keepStatsWhileAsked()
 	statsMemo.Lock()
 	if k := statsMemo.m[days]; k != nil {
 		statsMemo.asks++
@@ -700,6 +767,62 @@ func statsForGen(days int) (sessions.Stats, uint64) {
 	}
 	statsMemo.Unlock()
 	return st, gen
+}
+
+// statsIdle is how long the Sessions page's stats are kept after the last
+// ask. The page polls every 15 s while it is open; once it has been shut
+// for this long, every range's Stats (a Summary for each session ever:
+// ~15 MB of a 14k-session history), the overviews and the answers' tags
+// go. The parsed session files stay, so the next ask sums them up again
+// (~0.1 s a range) without reading a file.
+const statsIdle = 2 * time.Minute
+
+var statsIdleTimer struct {
+	sync.Mutex
+	t *time.Timer
+	// off: tests, which ask for stats over minutes, have it armed only
+	// when they ask for it
+	off bool
+}
+
+func init() { statsIdleTimer.off = testing.Testing() }
+
+// keepStatsWhileAsked puts off forgetIdleStats for statsIdle.
+func keepStatsWhileAsked() {
+	statsIdleTimer.Lock()
+	defer statsIdleTimer.Unlock()
+	if statsIdleTimer.off {
+		return
+	}
+	if statsIdleTimer.t != nil {
+		statsIdleTimer.t.Reset(statsIdle)
+		return
+	}
+	statsIdleTimer.t = time.AfterFunc(statsIdle, forgetIdleStats)
+}
+
+// forgetIdleStats lets go of what statsForGen and writeOverview kept, and
+// hands the pages back to the system at once; a range being read again
+// puts it off.
+func forgetIdleStats() {
+	statsMemo.Lock()
+	for _, k := range statsMemo.m {
+		if k.busy {
+			statsMemo.Unlock()
+			keepStatsWhileAsked()
+			return
+		}
+	}
+	statsMemo.m = nil
+	statsMemo.Unlock()
+	overviews.Lock()
+	overviews.m = nil
+	overviews.Unlock()
+	statsTags.Lock()
+	statsTags.m = nil
+	statsTags.Unlock()
+	sessions.ForgetKeptRanges()
+	debug.FreeOSMemory()
 }
 
 func combinedSessionStats(days int) sessions.Stats {
@@ -968,13 +1091,16 @@ func retightenGC() {
 	afterNextGC(retightenGC)
 }
 
-// steadyGCStart has the heap grow by half of what it holds before a
+// steadyGCStart has the heap grow by a quarter of what it holds before a
 // collection, or by steadyGCRoom when that is more, not Go's default of
 // all of it, for the life of the process; a GOGC the user set is kept.
 // A window resting on ~60 MB live polls /api/state, /api/drift and
 // /api/providers, ~10 MB thrown away a round, so at the default its
-// footprint peaked at 138 MB; under half, 107-108 MB, for ~9% more CPU in
-// the polls. Reads under a tight GC still set their tenth while they run.
+// footprint peaked at 138 MB and under half at 107-108 MB. On a real
+// account's history (~100 MB live) a quarter took the resting footprint
+// from 171 to 146 MB and its peak from 200 to 166 MB, with 60 busy poll
+// rounds at 5.14s of CPU against 5.12s. Reads under a tight GC still set
+// their tenth while they run.
 func steadyGCStart() {
 	if os.Getenv("GOGC") != "" {
 		return
@@ -991,13 +1117,13 @@ func steadyGCStart() {
 	}
 }
 
-// steadyGCPercent is the half steadyGCStart lets the heap grow by.
-const steadyGCPercent = 50
+// steadyGCPercent is the quarter steadyGCStart lets the heap grow by.
+const steadyGCPercent = 25
 
-// steadyGCRoom is the least it grows by: half of a small heap is a few
-// MB, and a heap under 64 MB grows by 32 MB, never by more than Go's
+// steadyGCRoom is the least it grows by: a quarter of a small heap is a
+// few MB, and a heap under 64 MB grows by 16 MB, never by more than Go's
 // default.
-const steadyGCRoom = 32 << 20
+const steadyGCRoom = 16 << 20
 
 // steadyPercent is the GOGC steadyGCStart sets on a live heap of live
 // bytes (0 before the first collection: steadyGCPercent).
@@ -1018,33 +1144,65 @@ func afterNextGC(fn func()) {
 
 // agentCommand is the shell line that starts a: its Launch where it has
 // one (agy, Claude Science, Cursor Private Inference), else its own
-// program, quoted; "" for one in a WSL distro or with no program here (a
-// desktop app). Nothing of the page's goes into it.
+// program, quoted; on Windows a PowerShell line, one in a WSL distro
+// through wsl.exe; "" for one in a WSL distro elsewhere or with no
+// program here (a desktop app). Nothing of the page's goes into it.
 func agentCommand(a *agent.Agent) string {
-	if a.WSL != "" {
-		return ""
-	}
+	launch := ""
 	if a.Launch != nil {
-		if run := a.Launch(); run != "" {
-			return run
+		launch = a.Launch()
+	}
+	return agentLine(a, launch, runtime.GOOS)
+}
+
+// agentLine is agentCommand with a's Launch already asked, for goos.
+func agentLine(a *agent.Agent, launch, goos string) string {
+	if a.WSL != "" {
+		if goos != "windows" || !plainBin.MatchString(a.Bin) {
+			return ""
 		}
+		if launch == "" {
+			launch = a.Bin
+		}
+		ps := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+		return "wsl.exe -d " + ps(a.WSL) + " -e sh -lc " + ps(`exec "${SHELL:-sh}" -lic `+shellQuote(launch))
+	}
+	if launch != "" {
+		return launch
 	}
 	if bin := a.BinPath(); bin != "" {
+		if goos == "windows" {
+			return "& '" + strings.ReplaceAll(bin, "'", "''") + "'"
+		}
 		return shellQuote(bin)
 	}
 	return ""
 }
+
+// plainBin is a program name a distro's shell takes as it is.
+var plainBin = lazyre.New(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
 
 // agentTerminal is openTerminal, a var so a test opens no terminal.
 var agentTerminal = openTerminal
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
-// openTerminal runs a command in the chosen Mac terminal through a .command
-// file, as it would open from Finder: no Automation consent; in Rex,
-// through its CLI, in a tab labelled label (terminal_rex.go).
-// The shell is left open when the agent quits.
+// openTerminal runs a command in the chosen terminal, the shell left open
+// when the agent quits: on Windows and Linux as terminal_open.go says.
 func openTerminal(command, label, choice string) error {
+	switch runtime.GOOS {
+	case "windows":
+		return openWinTerminal(command, choice)
+	case "linux":
+		return openLinuxTerminal(command, choice)
+	}
+	return openMacTerminal(command, label, choice)
+}
+
+// openMacTerminal runs a command in the chosen Mac terminal through a
+// .command file, as it would open from Finder: no Automation consent; in
+// Rex, through its CLI, in a tab labelled label (terminal_rex.go).
+func openMacTerminal(command, label, choice string) error {
 	var found terminalDiscovery
 	if choice != terminalBundleID {
 		var err error

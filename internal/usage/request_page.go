@@ -61,6 +61,9 @@ type RequestPage struct {
 	// other computer's calls were brought here by sync (#542)
 	Computers []Share
 	Names     map[string]string
+	// Speeds are the models of the rows the filter keeps, ranked by the
+	// median speed of their requests (speed_rank.go)
+	Speeds []ModelSpeed
 	// Heat is the rows by day, as the chart's filter keeps them: only for
 	// the heatmap's own period (HeatmapOf)
 	Heat *Heatmap
@@ -87,9 +90,16 @@ type packedRow struct {
 	Sent, Flow, FirstReasoning int32
 	Own, Retried, Queued       int32
 	Masking                    int32 // ms (Record.Masking)
-	Status, Tries              int32
-	Flags                      uint16
-	zone                       uint16
+	Status                     int32
+	// Tries and ImageFiles in 16 bits, so the row is no larger than its
+	// 152 bytes before the count was kept: neither comes near 32767
+	// (smallOf)
+	Tries, ImageFiles int16
+	// the bytes up and down (Record.UpBytes, DownBytes, ImageFilesSaved),
+	// in 32 bits as Masking: 2GiB is past any request a vendor takes
+	UpBytes, DownBytes, FilesSaved int32
+	Flags                          uint16
+	zone                           uint16
 }
 
 // rowZones are the zones rows' times are in, by a row's zone; 0 is the
@@ -211,6 +221,9 @@ const rowCredits = 4096
 // counted no cache (#3464).
 const rowCacheUnknown = 8192
 
+// rowSocket is the Flags bit of Record.Socket.
+const rowSocket = 16384
+
 type rowChunk struct {
 	Archive   []byte
 	Locations []*time.Location
@@ -250,13 +263,13 @@ type rowChunk struct {
 // rowMsg is the Text of a row's Claude message id, after rowText's, and
 // rowError its error's
 const (
-	rowMsg   = 35
+	rowMsg   = 36
 	rowError = 9
 	// rowClient is the Text of the client's own name, when the user counts
 	// it as another agent (Row.Client, #1958)
 	rowClient = 33
 	// rowTexts is how many strings a row has: rowText's and the message id
-	rowTexts = 36
+	rowTexts = 37
 )
 
 // rowVaried are the strings that differ call by call: the error, the
@@ -322,8 +335,8 @@ func (c *rowChunk) shape(t [rowTexts]uint32) uint32 {
 // reason ("Upstream stop reason", #1927) and the service tiers (#1784)
 // among them: a string left out comes back empty from the cache, in the
 // page and in /v1/magpie/usage/requests (TestRowTextHoldsEveryString)
-func rowText(r *Row) [35]*string {
-	return [35]*string{&r.Agent, &r.Provider, &r.Host, &r.SessionProvider, &r.SessionAccount, &r.Model, &r.Requested, &r.Served, &r.Effort, &r.Error, &r.ErrType, &r.RequestID, &r.Endpoint, &r.Session, &r.NativeSession, &r.Kind, &r.Source, &r.Via, &r.ProviderKeyID, &r.ProviderKeyName, &r.CallerKeyID, &r.CallerKeyName, &r.Archive, &r.Operation, &r.ProviderAccount, &r.ResponseID, &r.Upstream, &r.Subagent, &r.ParentAgent, &r.Stop, &r.TierAsked, &r.TierSent, &r.TierServed, &r.Client, &r.CallerIssuerID}
+func rowText(r *Row) [36]*string {
+	return [36]*string{&r.Agent, &r.Provider, &r.Host, &r.SessionProvider, &r.SessionAccount, &r.Model, &r.Requested, &r.Served, &r.Effort, &r.Error, &r.ErrType, &r.RequestID, &r.Endpoint, &r.Session, &r.NativeSession, &r.Kind, &r.Source, &r.Via, &r.ProviderKeyID, &r.ProviderKeyName, &r.CallerKeyID, &r.CallerKeyName, &r.Archive, &r.Operation, &r.ProviderAccount, &r.ResponseID, &r.Upstream, &r.Subagent, &r.ParentAgent, &r.Stop, &r.TierAsked, &r.TierSent, &r.TierServed, &r.Client, &r.CallerIssuerID, &r.ClientIP}
 }
 func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 	if c.dict == nil {
@@ -340,7 +353,7 @@ func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 		c.Bytes += int64(len(s) + 48)
 		return id
 	}
-	p := packedRow{Tokens: [6]int32{tokensOf(int64(r.Input)), tokensOf(int64(r.Output)), tokensOf(int64(r.CacheRead)), tokensOf(int64(r.CacheWrite)), tokensOf(int64(r.Reasoning)), tokensOf(int64(r.CacheWrite1h))}, Millis: msOf(r.Millis), TTFT: msOf(r.TTFT), FirstText: msOf(r.FirstText), FirstReasoning: msOf(r.FirstReasoning), Sent: msOf(r.Sent), Flow: msOf(r.Flow), Own: msOf(r.Own), Masking: int32(min(r.Masking, math.MaxInt32)), Retried: msOf(r.Retried), Queued: msOf(r.Queued), Order: order, RouteID: r.RouteID, Cost: r.Cost, Status: int32(r.Status), Tries: int32(r.Tries)}
+	p := packedRow{Tokens: [6]int32{tokensOf(int64(r.Input)), tokensOf(int64(r.Output)), tokensOf(int64(r.CacheRead)), tokensOf(int64(r.CacheWrite)), tokensOf(int64(r.Reasoning)), tokensOf(int64(r.CacheWrite1h))}, Millis: msOf(r.Millis), TTFT: msOf(r.TTFT), FirstText: msOf(r.FirstText), FirstReasoning: msOf(r.FirstReasoning), Sent: msOf(r.Sent), Flow: msOf(r.Flow), Own: msOf(r.Own), Masking: int32(min(r.Masking, math.MaxInt32)), Retried: msOf(r.Retried), Queued: msOf(r.Queued), Order: order, RouteID: r.RouteID, Cost: r.Cost, Status: int32(r.Status), Tries: smallOf(r.Tries), ImageFiles: smallOf(r.ImageFiles), UpBytes: bytesOf(r.UpBytes), DownBytes: bytesOf(r.DownBytes), FilesSaved: bytesOf(r.ImageFilesSaved)}
 	p.setTime(r.Time)
 	var t [rowTexts]uint32
 	for i, s := range rowText(&r) {
@@ -368,6 +381,9 @@ func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 	}
 	if r.CacheUnknown {
 		p.Flags |= rowCacheUnknown
+	}
+	if r.Socket {
+		p.Flags |= rowSocket
 	}
 	if failed {
 		p.Flags |= 16
@@ -404,9 +420,21 @@ func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 	}
 	c.Bytes += int64(unsafe.Sizeof(packedRow{}))
 }
+
+// bytesOf is n in a packed row's 32 bits, held at an int32's ends.
+func bytesOf(n int) int32 {
+	return int32(max(min(n, math.MaxInt32), math.MinInt32))
+}
+
+// smallOf is a count of tries or images in a packed row's 16 bits, one
+// past them kept as the most they hold
+func smallOf(n int) int16 {
+	return int16(max(min(n, math.MaxInt16), 0))
+}
+
 func (c *rowChunk) row(i int) Row {
 	p := &c.Rows[i]
-	r := Row{Record: Record{RouteID: p.RouteID, Time: p.Time(), Input: int(p.Tokens[0]), Output: int(p.Tokens[1]), CacheRead: int(p.Tokens[2]), CacheWrite: int(p.Tokens[3]), CacheWrite1h: int(p.Tokens[5]), Reasoning: int(p.Tokens[4]), Millis: int64(p.Millis), TTFT: int64(p.TTFT), FirstText: int64(p.FirstText), FirstReasoning: int64(p.FirstReasoning), ReasoningHidden: p.Flags&rowReasoningHidden != 0, CacheUnknown: p.Flags&rowCacheUnknown != 0, Sent: int64(p.Sent), Flow: int64(p.Flow), Own: int64(p.Own), Masking: int64(p.Masking), Retried: int64(p.Retried), Queued: int64(p.Queued), Status: int(p.Status), Tries: int(p.Tries), HandedOn: p.Flags&rowHandedOn != 0, Rejected: p.Flags&4 != 0, SessionOfficialLogin: p.Flags&8 != 0}, Cost: p.Cost, Priced: p.Flags&1 != 0, Swapped: p.Flags&2 != 0, Routed: p.Flags&32 != 0}
+	r := Row{Record: Record{RouteID: p.RouteID, Time: p.Time(), Input: int(p.Tokens[0]), Output: int(p.Tokens[1]), CacheRead: int(p.Tokens[2]), CacheWrite: int(p.Tokens[3]), CacheWrite1h: int(p.Tokens[5]), Reasoning: int(p.Tokens[4]), Millis: int64(p.Millis), TTFT: int64(p.TTFT), FirstText: int64(p.FirstText), FirstReasoning: int64(p.FirstReasoning), ReasoningHidden: p.Flags&rowReasoningHidden != 0, CacheUnknown: p.Flags&rowCacheUnknown != 0, Socket: p.Flags&rowSocket != 0, Sent: int64(p.Sent), Flow: int64(p.Flow), Own: int64(p.Own), Masking: int64(p.Masking), Retried: int64(p.Retried), Queued: int64(p.Queued), Status: int(p.Status), Tries: int(p.Tries), UpBytes: int(p.UpBytes), DownBytes: int(p.DownBytes), ImageFilesSaved: int(p.FilesSaved), ImageFiles: int(p.ImageFiles), HandedOn: p.Flags&rowHandedOn != 0, Rejected: p.Flags&4 != 0, SessionOfficialLogin: p.Flags&8 != 0}, Cost: p.Cost, Priced: p.Flags&1 != 0, Swapped: p.Flags&2 != 0, Routed: p.Flags&32 != 0}
 	if p.Flags&rowCredits != 0 {
 		credits := p.Credits
 		r.Credits = &credits
@@ -698,8 +726,11 @@ type requestIndex struct {
 	// heats are the heatmap's last pages, kept while the agents' session
 	// files are all that changed (heatFresh)
 	heats map[pageKey]heatPage
-	// idle trims the chunks once the page goes unasked (keepWhileAsked)
-	idle *time.Timer
+	// idle trims the chunks once the page goes unasked (keepWhileAsked),
+	// and forget lets the rest go requestForget later; asks counts the
+	// asks, so a forget armed before the last one lets nothing go
+	idle, forget *time.Timer
+	asks         uint64
 	// parts are the cells of each chunk the last pages of a few partKeys
 	// were added up from, by chunk serial: kept until what prices or
 	// names a call changes (meta), and read without the lock, since a
@@ -768,6 +799,12 @@ var (
 	requestCacheBytes int64 = 128 << 20
 	requestIdleBytes  int64 = 24 << 20
 	requestIdle             = 2 * time.Minute
+	// requestForget is how long after the trim the rest go too. Nothing
+	// asks for them while no page is open, so what the start or the last
+	// visit read (~11 MB of a real history's chunks) was kept for the life
+	// of the process. The next page reads them back from the file of them
+	// (toDisk), decoded and not parsed again.
+	requestForget = 5 * time.Minute
 )
 
 func statKey(path string) string {
@@ -777,6 +814,20 @@ func statKey(path string) string {
 	}
 	return fmt.Sprintf("%s:%d:%d", path, s.Size(), s.ModTime().UnixNano())
 }
+
+// liveListKey names a provider's fetched model list by what it holds
+// (catalog.LiveKey), not its mtime: the list is saved again, unchanged
+// but for its fetch time, on every start and every 45 minutes, and each
+// save dropped every chunk and summary built on it. A list that can't be
+// read is named by its stat, as before.
+func liveListKey(id string) string {
+	p := catalog.LivePath(id)
+	if k, ok := catalog.LiveKey(id); ok {
+		return p + ":" + k
+	}
+	return statKey(p)
+}
+
 func recordHash(path string, n int64) string {
 	f, e := os.Open(path)
 	if e != nil {
@@ -825,7 +876,7 @@ func readRequestState(now time.Time) requestState {
 	h := sha256.New()
 	for _, current := range provider.All() {
 		fmt.Fprintf(h, "%q:%q:%v:%t:%t:%t;", current.ID, current.Where(), current.Catalogs(), current.IsPlugin(), current.Account == nil, current.Key != "")
-		fmt.Fprint(h, statKey(catalog.LivePath(current.ID)))
+		fmt.Fprint(h, liveListKey(current.ID))
 	}
 	for _, root := range sessions.DesktopDataDirs() {
 		for _, kind := range []string{"local-agent-mode-sessions", "claude-code-sessions"} {
@@ -835,7 +886,10 @@ func readRequestState(now time.Time) requestState {
 			}
 		}
 	}
-	meta += fmt.Sprintf("|%x|%s", h.Sum(nil), statKey(catalog.LivePath("antigravity")))
+	meta += fmt.Sprintf("|%x|%s", h.Sum(nil), liveListKey("antigravity"))
+	// Group spellings also name chart shares and the model filter. A change
+	// must invalidate cells whose filter was judged under the old namespace.
+	meta += "|" + provider.UsageNamesKey()
 	h.Reset()
 	snapshot := readLogSnapshot()
 	fmt.Fprint(h, meta, snapshot.version, now.In(time.Local).Format("2006-01-02 MST"))
@@ -1518,6 +1572,10 @@ func (idx *requestIndex) save() {
 // asked for, and to requestIdleBytes once it has gone unasked for
 // requestIdle. idx is locked.
 func (idx *requestIndex) keepWhileAsked() {
+	idx.asks++
+	if idx.forget != nil {
+		idx.forget.Stop()
+	}
 	if idx.idle != nil {
 		idx.idle.Reset(requestIdle)
 		return
@@ -1526,6 +1584,18 @@ func (idx *requestIndex) keepWhileAsked() {
 		idx.Lock()
 		defer idx.Unlock()
 		idx.trim(requestIdleBytes)
+		asks := idx.asks
+		forget := func() {
+			idx.Lock()
+			defer idx.Unlock()
+			if idx.asks == asks { // not asked for since the trim
+				idx.trim(0)
+			}
+		}
+		if idx.forget != nil {
+			idx.forget.Stop()
+		}
+		idx.forget = time.AfterFunc(requestForget, forget)
 	})
 }
 
@@ -1566,7 +1636,7 @@ func visibleLocal(chunks []*rowChunk) refSet {
 	// a message id seen is kept as two 64-bit hashes of it, not a copy of
 	// the decoded chunk's string: a long history's ~400k ids held ~7MB of
 	// copies at the start's peak, and a key of these is a string header's
-	// size. Two ids alike in both are ~1e-28 likely.
+	// size (msgKey).
 	// made to size, as many as the rows that can have an id (a Codex call
 	// has none): grown an id at a time, it was ~250 MB of a minute and a
 	// third of polls (#2278)
@@ -1596,10 +1666,10 @@ func visibleLocal(chunks []*rowChunk) refSet {
 			k = &read
 		}
 		for _, k := range k.keys {
-			if _, ok := seen.ids[k.k]; ok {
+			if _, ok := seen.ids[k.id()]; ok {
 				duplicates.add(rowRef{c, int(k.at)})
 			} else {
-				seen.ids[k.k] = struct{}{}
+				seen.ids[k.id()] = struct{}{}
 			}
 		}
 	}
@@ -1639,10 +1709,16 @@ type chunkMsgKeys struct {
 	turn uint64
 }
 
+// msgKey is 16 bytes: a hash of 64 bits and one of 32, ~1e-18 likely
+// alike for two of the ~300k ids a long history has, where a second 64
+// made it 24 with the row (#2278)
 type msgKey struct {
-	k  [2]uint64
+	k  uint64
+	k2 uint32
 	at int32
 }
+
+func (k msgKey) id() [2]uint64 { return [2]uint64{k.k, uint64(k.k2)} }
 
 // msgKeysOpening, in tests, is told each chunk msgKeysOf decodes.
 var msgKeysOpening func(*rowChunk)
@@ -1654,6 +1730,7 @@ var msgKeysOpening func(*rowChunk)
 // cold start's pairing of the whole history kept all of them, ~67 MB of
 // its ~460 MB live heap, beside the period's that polls read (#2278).
 func msgKeysOf(chunks []*rowChunk) []*chunkMsgKeys {
+	derivedUsed()
 	settled := settledBefore(time.Now())
 	msgKeys.Lock()
 	msgKeys.turn++
@@ -1706,7 +1783,7 @@ func appendMsgKeys(keys []msgKey, open *rowChunk) []msgKey {
 		if msg == "" {
 			continue
 		}
-		keys = append(keys, msgKey{[2]uint64{maphash.String(msgSeeds[0], msg), maphash.String(msgSeeds[1], msg)}, int32(j)})
+		keys = append(keys, msgKey{maphash.String(msgSeeds[0], msg), uint32(maphash.String(msgSeeds[1], msg)), int32(j)})
 	}
 	return keys
 }
@@ -1967,6 +2044,13 @@ const agyMatchSession = "\x00agy"
 // app's, and its transcript counted them a second time (Chamberlain_zyz on X).
 func agyGateway(a string) bool { return a == "agy" || a == "antigravity" }
 
+// agyLocal says a session file's call of agent a is matched as an agy
+// step is, by its tokens and a time when the step began: agy's
+// transcript's, or the Antigravity app's conversation database's
+// (#2190), whose calls name its own conversation id, never one the
+// gateway was sent.
+func agyLocal(a string) bool { return a == "agy" || a == "antigravity" }
+
 // agyStepLongest is how long after an agy step began its gateway call may
 // have ended: a transcript's created_at is when the step began, to the
 // second, where every other session file's time is when its call ended.
@@ -2201,7 +2285,7 @@ func matchedBlocks(gateways []*rowChunk, chunks []*rowChunk, skip refSet, respon
 			}
 			key := matchKey{session: c.Strings[c.text(p, 13)], tokens: matchTokens(p.Tokens), failed: failed}
 			from, to := p.Time().Add(-2*time.Second), p.Time().Add(2*time.Second)
-			if c.Strings[c.text(p, 0)] == "agy" {
+			if agyLocal(c.Strings[c.text(p, 0)]) {
 				key.session, to = agyMatchSession, p.Time().Add(agyStepLongest)
 			}
 			count, at := 0, int32(0)
@@ -2436,7 +2520,7 @@ func buildRequestBlocksIn(p Period, f Filter, offset, limit int, now time.Time, 
 	groups := map[string]map[string]*Share{}
 	chartGroups := map[string]map[string]*Share{}
 	seriesGroups := map[string]map[string]*Share{}
-	keys := keyer{}
+	keys := newKeyer()
 	for _, d := range Dimensions {
 		groups[d] = map[string]*Share{}
 		chartGroups[d] = map[string]*Share{}
@@ -2473,6 +2557,7 @@ func buildRequestBlocksIn(p Period, f Filter, offset, limit int, now time.Time, 
 		newestParts = parts
 	}
 	var first time.Time
+	speeds := speedRank{}
 	// Each dimension's groups are counted with its own pick cleared, and
 	// the computers' with the computer's and day's (cellPass): a cell's
 	// bits say which of them its rows are in, and its sums (d), made once,
@@ -2487,6 +2572,7 @@ func buildRequestBlocksIn(p Period, f Filter, offset, limit int, now time.Time, 
 		s.plus(d)
 	}
 	for _, part := range parts {
+		speeds.merge(part.speeds)
 		if !part.first.IsZero() && (first.IsZero() || part.first.Before(first)) {
 			first = part.first
 		}
@@ -2604,6 +2690,7 @@ func buildRequestBlocksIn(p Period, f Filter, offset, limit int, now time.Time, 
 	slices.Sort(out.Purposes)
 	out.CallerKeys = callerGroups(callers)
 	out.Accounts = callerGroups(accounts)
+	out.Speeds = speeds.result()
 	for _, d := range Dimensions {
 		out.By[d] = sharesOf(groups[d])
 	}
@@ -2719,6 +2806,13 @@ func pageFromLedgerAt(p Period, f Filter, offset, limit int, all Ledgered, now t
 	out.Accounts = callerGroups(accounts)
 	offset = min(offset, len(l.Rows))
 	out.Rows = l.Rows[offset:min(len(l.Rows), offset+limit)]
+	speeds := speedRank{}
+	for _, r := range l.Rows {
+		if !r.IsRejected() && !r.IsProbe() {
+			speeds.add(&r)
+		}
+	}
+	out.Speeds = speeds.result()
 	chartRows := l.Rows
 	if f.Day != "" {
 		chartFilter := f

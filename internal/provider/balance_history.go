@@ -22,7 +22,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,6 +29,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/lastgood"
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 const (
@@ -124,7 +124,8 @@ func addBalancePoint(pts []BalancePoint, n BalancePoint) []BalancePoint {
 // under, if it is one to keep: one under the card's key, or, told in
 // several currencies, one for each under the card's key and the currency.
 func balancePointsOf(q SubscriptionQuota, now time.Time) map[string]BalancePoint {
-	if q.Error != "" || q.AsOf != nil || q.Provider == "" || q.Balance == "" || len(q.BalanceParts) > 0 {
+	// an estimate counted down from a balance typed is no reading
+	if q.Error != "" || q.AsOf != nil || q.Estimate != nil || q.Provider == "" || q.Balance == "" || len(q.BalanceParts) > 0 {
 		return nil
 	}
 	at := now
@@ -154,7 +155,7 @@ type currencyAmount struct {
 	N    float64
 }
 
-var currencyPart = regexp.MustCompile(`^([^\d-]+?)(-?\d[\d,]*(?:\.\d+)?)$`)
+var currencyPart = lazyre.New(`^([^\d-]+?)(-?\d[\d,]*(?:\.\d+)?)$`)
 
 // balanceCurrencies is a balance's amounts when it is told in several
 // currencies, each a sign and a number, apart by " · " as readDeepSeek
@@ -187,7 +188,8 @@ func balanceCurrencies(s string) []currencyAmount {
 func currencyHistKey(key, sign string) string { return key + "|" + strings.TrimSpace(sign) }
 
 // noteBalanceHistory keeps the balance each card among qs tells, and gives
-// every card with a balance its trend.
+// every card with a balance its trend, on qs itself. A balance estimated
+// from one typed (Estimate) is neither kept nor given one.
 func noteBalanceHistory(qs []SubscriptionQuota, now time.Time) {
 	balanceHistMu.Lock()
 	defer balanceHistMu.Unlock()
@@ -236,7 +238,7 @@ func noteBalanceHistory(qs []SubscriptionQuota, now time.Time) {
 		writeBalanceHist(h)
 	}
 	for i, q := range qs {
-		if q.Balance == "" || len(q.BalanceParts) > 0 {
+		if q.Balance == "" || len(q.BalanceParts) > 0 || q.Estimate != nil {
 			continue
 		}
 		if h == nil {

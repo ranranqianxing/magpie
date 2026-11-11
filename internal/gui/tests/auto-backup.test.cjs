@@ -3,20 +3,22 @@
 // 回退选择版本). Its rows come after Export and Import, in the list's own
 // rows (a line between each): the interval and Versions kept as the app's
 // segmented control (no <select>), the folder with Change…, Show and, once
-// one is picked, Default, Back up now, and each version with Restore….
+// one is picked, Default, Back up now, and each version with Restore…,
+// folded under Versions (its count and newest) until it is clicked.
 // Picking Off posts on:false and the row says none are made; 1 week posts
 // hours 168; 14 posts keep 14; Default posts dir "". Restore… asks in the
 // app's own dialog, saying what is here is backed up first; Cancel posts
 // nothing, Restore posts the version's name, and the list then says what
-// was put back and which version undoes it. In all five languages, at 1100
-// and 420px, Chromium and WebKit, with nothing wider than the window. The
+// was put back and which version undoes it. The default folder, in
+// magpie's own, says a reinstalled system takes the backups too. In all
+// five languages, at 1100 and 420px, Chromium and WebKit, with nothing wider than the window. The
 // API is faked; nothing is backed up.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { openPart } = require("./reader.cjs");
+const { openPart, reach } = require("./reader.cjs");
 const { strings } = require("./strings.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -62,7 +64,7 @@ function serve(lang, posts) {
         if (body.on !== undefined) view = { ...view, on: body.on };
         if (body.hours) view = { ...view, hours: body.hours };
         if (body.keep) view = { ...view, keep: body.keep };
-        if (body.dir === "") view = { ...view, custom: false, dir: "~/Library/Application Support/magpie/auto-backups" };
+        if (body.dir === "") view = { ...view, custom: false, inside: true, dir: "~/Library/Application Support/magpie/auto-backups" };
       }
       if (action === "restore") {
         const before = { name: "magpie-20261102-020000-restore.json", made: new Date().toISOString(), reason: "restore", providers: 3, size: 900 };
@@ -120,8 +122,37 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const folder = rowNamed(w("Backup folder"));
         assert.match(await sub(folder), /auto-backups-with-a-long/);
         for (const b of ["Change…", "Show", "Default"]) await folder.locator("button", { hasText: w(b) }).waitFor();
+        const insideSaid = w("In magpie's own folder: a reinstalled system or a lost disk takes these backups too. Pick a folder on another disk, or one a cloud drive syncs");
+        assert.equal(await list.locator(".auto-backup-inside").count(), 0, "a folder picked elsewhere says nothing of magpie's");
         const versions = rowNamed(w("Versions"));
         assert.ok((await sub(versions)).startsWith(w("{n} backups · newest {when}", { n: 2, when: "" }).trim().replace(/\s*$/, "")), await sub(versions));
+        // folded (chen2652 on Discord: a long list): Versions says how many
+        // and the newest, and its name or that line opens the list in place,
+        // the page not moving, and folds it again
+        const vsub = versions.locator(".who > .sub").first();
+        const box = await vsub.boundingBox();
+        assert.ok(box && box.width > 20 && box.height > 8, "the count and newest are in sight, not a hint: " + JSON.stringify(box));
+        const fold = versions.locator("button.auto-backup-fold");
+        assert.equal(await fold.textContent(), w("Versions"));
+        assert.equal(await fold.getAttribute("aria-expanded"), "false");
+        assert.equal(await list.locator(".auto-backup-version").count(), 0, "the versions are folded at first");
+        const view = page.locator("#view-settings");
+        await reach(page, versions.locator(".who > .sub").first());
+        const where = async () => [await view.evaluate((v) => v.scrollTop), await versions.evaluate((r) => Math.round(r.getBoundingClientRect().top))];
+        const before = await where();
+        await versions.locator(".who > .sub").first().click();
+        await list.locator(".auto-backup-version").nth(1).waitFor({ state: "visible" });
+        assert.equal(await versions.locator("button.auto-backup-fold").getAttribute("aria-expanded"), "true");
+        await page.waitForTimeout(300);
+        assert.deepEqual(await where(), before, "opening the versions moved the page");
+        await versions.locator("button.auto-backup-fold").click();
+        await list.locator(".auto-backup-version").first().waitFor({ state: "detached" });
+        assert.equal(await versions.locator("button.auto-backup-fold").getAttribute("aria-expanded"), "false");
+        // the keyboard opens it too, and keeps its focus
+        await versions.locator("button.auto-backup-fold").focus();
+        await page.keyboard.press("Enter");
+        await list.locator(".auto-backup-version").nth(1).waitFor({ state: "visible" });
+        await page.waitForFunction(() => document.activeElement?.matches(".auto-backup-fold"));
         assert.equal(await list.locator(".auto-backup-version").count(), 2);
         assert.ok((await sub(list.locator(".auto-backup-version").nth(1))).startsWith(w("What was here before a restore")));
         assert.ok((await sub(list.locator(".auto-backup-version").first())).includes(w("{n} providers", { n: 3 })));
@@ -149,6 +180,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.waitForFunction(() => [...document.querySelectorAll("#syncList .auto-backup-dir")].some((s) => s.textContent.endsWith("/auto-backups")));
         assert.deepEqual(posts.at(-1), { action: "set", body: { dir: "" } });
         assert.equal(await rowNamed(w("Backup folder")).locator("button", { hasText: w("Default") }).count(), 0, "Default is gone with the default folder");
+        // the default folder is in magpie's own: said under its path
+        // (two_2025. on Discord, magpie on C: lost on a reinstall)
+        assert.deepEqual(await rowNamed(w("Backup folder")).locator(".auto-backup-inside").allTextContents(), [insideSaid]);
         await rowNamed(w("Back up by itself")).locator(".segs .opt", { hasText: w("Off") }).click();
         await page.waitForFunction((s) => [...document.querySelectorAll("#syncList .auto-backup .sub")].some((x) => x.textContent === s), w("Off: no backups are made by themselves"));
         assert.deepEqual(posts.at(-1), { action: "set", body: { on: false } });
@@ -211,6 +245,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     await page.waitForFunction(() => typeof window.autoBackupFill === "function");
     await page.evaluate(() => { renderSync(); renderSync(); });
     release();
+    await page.locator("#syncList .auto-backup-fold").waitFor({ state: "visible" });
+    await page.locator("#syncList .auto-backup-fold").press("Enter");
     await page.locator("#syncList .row.pref.auto-backup-version").first().waitFor({ state: "visible" });
     assert.equal(await page.locator("#syncList .row.pref.auto-backup-version").count(), 2);
     assert.equal(await page.locator("#syncList .row.pref.auto-backup").filter({ has: page.locator(".name", { hasText: /^Back up by itself$/ }) }).count(), 1);

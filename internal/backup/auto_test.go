@@ -179,12 +179,13 @@ func TestAutoBackupPrunes(t *testing.T) {
 	}
 }
 
-// What a backup holds is what an export without keys holds, the proxy
-// left out too: nothing secret is in the file.
+// What a backup holds is what an export without keys holds, the proxies
+// (plugin downloads' too) left out: nothing secret is in the file.
 func TestAutoBackupHoldsNoSecrets(t *testing.T) {
 	autoHome(t)
 	s := settings.Load()
 	s.GitHubToken, s.LANKey, s.Proxy = "ghp_SYNTHETIC_PRIVATE_TOKEN", "lan-SYNTHETIC-KEY", "http://user:proxy-SYNTHETIC-pass@10.0.0.1:8080"
+	s.PluginProxy = "socks5://user:plugin-SYNTHETIC-pass@10.0.0.2:1080"
 	if err := settings.Save(s); err != nil {
 		t.Fatal(err)
 	}
@@ -216,6 +217,7 @@ func TestAutoBackupHoldsNoSecrets(t *testing.T) {
 	}
 	ws := *want.Settings
 	ws.Proxy, ws.ProxyCustom = "", ""
+	ws.PluginProxy, ws.PluginProxyCustom = "", ""
 	want.Settings, want.Created, want.App = &ws, time.Time{}, ""
 	raw, _ := json.Marshal(want)
 	var wantBack Bundle
@@ -361,5 +363,39 @@ func TestAutoHalfWrittenNeverListed(t *testing.T) {
 	tmps, _ := filepath.Glob(filepath.Join(dir, autoTemp))
 	if len(tmps) != 1 { // the test's own, not the stopped write's
 		t.Fatalf("temporary files left: %v", tmps)
+	}
+}
+
+// Backups in magpie's own folder, the default, are said to be there: a
+// reinstalled system or a wiped disk takes them along with the setup
+// (two_2025. on Discord, whose magpie is on C:). One picked elsewhere
+// isn't, nor one in a folder whose name only starts like magpie's.
+func TestAutoInsideMagpiesFolder(t *testing.T) {
+	autoHome(t)
+	if v := AutoStatus(); !v.Inside || v.Custom {
+		t.Fatalf("default folder %q: inside %v, custom %v; want inside", v.Dir, v.Inside, v.Custom)
+	}
+	in := filepath.Join(settings.Dir(), "mine")
+	if err := SaveAuto(AutoConfig{Dir: in}); err != nil {
+		t.Fatal(err)
+	}
+	if v := AutoStatus(); !v.Inside {
+		t.Errorf("picked %q in magpie's folder: not said to be inside", v.Dir)
+	}
+	for _, out := range []string{t.TempDir(), settings.Dir() + "-backups"} {
+		if err := SaveAuto(AutoConfig{Dir: out}); err != nil {
+			t.Fatal(err)
+		}
+		if v := AutoStatus(); v.Inside {
+			t.Errorf("picked %q elsewhere: said to be inside %q", v.Dir, settings.Dir())
+		}
+	}
+	if runtime.GOOS != "linux" {
+		if err := SaveAuto(AutoConfig{Dir: strings.ToUpper(settings.Dir())}); err != nil {
+			t.Fatal(err)
+		}
+		if v := AutoStatus(); !v.Inside {
+			t.Errorf("magpie's folder in other letter case %q: not said to be inside", v.Dir)
+		}
 	}
 }

@@ -64,18 +64,21 @@ func isBackupJSON(data []byte) bool {
 
 // Bundle is what a backup holds.
 type Bundle struct {
-	Version     int                        `json:"version"`
-	Created     time.Time                  `json:"created"`
-	App         string                     `json:"app,omitempty"` // the magpie that made it
-	Keys        bool                       `json:"keys"`          // whole-backup credential policy
-	Providers   []provider.Provider        `json:"providers"`
-	Icons       map[string][]byte          `json:"icons,omitempty"`  // pictures picked for providers, by file name
-	Groups      []provider.Group           `json:"groups,omitempty"` // the user's model groups
-	Settings    *settings.Settings         `json:"settings,omitempty"`
-	GatewayKeys *[]access.Key              `json:"gatewayKeys,omitempty"`
-	Profiles    map[string]profile.Profile `json:"profiles,omitempty"`
-	Agents      map[string]string          `json:"agents,omitempty"`  // every agent's fields as they are now
-	Library     *library.Bundle            `json:"library,omitempty"` // nil from a magpie before it, or with none
+	Version     int                 `json:"version"`
+	Created     time.Time           `json:"created"`
+	App         string              `json:"app,omitempty"` // the magpie that made it
+	Keys        bool                `json:"keys"`          // whole-backup credential policy
+	Providers   []provider.Provider `json:"providers"`
+	Icons       map[string][]byte   `json:"icons,omitempty"`  // pictures picked for providers, by file name
+	Groups      []provider.Group    `json:"groups,omitempty"` // the user's model groups
+	Settings    *settings.Settings  `json:"settings,omitempty"`
+	GatewayKeys *[]access.Key       `json:"gatewayKeys,omitempty"`
+	// AccountGroups are the account groups gateway keys name (LeiWang_2000
+	// on X), carried with the keys; nil from a magpie before them.
+	AccountGroups *[]access.AccountGroup     `json:"accountGroups,omitempty"`
+	Profiles      map[string]profile.Profile `json:"profiles,omitempty"`
+	Agents        map[string]string          `json:"agents,omitempty"`  // every agent's fields as they are now
+	Library       *library.Bundle            `json:"library,omitempty"` // nil from a magpie before it, or with none
 	// Searches are the web search APIs (#419), their keys with the
 	// providers'; nil from a magpie before them.
 	Searches *[]provider.SearchAPI `json:"searches,omitempty"`
@@ -197,6 +200,15 @@ func Collect(keys bool, app string) (Bundle, error) {
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return b, err
 		}
+		if _, err := os.Stat(access.GroupsPath()); err == nil {
+			groups, err := access.ExportGroups()
+			if err != nil {
+				return b, err
+			}
+			b.AccountGroups = &groups
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return b, err
+		}
 	}
 	for _, p := range stored {
 		if !keys {
@@ -219,7 +231,7 @@ func Collect(keys bool, app string) (Bundle, error) {
 	searches := []provider.SearchAPI{}
 	for _, a := range provider.StoredSearchAPIs() {
 		if !keys {
-			a.Key = ""
+			a = a.WithoutKeys() // those switched off too
 		}
 		searches = append(searches, a)
 	}
@@ -236,6 +248,7 @@ func Collect(keys bool, app string) (Bundle, error) {
 			s.LANKey, s.LANKeyID = "", ""
 			s.OTel.Headers = nil
 			s.GitHubToken = ""
+			s.BarkKey = ""
 		}
 		b.Settings = &s
 	}
@@ -477,6 +490,7 @@ func Restore(b Bundle, parts Parts) (Result, error) {
 		if !keys {
 			s.LANKey, s.LANKeyID = cur.LANKey, cur.LANKeyID
 			s.GitHubToken = cur.GitHubToken
+			s.BarkKey = cur.BarkKey
 			s.OTel.Headers = nil
 			if strings.TrimRight(strings.TrimSpace(s.OTel.Endpoint), "/") == cur.OTel.Endpoint {
 				s.OTel.Headers = cur.OTel.Headers
@@ -495,6 +509,15 @@ func Restore(b Bundle, parts Parts) (Result, error) {
 		}
 		if err := settings.Save(s); err != nil {
 			return r, err
+		}
+		// the groups before the keys that name them
+		if keys && b.AccountGroups != nil {
+			if err := access.RestoreGroups(*b.AccountGroups); err != nil {
+				if rollback := settings.Save(cur); rollback != nil {
+					return r, errors.Join(err, fmt.Errorf("could not restore original settings after account-group restore failed: %w", rollback))
+				}
+				return r, err
+			}
 		}
 		if keys && b.GatewayKeys != nil {
 			if err := access.Restore(*b.GatewayKeys); err != nil {

@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -28,6 +27,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/routes"
 	"github.com/yetone/magpie/internal/settings"
@@ -133,13 +133,13 @@ func plainUnavailable(c candidate, status int, body []byte) bool {
 		return false
 	}
 	return failureOf(c, status, body) == failOther && !vendorOverloaded(status, body) &&
-		!codexReset(status, body) && !protectionRefused(status, body) &&
+		!modelRefused(status, body) && !codexReset(status, body) && !protectionRefused(status, body) &&
 		!bytes.Contains(body, []byte(didNotStream)) && refusalWords(status, body) != ""
 }
 
 // idRun is a run in an error's words that differs from one try to the
 // next: a request or trace id, a timestamp.
-var idRun = regexp.MustCompile(`[0-9a-fA-F][0-9a-fA-F-]{11,}|\d{6,}`)
+var idRun = lazyre.New(`[0-9a-fA-F][0-9a-fA-F-]{11,}|\d{6,}`)
 
 // refusalWords is a 5xx's status and the words it said, ids left out
 // (idRun), for two tries' to be compared; "" when it said nothing, as a
@@ -302,7 +302,7 @@ var creditLadder = []time.Duration{creditRest, 2 * time.Hour, 8 * time.Hour, 24 
 // max_tokens … can only afford N" (the request's size, not the balance
 // spent), and a vendor's "try again in 30 seconds" or "1 分钟后重试".
 // These rest creditRest, as before; they don't climb creditLadder.
-var creditSoon = regexp.MustCompile(`(?i)openrouter_in_flight_budget|can only afford|fewer max_tokens|(?:try again|retry)(?: after| in)?\s*\d|\d+\s*(?:秒|分钟|小时)[后後]`)
+var creditSoon = lazyre.New(`(?i)openrouter_in_flight_budget|can only afford|fewer max_tokens|(?:try again|retry)(?: after| in)?\s*\d|\d+\s*(?:秒|分钟|小时)[后後]`)
 
 // creditBackoff is the rest of a key (c, no subscription account) out of
 // credit, rested by id: the vendor's own time when it names one (a
@@ -336,27 +336,36 @@ func creditBackoff(id string, header http.Header, body []byte, now time.Time) (d
 
 var (
 	// creditWords: the account or key has no money left.
-	creditWords = regexp.MustCompile(`(?i)insufficient.?(balance|credit|fund)|balance|credit|billing|payment|arrear|overdue|suspended|余额|欠费|充值|账户.*(不足|停)`)
+	creditWords = lazyre.New(`(?i)insufficient.?(balance|credit|fund)|balance|credit|billing|payment|arrear|overdue|suspended|余额|欠费|充值|账户.*(不足|停)`)
 	// brokeWords: a 429 that says the balance itself is spent, as Zhipu
 	// answers a GLM Coding Plan's key at the pay-as-you-go endpoint (1113
 	// "余额不足或无可用资源包，请充值") — out of credit, not a rate limit;
 	// WorkBuddy's 429 14018 "Credits exhausted. Please visit the link
-	// below to purchase add-on packs…" too (Creat.wu on Discord)
-	brokeWords = regexp.MustCompile(`(?i)insufficient.?(balance|credit|fund)|\bcredits? (are )?exhausted\b|余额不足|欠费|请充值`)
-	// quotaWords: it has used up what its plan allows for now.
-	usedUpWords = regexp.MustCompile(`(?i)quota|usage.?limit|out of budget|budget (exceeded|exhausted)|limit.?reached|hit your .*limit|limit.{0,24}resets|exceeded.*(plan|limit)|额度|用量|套餐|上限`)
+	// below to purchase add-on packs…" too (Creat.wu on Discord), and
+	// OpenAI's 429 credit_balance_exhausted for an organization whose
+	// prepaid API credits are spent: its underscores kept "credits
+	// exhausted" from matching, so it read as a rate limit and the same
+	// key was asked again rather than the next account
+	brokeWords = lazyre.New(`(?i)insufficient.?(balance|credit|fund)|\bcredits? (are )?exhausted\b|credit.?balance.?exhausted|余额不足|欠费|请充值`)
+	// quotaWords: it has used up what its plan allows for now. The budget's
+	// words needn't sit beside each other: LiteLLM's spent key answers 429
+	// "Budget has been exceeded! Key=… (sk-…), Current cost: …, Max budget:
+	// …" (#5111, wuxiaoqiang12) — its "has been" broke the pair, and read
+	// as a plain rate limit the key was asked again every half an hour, the
+	// user's quota-rest never read
+	usedUpWords = lazyre.New(`(?i)quota|usage.?limit|out of budget|budget.{0,32}(exceeded|exhausted)|limit.?reached|hit your .*limit|limit.{0,24}resets|exceeded.*(plan|limit)|额度|用量|套餐|上限`)
 	// rateWords: a 429 that is a short rate limit — requests or tokens per
 	// minute — which usedUpWords took for a used-up plan ("Rate limit
 	// exceeded", "reached"): as magpie words an upstream error, with
 	// "rate_limit_error" for its type, every such 429 was, and rested a
 	// quarter of an hour rather than a minute (#153).
 	// "Frequency limit" is the English of 频率 (zoecats on Discord).
-	rateWords = regexp.MustCompile(`(?i)rate.?limit|frequency.?limit|too many requests|per.?(second|sec|minute|min)\b|\b[rt]pm\b|频率|太频繁|过于频繁|速率`)
+	rateWords = lazyre.New(`(?i)rate.?limit|frequency.?limit|too many requests|per.?(second|sec|minute|min)\b|\b[rt]pm\b|频率|太频繁|过于频繁|速率`)
 	// plannedWords: a 429 that says the plan's own allowance is used, rate
 	// words or not — a day's free requests, say, or a sub2api key's own
 	// 5-hour, day or 7-day limit ("api key 7天限额已用完", sent as
 	// rate_limit_exceeded).
-	plannedWords = regexp.MustCompile(`(?i)quota|usage.?limit|hit your .*limit|limit.{0,24}resets|per.?(day|week|month)|daily|weekly|monthly|额度|用量|套餐|限额已用完`)
+	plannedWords = lazyre.New(`(?i)quota|usage.?limit|hit your .*limit|limit.{0,24}resets|per.?(day|week|month)|daily|weekly|monthly|额度|用量|套餐|限额已用完`)
 	// minuteWords: a 429 that names a window of a minute or less, or the
 	// rate itself — tokens or requests per minute, TPM, RPM — which some
 	// vendors call a quota all the same: Gemini's "You exceeded your
@@ -367,15 +376,15 @@ var (
 	// of a quota that says nothing of when, with balance left
 	// (monater.114514 on Discord). A longer window named beside it
 	// (longWords) is still the plan's.
-	minuteWords = regexp.MustCompile(`(?i)per.?(second|minute)|per.?(sec|min)\b|\b[rt]p[ms]\b|(token|call|request) rate limit|每分钟|每秒`)
+	minuteWords = lazyre.New(`(?i)per.?(second|minute)|per.?(sec|min)\b|\b[rt]p[ms]\b|(token|call|request) rate limit|每分钟|每秒`)
 	// longWords: a window longer than a minute, or a plan's own limit,
 	// named in a 429 — what minuteWords' rate limit is not.
-	longWords = regexp.MustCompile(`(?i)usage.?limit|hit your .*limit|limit.{0,24}resets|per.?(hour|day|week|month)|\bhours?\b|hourly|daily|weekly|monthly|\b[rt]p[dh]\b|额度已用|用量|套餐|限额已用完|小时|每天|每日|每周|每月`)
+	longWords = lazyre.New(`(?i)usage.?limit|hit your .*limit|limit.{0,24}resets|per.?(hour|day|week|month)|\bhours?\b|hourly|daily|weekly|monthly|\b[rt]p[dh]\b|额度已用|用量|套餐|限额已用完|小时|每天|每日|每周|每月`)
 	// urlWords: a link in an error, whose words are its path, not what the
 	// vendor said: Azure's rate limit points to aka.ms/oai/quotaincrease
-	urlWords = regexp.MustCompile(`https?://\S+`)
+	urlWords = lazyre.New(`https?://\S+`)
 	// resetsWords: Claude Code's "usage limit reached|<when it resets>".
-	resetsWords = regexp.MustCompile(`(?i)limit reached\|(\d{10})\b`)
+	resetsWords = lazyre.New(`(?i)limit reached\|(\d{10})\b`)
 	// resetsWhen: a 429 that says in words when the account is back, as
 	// WorkBuddy's do in both its builds (#1669): "将在 2026-10-11 20:16:02
 	// UTC+8重置", "your usage will reset at 2026-10-11 12:37:53 UTC+8, ...".
@@ -388,23 +397,26 @@ var (
 	// there (重置, or a comma or full stop), so a refusal cut short after
 	// "UTC", "UTC+" or Ark's "+0800" isn't read as UTC: another vendor's
 	// date in passing ("deprecated on …"), or one with no offset, is not a
-	// reset time.
-	resetsWhen = regexp.MustCompile(`(?i)(?:\bresets? at|将在|将于)\s*(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2}):(\d{2})\s*(?:(?:UTC|GMT)([+-])(\d{1,2})(?::?(\d{2}))?|([+-])(\d{2})(\d{2}) (?-i:[A-Z]{2,5}))(?:\s*(?:重置|[,.;，。；]))`)
+	// reset time. The offset may sit in brackets, as WorkBuddy's China
+	// build writes it since November (taoxiaoxin on Discord: "将在
+	// 2026-11-06 17:13:04 (UTC+8) 重置"): unread, the refusal rested the
+	// whole account a quarter of an hour as out of quota.
+	resetsWhen = lazyre.New(`(?i)(?:\bresets? at|将在|将于)\s*(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2}):(\d{2})\s*[(（]?\s*(?:(?:UTC|GMT)([+-])(\d{1,2})(?::?(\d{2}))?|([+-])(\d{2})(\d{2}) (?-i:[A-Z]{2,5}))\s*[)）]?(?:\s*(?:重置|[,.;，。；]))`)
 	// monthlyWords: a refusal that says the allowance it used up is a
 	// month's, as Ark's does ("You have exceeded the monthly usage quota")
 	// and Zhipu's 1310 ("Weekly/Monthly Limit Exhausted"): the reset time
 	// it writes can honestly be weeks off (longestSaid).
-	monthlyWords = regexp.MustCompile(`(?i)\bmonthly\b|月度|每月|本月`)
+	monthlyWords = lazyre.New(`(?i)\bmonthly\b|月度|每月|本月`)
 	// otherModels: a refusal that says the account's other models still
 	// answer ("切换其他模型", "switch to the other models"): its limit is
 	// the model's, and the model alone rests
-	otherModels = regexp.MustCompile(`(?i)switch(?:ing)? to (?:the )?other models?|切换(?:到)?其他模型`)
+	otherModels = lazyre.New(`(?i)switch(?:ing)? to (?:the )?other models?|切换(?:到)?其他模型`)
 	// modelCooling is a relay that pools credentials per model saying
 	// those of the requested model cooled down: CLIProxyAPI's 429
 	// model_cooldown, "All credentials for model model-a are cooling down
 	// via provider upstream" (#3039, Welkon's relay), or OmniRoute's "All
 	// credentials for the requested model are cooling down"
-	modelCooling = regexp.MustCompile(`(?i)credentials for (?:the requested )?model .{0,200}?cooling down`)
+	modelCooling = lazyre.New(`(?i)credentials for (?:the requested )?model .{0,200}?cooling down`)
 	// clineFreeLimit: Cline's refusal of a free model whose day's allowance
 	// is used up, 429 "Daily free limit reached on model deepseek/deepseek-
 	// v4-flash. Try again in 23h 59m", as its own clients read it (cline/
@@ -412,16 +424,16 @@ var (
 	// isClineFreeModelLimitMessage, which tells the user to pick another
 	// model): the limit is that model's, and the model alone rests
 	// (#1398, wuasakura)
-	clineFreeLimit = regexp.MustCompile(`(?i)free limit reached on model`)
+	clineFreeLimit = lazyre.New(`(?i)free limit reached on model`)
 	// tryAgainIn: how long Cline's free-model refusal says until it is
 	// back ("Try again in 23h 59m"), in the units resetsInWords reads
-	tryAgainIn = regexp.MustCompile(`(?i)\btry again in (?:(\d+)\s*d(?:ays?)?\b\s*)?(?:(\d+)\s*h(?:ours?|rs?)?\b\s*)?(?:(\d+)\s*m(?:in(?:utes?|s)?)?\b)?`)
+	tryAgainIn = lazyre.New(`(?i)\btry again in (?:(\d+)\s*d(?:ays?)?\b\s*)?(?:(\d+)\s*h(?:ours?|rs?)?\b\s*)?(?:(\d+)\s*m(?:in(?:utes?|s)?)?\b)?`)
 	// quotaCodes: a vendor's own code for a used-up allowance, which alone
 	// makes a server error (5xx) one over the quota: Claude Code's resets
 	// line, the ChatGPT backend's usage_limit_reached, Google's
 	// RESOURCE_EXHAUSTED. A 5xx's words don't: a relay's 500 "当前模型 …
 	// 负载已经达到上限，请稍后重试" is its load's limit, not the plan's (#1418).
-	quotaCodes = regexp.MustCompile(`(?i)limit reached\|\d{10}\b|usage_limit_reached|RESOURCE_EXHAUSTED`)
+	quotaCodes = lazyre.New(`(?i)limit reached\|\d{10}\b|usage_limit_reached|RESOURCE_EXHAUSTED`)
 	// cutWords: a plugin's own error for the turn its upstream's stream
 	// died mid-call: the model wrote its tool call as text, the text
 	// stopped before the call was whole, and the plugin ends the turn as a
@@ -432,7 +444,7 @@ var (
 	// never named it, twice, before anything of the reply was given — the
 	// model's glitch, not the account's, and asked again it mostly answers
 	// (magpie-community/plugins#579)
-	cutWords = regexp.MustCompile(`(?i)tool call, written as text, was cut short|native tool call has no name; it is not sent on as a tool`)
+	cutWords = lazyre.New(`(?i)tool call, written as text, was cut short|native tool call has no name; it is not sent on as a tool`)
 )
 
 // Why a candidate failed, as rest tells it.
@@ -520,7 +532,7 @@ const reloopedError = "the model's reasoning was stuck in a loop before it said 
 
 // proxyDown is the error Go gives when the proxy itself can't be reached,
 // over HTTP (proxyconnect) or SOCKS (socks connect).
-var proxyDown = regexp.MustCompile(`proxyconnect |socks connect `)
+var proxyDown = lazyre.New(`proxyconnect |socks connect `)
 
 // wordsOf is catalog.Words: an error body as its words are matched, with
 // the strings of a JSON body that escapes what isn't ASCII decoded (#1669).
@@ -554,7 +566,7 @@ func carriedStatus(status int, body []byte) int {
 // failure says why a reply failed.
 func failure(status int, body []byte) string {
 	status = carriedStatus(status, body)
-	if status == http.StatusBadGateway && (proxyDown.Match(body) || bytes.Contains(body, []byte(closedUnsentWords))) {
+	if status == http.StatusBadGateway && (proxyDown.Match(body) || bytes.Contains(body, []byte(closedUnsentWords)) || bytes.Contains(body, []byte(stalledWords))) {
 		// the proxy didn't take the connection, or the network closed
 		// each new one before the request was sent (errClosedUnsent):
 		// nothing reached the vendor, and the account is as good as it
@@ -589,7 +601,8 @@ func failure(status int, body []byte) string {
 		// Standard's pool, which counts some models only, and read as the
 		// account out of credit it rested Droid Core with it (#1979)
 		return failQuota
-	case status == 402, creditWords.Match(body) && (status != 429 || brokeWords.Match(body)) || bytes.Contains(body, []byte("insufficient_quota")):
+	case status == 402, creditWords.Match(body) && (status != 429 || brokeWords.Match(body)),
+		bytes.Contains(body, []byte("insufficient_quota")) && !minuteRate(body):
 		return failCredit
 	case status == 429 && resetsWhen.Match(body):
 		// out until the time it names, in whichever language it said so:
@@ -597,7 +610,7 @@ func failure(status int, body []byte) string {
 		// English one as a rate limit, and each rested its own fallback
 		// (#1669)
 		return failQuota
-	case status == 429 && minuteLimit(body):
+	case status == 429 && minuteRate(body):
 		// a limit per minute, whatever it calls itself: back in a
 		// minute, not a plan used up (minuteWords)
 		return failRate
@@ -620,13 +633,20 @@ func failure(status int, body []byte) string {
 	return failOther
 }
 
-// minuteLimit says a 429's words name a limit per minute or less
+// minuteRate says a 429's words name a limit per minute or less
 // (minuteWords), and nothing longer or spent beside it: no longer window
-// (longWords), no balance spent (brokeWords, insufficient_quota). Words
-// in a link don't count.
-func minuteLimit(body []byte) bool {
+// (longWords), no balance spent (brokeWords). Words in a link don't
+// count. A body carrying the quota code insufficient_quota reads here
+// too when its words say a rate: SenseNova's token-plan gateway answers
+// its throttle with the code beside the type rate_limit_error and the
+// message "inference exceeds tpm/rpm limit" over a pool half up — read
+// from its body it was out of credit, from the words magpie gave the
+// agent a rate limit, and the same text was both the same day (#5006).
+// The code is the gateway's throttle code, not its balance: OpenAI's own
+// out-of-credit (its message names no rate) reads credit as before.
+func minuteRate(body []byte) bool {
 	body = urlWords.ReplaceAll(body, nil)
-	return minuteWords.Match(body) && !longWords.Match(body) && !brokeWords.Match(body) && !bytes.Contains(body, []byte("insufficient_quota"))
+	return minuteWords.Match(body) && !longWords.Match(body) && !brokeWords.Match(body)
 }
 
 // dashScopeTokenRate: DashScope's (Model Studio's) 429 for the tokens
@@ -640,7 +660,7 @@ func minuteLimit(body []byte) bool {
 // month ("hour allocated quota exceeded") and arrears (400 Arrearage) are
 // worded otherwise. OpenAI's own insufficient_quota is out of credit, so
 // this is DashScope's alone.
-var dashScopeTokenRate = regexp.MustCompile(`Allocated quota exceeded, please increase your quota limit|"(?:code|type)"\s*:\s*"insufficient_quota"`)
+var dashScopeTokenRate = lazyre.New(`Allocated quota exceeded, please increase your quota limit|"(?:code|type)"\s*:\s*"insufficient_quota"`)
 
 // dashScopeRate says p is DashScope and its 429 is a rate per minute or
 // second (dashScopeTokenRate), not its free allowance or a plan's window.
@@ -696,7 +716,29 @@ func restrictedRefused(p provider.Provider, status int, body []byte) bool {
 	if restrictedSaid(status, body) {
 		return true
 	}
-	return isWorkBuddy(p) && provider.WBRestricted(status, wordsOf(body))
+	return isWorkBuddy(p) && provider.WBRestricted(status, wordsOf(body)) || googleSuspended(p, status, body)
+}
+
+// googleToS is Google's 403 PERMISSION_DENIED for a Code Assist account it
+// suspended: "This service has been disabled in this account for violation
+// of Terms of Service. Please submit an appeal to continue using this
+// product." (bestony on Discord, an Antigravity account, 11-06).
+var googleToS = lazyre.New(`(?i)disabled in this account for violation of Terms of Service`)
+
+// googleSuspended says Google suspended p, an account signed in to
+// Antigravity or Gemini CLI, for its terms (googleToS): the account, not
+// the model or the request, until an appeal goes through. Read as any
+// failure, it rested a minute, doubling to ten, and was asked again, and
+// refused, every ten minutes for good. Another vendor's same words are its
+// own, and aren't read so.
+func googleSuspended(p provider.Provider, status int, body []byte) bool {
+	if status != http.StatusForbidden {
+		return false
+	}
+	if a := accountAgent(p); a != "antigravity" && a != "gemini" {
+		return false
+	}
+	return googleToS.Match(wordsOf(body))
 }
 
 // isWorkBuddy is whether p is a WorkBuddy account, either build's: the
@@ -759,6 +801,12 @@ type Rest struct {
 	// (GanHei37443 on X: three WorkBuddy accounts each "failed · back in
 	// 16s", and nothing on the row said why)
 	Error string `json:"error,omitempty"`
+	// Rate: the vendor called it a rate (frequency) limit and named when
+	// it lifts (rateUntilSaid). It rests as out of quota until then, and
+	// the app says rate limited, not quota used up: WorkBuddy's "您的使用
+	// 量已超出频率限制，将在 … 重置，您也可以切换其他模型继续使用" rests
+	// one model of an account with credits left (taoxiaoxin on Discord)
+	Rate bool `json:"rate,omitempty"`
 
 	// the subscription account resting, when it is one; agent "" and its
 	// provider.KeyAllowanceID for a key out of its own windows
@@ -781,6 +829,11 @@ type Rest struct {
 	// asked, it answers from its own hold at once, or from what it serves
 	// now
 	there bool
+	// out, outHeader: a ChatGPT account's refusal as the backend gave it
+	// (codexOutRefusal) and its x-codex-* windows, for a turn held on it
+	// (timedHeld) to be told as Codex is told on its own sign-in
+	out       []byte
+	outHeader http.Header
 }
 
 // asksAt is when r, a key's rest out of its allowance or credit, has it
@@ -821,6 +874,9 @@ func renewed(agent, user string) {
 // stands started again in fact, or a reset was spent.
 func restarted(agent, user string) {
 	liftRests(agent, user, true)
+	if agent == "codex" {
+		liftCodexHold(user)
+	}
 }
 
 // liftRests lifts an account's rests out of quota, or of a window read
@@ -993,6 +1049,33 @@ func verifyHeld(c candidate) (string, bool) {
 	return r.said, true
 }
 
+// restrictedHeld is the refusal to give again, without asking, and its
+// status, for a candidate resting as one its vendor restricted
+// (failRestricted), while it rests: whole, or its model alone where that
+// is how it rests (a Remote magpie's model). Left the last one, it was
+// asked by every request all the same, as restLast and probeOne keep one
+// resting member for a request to get a real answer, and refused by every
+// one (leowang on Discord: two Antigravity accounts Google had suspended,
+// 23 and 22 tries, none answered, while the rest was meant to cost one
+// refused request each per restrictedRest). The refusal is the answer:
+// no wait mends it, and the vendor's risk control counts each request
+// against the account. Its rest ending, or lifted on the Routing page,
+// it is asked again.
+func restrictedHeld(c candidate) (int, string, bool) {
+	r, ok := restOf(c.restKey())
+	if !ok && c.restID() != c.restKey() {
+		r, ok = restOf(c.restID())
+	}
+	if !ok || r.Why != failRestricted || r.said == "" {
+		return 0, "", false
+	}
+	status := r.Status
+	if status < 400 {
+		status = http.StatusForbidden
+	}
+	return status, r.said, true
+}
+
 // resetsIn is how long until a used-up ChatGPT account is back, as its
 // refusal says: {"error":{"type":"usage_limit_reached","resets_at":<unix>,
 // "resets_in_seconds":<n>}}. Zero when it doesn't say.
@@ -1045,7 +1128,7 @@ func resetsAt(body []byte, now time.Time) time.Duration {
 // time Z.ai named (Player on Discord: "reset at 2026-10-15 20:12", "not
 // asked again before 17:12"). Only these words, then a whole date and a
 // time to the minute at least, with no digit, colon or zone after it.
-var zhipuResets = regexp.MustCompile(`(?:\bYour limit will reset at|您的限额将在)\s*(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?(\s*\S{0,3})`)
+var zhipuResets = lazyre.New(`(?:\bYour limit will reset at|您的限额将在)\s*(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?(\s*\S{0,3})`)
 
 // heldClock is when a key or model held out of its allowance is asked
 // again, as an error put in words says it. The agent reading it, or a
@@ -1111,7 +1194,7 @@ func resetsZhipu(body []byte, now time.Time) time.Duration {
 // hours and minutes, as Factory's 402 does: "You've reached your weekly
 // standard usage limit (resets in 0h 19min)" (#1979). At least one of
 // them, each a number and its unit, and nothing else between.
-var resetsInWords = regexp.MustCompile(`(?i)\bresets? in (?:(\d+)\s*d(?:ays?)?\b\s*)?(?:(\d+)\s*h(?:ours?|rs?)?\b\s*)?(?:(\d+)\s*m(?:in(?:utes?|s)?)?\b)?`)
+var resetsInWords = lazyre.New(`(?i)\bresets? in (?:(\d+)\s*d(?:ays?)?\b\s*)?(?:(\d+)\s*h(?:ours?|rs?)?\b\s*)?(?:(\d+)\s*m(?:in(?:utes?|s)?)?\b)?`)
 
 // quotaResetAfter: Antigravity's (Google Code Assist's) 429 for a model's
 // allowance used up, which writes how long until it is back as Go prints
@@ -1120,7 +1203,7 @@ var resetsInWords = regexp.MustCompile(`(?i)\bresets? in (?:(\d+)\s*d(?:ays?)?\b
 // an hour of a quota that says nothing, and the account first in order
 // was asked again, and refused, every 15 minutes for the hours or days
 // its quota was out (Dani Ariyanto on Discord, 10-24).
-var quotaResetAfter = regexp.MustCompile(`(?i)\bquota will reset after ((?:\d+h)?(?:\d+m)?(?:\d+(?:\.\d+)?s)?)`)
+var quotaResetAfter = lazyre.New(`(?i)\bquota will reset after ((?:\d+h)?(?:\d+m)?(?:\d+(?:\.\d+)?s)?)`)
 
 // resetsAfter is how long the refusal says until it is back
 // (resetsInWords, quotaResetAfter, soonWords), held to longestWritten. Zero when it
@@ -1142,7 +1225,7 @@ func resetsAfter(body []byte) time.Duration {
 // long until it is back: "try again in 30 seconds", "retry after 20s",
 // "resets in 45 secs", "请 1 分钟后重试", "30秒后再试". The English minutes,
 // hours and days are resetsInWords' and tryAgainIn's.
-var soonWords = regexp.MustCompile(`(?i)\b(?:resets? (?:in|after)|try again in|retry (?:in|after))\s*(\d+(?:\.\d+)?)\s*(?:s|secs?|seconds?)\b|(\d+)\s*(秒|分钟)钟?\s*(?:之?后)`)
+var soonWords = lazyre.New(`(?i)\b(?:resets? (?:in|after)|try again in|retry (?:in|after))\s*(\d+(?:\.\d+)?)\s*(?:s|secs?|seconds?)\b|(\d+)\s*(秒|分钟)钟?\s*(?:之?后)`)
 
 // soonest is the longest a refusal may say it is back in for a 429 to be
 // a rate limit waited out, not a plan used up: as long as a provider's
@@ -1307,6 +1390,12 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 		// request is asked again, and no rest and no failure counted (#2873)
 		return Rest{Why: why, Status: status, By: "off", Until: now}
 	}
+	if c.p.PassesErrors() {
+		// the user leaves its errors to the client (errors=pass): none of
+		// its keys is set aside for one, and the next request is asked
+		// as this one was
+		return Rest{Why: why, Status: status, By: "off", Until: now}
+	}
 	if header.Get(zdrHeader) != "" || zdrRefused(status, body) {
 		// Command Code's Zero Data Retention setting refused the request:
 		// the model and the account are as good as they were, and answer
@@ -1326,6 +1415,13 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 		// connection answered seconds later (#5182). None is set aside
 		// and the failure counts nowhere; the next try goes out on a new
 		// connection (regionFresh)
+		return Rest{Why: why, Status: status, By: "off", Until: now}
+	}
+	if status == http.StatusBadRequest && signatureRefused.Match(wordsOf(body)) {
+		// Google turned a thought signature away as one it didn't give
+		// (signatureRefused): the history's doing, not the account's. A
+		// group that moved from Vertex AI to AI Studio was refused on every
+		// account alike (mimi001234); none is set aside
 		return Rest{Why: why, Status: status, By: "off", Until: now}
 	}
 	if status == http.StatusBadGateway && bytes.Contains(body, []byte(openCodeBare)) {
@@ -1369,6 +1465,9 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	guessed := false
 	// a failure counted past the account's, for its model alone (below)
 	modelBackoff := false
+	// a failure rested by a full window that counts some models only
+	// (below): that model is out, not the account
+	windowModel := false
 	if why == failProxy {
 		// the account is as good as it was; the proxy is the user's to start
 		return r
@@ -1386,6 +1485,15 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	if why == failCredit || why == failQuota {
 		// the vendor's words, for quotaHeld to give again
 		r.said = provider.APIError(body, http.StatusText(status))
+	}
+	if codexOutRefusal(c.p, provider.Responses, status, body) {
+		r.out = append([]byte(nil), body...)
+		r.outHeader = http.Header{}
+		for k, vs := range header {
+			if strings.HasPrefix(strings.ToLower(k), "x-codex-") {
+				r.outHeader[k] = slices.Clone(vs)
+			}
+		}
 	}
 	switch why {
 	case failCredit:
@@ -1490,8 +1598,10 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 			}
 		}
 	case failRestricted:
-		// out until the vendor lifts it: an appeal, not a wait (#1849)
+		// out until the vendor lifts it: an appeal, not a wait (#1849).
+		// Its words, for restrictedHeld to give again while it rests
 		d, r.By = restrictedRest, "restricted"
+		r.said = provider.APIError(body, http.StatusText(status))
 	case failVerify:
 		d, r.By = verifyRest, "verify"
 		// the error as the agent was given it, and the link in it
@@ -1575,6 +1685,15 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 		// until its window reset (plugins#243, zygs1083-dotcom)
 		if t := c.full(now); !t.IsZero() && c.p.Account != nil && !unserved && status != http.StatusUnauthorized && status != http.StatusForbidden {
 			d, r.By, modelBackoff = min(t.Sub(now), longestQuota), "window", false
+			// and when every full window that counts the model counts
+			// some models only (Pooled), the model rests, not the
+			// account: its other models are still in theirs
+			// (plugins#817, zane668: ZCode's GLM-5.3 bucket spent, its
+			// "exceed quota limit" read as a reply that did not stream,
+			// rested the account a day, GLM-5.3-Flash's own bucket with
+			// 71% left with it). A window of the whole account full
+			// rests the account, as before
+			windowModel = c.pooled(now)
 		}
 	}
 	// an account is kept by the agent its usage is asked of: a plugin's
@@ -1607,7 +1726,7 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	// a refusal that names its reset and points to the account's other
 	// models is the model's limit: the others still answer (WorkBuddy's
 	// "您也可以切换其他模型继续使用", #1669)
-	if pooled || unserved || modelBackoff || overloaded || why == failQuota && resetsWhen.Match(wordsOf(body)) && otherModels.Match(wordsOf(body)) {
+	if pooled || unserved || modelBackoff || windowModel || overloaded || why == failQuota && resetsWhen.Match(wordsOf(body)) && otherModels.Match(wordsOf(body)) {
 		id = c.restID()
 	}
 	// Cline's daily limit of one free model is that model's: its others,
@@ -1618,6 +1737,10 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	// a ZCode Start Plan trial entry ended or spent is that entry's: the
 	// account's GLM Coding Plan models still answer (#3661)
 	if why == failQuota && zcodeTrialRefused(c, status, body) {
+		id = c.restID()
+	}
+	// and so is its 3012: zcode.z.ai's, not the GLM Coding Plan's host's
+	if zcodeTrialRestricted(c, why) {
 		id = c.restID()
 	}
 	// a relay's 429 that names the model whose credentials cooled down is
@@ -1643,6 +1766,7 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	if id == c.restID() {
 		r.Model = c.model
 	}
+	r.Rate = rateUntilSaid(why, r.By, body)
 	r.Probed = probeable(c, r, header, now) && !probeMissed(id, now)
 	restingUntil.Lock()
 	if why == failQuota || why == failCredit {
@@ -1691,6 +1815,14 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 		go narrowWhenRead(c, r)
 	}
 	return r
+}
+
+// rateUntilSaid says a refusal read as out of quota until the time it
+// names (by "resets") calls itself a rate or frequency limit (rateWords,
+// words in a link apart): the app words its rest as rate limited, with
+// that time. How long it rests, and what it rests, are a quota's.
+func rateUntilSaid(why, by string, body []byte) bool {
+	return why == failQuota && by == "resets" && rateWords.Match(urlWords.ReplaceAll(wordsOf(body), nil))
 }
 
 // vendorOverloaded says a failure is the vendor's servers too busy for
@@ -1805,6 +1937,13 @@ func backingOff(key string, now time.Time) bool {
 	return ok && now.Before(until) && restingUntil.note[key].Why == failOther
 }
 
+// vendorSaidWhen says whether a 429's headers or body name a time it is
+// limited till, as rateRest reads them.
+func vendorSaidWhen(header http.Header, body []byte) bool {
+	now := time.Now()
+	return max(retryAfter(header, now), resetsNoted(header, now), resetsAt(body, now)) > 0
+}
+
 // rateRest is how long a rate-limited candidate sits out: as long as the
 // vendor says (Retry-After, a reset header or a reset time in its error),
 // and a minute when it says nothing. One limited again as soon as its rest
@@ -1859,10 +1998,12 @@ func (s *Server) rateRest(c candidate, header http.Header, body []byte, sharedPo
 // (usedShare), except In order: there an account at 98% is still tried in
 // its turn, and one that fails then isn't benched until its week renews
 // unless the vendor said it was out (#530). A Codex account that goes on
-// on its credits is never: a window used up doesn't stop it (onCredits).
+// on its credits is never: a window used up doesn't stop it (onCredits);
+// nor is a key whose vendor goes on past its windows on a balance it
+// holds (Kimi Code's booster, #5721).
 func (c candidate) full(now time.Time) time.Time {
 	a, _ := c.allowance()
-	if spendsCredits(c.p, a) {
+	if spendsCredits(c.p, a) || c.p.Account == nil && a.OnCredits() {
 		return time.Time{}
 	}
 	return a.Full(c.model, provider.SpentShareOf(c.p.Routing), now)
@@ -1979,6 +2120,19 @@ func keepRetryOut(dst, src http.Header, body []byte) {
 // keyLimitThereHeader carries, from keepRetry to restAfter, that another
 // magpie refused with its gateway key's own limit (remoteKeyLimitHeader).
 const keyLimitThereHeader = "X-Magpie-Key-Limit-There"
+
+// routedThere says a failure was another magpie's (a Remote magpie's)
+// answer after its own routing had its turn: its same-one retries, its
+// patience and its group's other members, which it was asked in full
+// (answeredThereHeader). Asked again from here, every one of them ran
+// again: one agent request sent the vendor 35 asks over 174s where the
+// remote alone would have made 7 over 33s (YeYaka88 on X). It isn't asked
+// again by this magpie's same-one retries or patience; this magpie's own
+// other members still are, and a remote that couldn't be reached, or
+// refused before routing (its key, its limit), is asked again as before.
+func routedThere(header http.Header) bool {
+	return header.Get(answeredThereHeader) != ""
+}
 
 // answeredThereHeader carries, from keepRetry to restAfter, the provider
 // another magpie named on its refusal (providerHeader): the refusal is
@@ -2123,9 +2277,12 @@ type left struct {
 	// (Allowance.Fullest), zero when not known
 	fullest time.Time
 	soon    []time.Time // renews as Smart ranks them (Allowance.Renewal)
-	lapse   time.Time   // when the soonest of what is left is lost (Allowance.Lapse)
-	pace    float64     // weekly pace: share of its week left per hour until it renews
-	due     time.Time   // when the window that pace went by renews; zero when not known
+	// unreached: how many of soon's windows Smart passes over, as they
+	// can't be used up before they renew any more (Allowance.Unreached)
+	unreached int
+	lapse     time.Time // when the soonest of what is left is lost (Allowance.Lapse)
+	pace      float64   // weekly pace: share of its week left per hour until it renews
+	due       time.Time // when the window that pace went by renews; zero when not known
 	// restarts: when an auto-used reset starts its windows again
 	// (Allowance.Restarts), zero when none will; dueRestart: due is that,
 	// sooner than the window renews by itself; dueExpiry: due is when
@@ -2148,10 +2305,26 @@ type left struct {
 }
 
 // learns: c is a subscription whose allowance isn't known yet, of an agent
-// that tells it as it answers (Claude Code's rate_limit_event).
+// that tells it as it answers (Claude Code's rate_limit_event; a ChatGPT
+// account's x-codex-* headers, provider.NoteCodexLimits). A Codex account
+// only while it hasn't answered lately (codexAnswered): its reply makes it
+// known when it tells the week, and one that told nothing isn't sent
+// every request first. Not known and kept after those known, an account
+// whose usage can't be read was never sent one, under Use before expiry
+// (a whole week ahead of it) and Smart alike (peterpark8527 on Discord).
 func learns(c candidate, lefts map[allowanceKey]left) bool {
-	_, known := lefts[c.allowanceKey()]
-	return !known && c.p.Account != nil && c.p.Account.Agent == "claude"
+	if _, known := lefts[c.allowanceKey()]; known || c.p.Account == nil {
+		return false
+	}
+	switch c.p.Account.Agent {
+	case "claude":
+		return true
+	case "codex":
+		// only behind one known: of accounts none known, the order stands,
+		// and no week is started before it is needed
+		return len(lefts) > 0 && !codexAnsweredLately(c.p.Account.UsageAgent(), c.p.Account.User, time.Now())
+	}
+	return false
 }
 
 // weigh orders one provider's candidates as its routing says, and tells
@@ -2226,7 +2399,7 @@ func weighRouted(p provider.Provider, cs []candidate, model string, from provide
 			pc, due := a.Pace(c.model, now)
 			amt, of, unit := a.Count(c.model, now)
 			rs := a.Restarts(now)
-			l := left{used: u, renews: r, fullest: a.Fullest(c.model, now), soon: a.Renewal(c.model, now), lapse: a.Lapse(c.model, now), pace: pc, due: due, amount: amt, of: of, unit: unit,
+			l := left{used: u, renews: r, fullest: a.Fullest(c.model, now), soon: a.Renewal(c.model, now), unreached: a.Unreached(c.model, now), lapse: a.Lapse(c.model, now), pace: pc, due: due, amount: amt, of: of, unit: unit,
 				restarts: rs, dueRestart: !rs.IsZero() && due.Equal(rs), credits: spendsCredits(c.p, a)} // one not known counts as unused
 			l.dueExpiry = !l.dueRestart && !l.lapse.IsZero() && due.Equal(l.lapse)
 			l.weekLow = u >= lowShare && u < usedShare && a.CapUsed(c.model, now) < lowShare
@@ -2257,8 +2430,8 @@ func weighRouted(p provider.Provider, cs []candidate, model string, from provide
 			pace = provider.FreshPace
 		}
 		seats[i] = routes.Seat{Key: c.rest, Account: c.p.Account != nil, Known: known, Learns: learns(c, wg.lefts),
-			Used: l.used, WeekLow: l.weekLow, Soon: l.soon, Lapse: l.lapse, Pace: pace, Weight: keyWeight(c), Resting: resting(c), Tokens: routed.used[c.restKey()].now(now), Credits: l.credits, First: l.first,
-			Left: l.bal, LeftIn: l.balIn, Spent: spentRest(c)}
+			Used: l.used, WeekLow: l.weekLow, Soon: l.soon, Unreached: l.unreached, Lapse: l.lapse, Pace: pace, Weight: keyWeight(c), Resting: resting(c), Tokens: routed.used[c.restKey()].now(now), Credits: l.credits, First: l.first,
+			Left: l.bal, LeftIn: l.balIn, Spent: spentRest(c), Lead: c.p.UseFirst}
 	}
 	routed.Unlock()
 	if st.ByUse {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -19,6 +18,7 @@ import (
 	"github.com/yetone/magpie/internal/desktopdir"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -177,7 +177,7 @@ const claudeEffortEnv = "CLAUDE_CODE_EFFORT_LEVEL"
 // claudeNameRe finds the Claude model an id names, as Claude Code matches it
 // to its settings: claude-opus-5-5 in claude-opus-5-5[1m], in a dated id or
 // under a provider's prefix (anthropic/…).
-var claudeNameRe = regexp.MustCompile(`claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?(?:[^0-9]|$)`)
+var claudeNameRe = lazyre.New(`claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?(?:[^0-9]|$)`)
 
 // claudeName is the Claude model a model id names, "" for another vendor's,
 // an alias (opus) or none. A version written with a dot (claude-opus-4.6)
@@ -217,9 +217,10 @@ func claudeEffortsFor(model string) []string {
 
 // claudeTopEffort is the models the effortLevel at the top of the user's
 // settings.json applies to: Opus 5, Fable 5.1 and those before them. Opus
-// 5.5 and every Claude model after it (any Claude Code doesn't know) read
-// only modelSettings.<model>.effortLevel (2.1.251 on); another vendor's
-// reads the top one.
+// 5.5, Fable 5.2 and every Claude model after them (any Claude Code doesn't
+// know) read only modelSettings.<model>.effortLevel (2.1.251 on; 2.1.321's
+// list of models that read the top one ends at Fable 5.1 and Mythos 5.1);
+// another vendor's reads the top one.
 var claudeTopEffort = []string{
 	"claude-opus-4", "claude-sonnet-4", "claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5",
 	"claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-7", "claude-opus-4-8",
@@ -300,13 +301,17 @@ const claudeCapsEnv = "CLAUDE_CODE_MODEL_CAPABILITIES"
 
 // claudeReviewEnv is whether Claude Code's auto mode asks the API to review
 // its actions (the dangerous-tool-use beta and `safeguards`), "0" for no.
-// Behind a gateway whose model doesn't answer, it classifies locally anyway
-// and names the gateway in a notice, "this session isn't eligible because
-// your requests go through 127.0.0.1:3425…" (1EFLOPS on X, Claude Code on
-// Codex). Anthropic's page on it says to set it to 0 for a gateway that
-// can't run the checks: magpie does while none of the models Claude Code
-// can reach through it is reviewed (claudeReviewed), and leaves it unset
-// while one is. One the user set is theirs.
+// Behind a gateway whose model doesn't answer, 2.1.316 and earlier
+// classified locally anyway and named the gateway in a notice ("this
+// session isn't eligible because your requests go through
+// 127.0.0.1:3425…", 1EFLOPS on X). 2.1.322, with its telemetry or
+// feature flags off, refuses every action the check would judge instead
+// ("Auto mode can't check actions in this session", JoyYoung2Lucky on X),
+// a Claude model's on a relay too, unless this is "0"
+// (gateway/automode.go). Anthropic's page on it says to set it to 0 for a
+// gateway that can't run the checks: magpie does unless every model Claude
+// Code can reach through it surely answers the review (claudeReviewed),
+// and leaves it unset while each does. One the user set is theirs.
 const claudeReviewEnv = "CLAUDE_CODE_AUTO_MODE_SERVER"
 
 // claudeSearchEnv turns Claude Code's tool search on: MCP tools are named
@@ -326,52 +331,70 @@ const claudeSearchEnv = "ENABLE_TOOL_SEARCH"
 // Desktop is on magpie, without forcing other subagents onto a model.
 const claudeExploreEnv = "CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP"
 
-// claudeReviewed reports whether a model Claude Code can reach through
-// magpie has its actions reviewed by Anthropic (gateway.AutoModeReviewable:
-// a Claude model asked on the Messages API, not translated):
-// one shown to the agents in catalogs (Claude Code, Claude Desktop whose
-// Code tab is Claude Code, T3 Code's instance of it), a routing group's
-// member, a provider's fallback, or one of models (those it is set to),
-// judged where it resolves to.
-// Any such keeps the review on, as /model can take a session there.
+// claudeReviewed reports whether every model Claude Code can reach
+// through magpie has its actions reviewed, the results coming back
+// (gateway.AutoModeAnswered: a Claude model on Anthropic's own API or the
+// Claude subscription): each one shown to the agents in catalogs (Claude
+// Code, Claude Desktop whose Code tab is Claude Code, T3 Code's instance of
+// it), each member of a routing group, each provider's fallback, and each
+// of models (those it is set to), judged where it resolves to. One that
+// isn't turns the review off, as /model can take a session there, and
+// 2.1.322 with its telemetry off then has no check at all.
 func claudeReviewed(catalogs []string, models ...string) bool {
 	var entries []provider.Entry
 	for _, c := range catalogs {
 		shown, _ := provider.CatalogFor(c)
 		entries = append(entries, shown...)
 	}
-	reviewed := func(p provider.Provider, model string) bool {
-		if gateway.AutoModeReviewable(p, model) {
-			return true
+	answered := func(p provider.Provider, model string) bool {
+		if !gateway.AutoModeAnswered(p, model) {
+			return false
 		}
-		return slices.ContainsFunc(provider.FallbackModels(p), func(m provider.Member) bool {
-			return gateway.AutoModeReviewable(m.Provider, m.Model)
+		return !slices.ContainsFunc(provider.FallbackModels(p), func(m provider.Member) bool {
+			return !gateway.AutoModeAnswered(m.Provider, m.Model)
 		})
+	}
+	every := func(ms []provider.Member) bool {
+		return len(ms) > 0 && !slices.ContainsFunc(ms, func(m provider.Member) bool { return !answered(m.Provider, m.Model) })
 	}
 	find := provider.GroupFinder()
 	for _, e := range entries {
 		if e.Group == "" {
-			if reviewed(e.Provider, e.Model) {
-				return true
+			if !answered(e.Provider, e.Model) {
+				return false
 			}
 			continue
 		}
-		_, ms, _ := find(e.ID)
-		if slices.ContainsFunc(ms, func(m provider.Member) bool { return reviewed(m.Provider, m.Model) }) {
-			return true
+		if _, ms, _ := find(e.ID); !every(ms) {
+			return false
 		}
 	}
-	return slices.ContainsFunc(models, func(id string) bool {
+	judged := 0
+	for _, id := range models {
+		if id == "" {
+			// a slot Claude Code isn't set to (no small model, say)
+			continue
+		}
+		judged++
 		if _, ms, ok := find(id); ok {
-			return slices.ContainsFunc(ms, func(m provider.Member) bool { return reviewed(m.Provider, m.Model) })
+			if !every(ms) {
+				return false
+			}
+			continue
 		}
 		if p, m, ok := provider.Resolve(id); ok {
-			return reviewed(p, m)
+			if !answered(p, m) {
+				return false
+			}
+			continue
 		}
 		// Not one magpie knows: judged by its name, as the gateway would
 		// judge a request for it.
-		return gateway.AutoModeReviewed(provider.Provider{}, id)
-	})
+		if !gateway.AutoModeReviewed(provider.Provider{}, id) {
+			return false
+		}
+	}
+	return len(entries)+judged > 0
 }
 
 // claudeCapsMax bounds claudeCapsEnv: the models Claude Code is set to go
@@ -429,10 +452,14 @@ func claudeCapabilities(first []string, own, desktop bool) string {
 	}
 	if desktop {
 		shown, _ := provider.CatalogFor("claude-desktop")
+		again := gateway.DesktopTierAliases()
 		for _, e := range shown {
-			// one named as a Claude model Claude Code knows on its own
-			if id := gateway.DesktopID(e); claudeName(id) == "" {
-				add(id, e.Efforts)
+			// one named as a Claude model Claude Code knows on its own;
+			// a model picked for two tiers is listed for the second too
+			for _, id := range append([]string{gateway.DesktopID(e)}, again[e.ID]...) {
+				if claudeName(id) == "" {
+					add(id, e.Efforts)
+				}
 			}
 		}
 	}
@@ -1167,8 +1194,8 @@ func claudeIn(at place) *Agent {
 		}
 		return nil
 	}
-	// writeReview turns the review off while no model Claude Code can reach
-	// through magpie runs it, and back on (unset) once one does
+	// writeReview turns the review off while a model Claude Code can reach
+	// through magpie doesn't answer it, and back on (unset) once each does
 	writeReview := func(models ...string) error {
 		if rawEnv(claudeReviewEnv) != "" && !reviewOurs() {
 			forget(reviewKey)
@@ -1251,9 +1278,12 @@ func claudeIn(at place) *Agent {
 		if desktopOn() {
 			shown, _ := provider.CatalogFor("claude-desktop")
 			behaves, _ := gateway.DesktopBehavesAs()
+			again := gateway.DesktopTierAliases()
 			for _, e := range shown {
-				if id := gateway.DesktopID(e); claudeName(id) == "" {
-					models = append(models, claudeBudget{id: id, window: e.Context, long: gateway.DesktopListed1M(e), compact: work(e.ID), behaves: behaves[id] != ""})
+				for _, id := range append([]string{gateway.DesktopID(e)}, again[e.ID]...) {
+					if claudeName(id) == "" {
+						models = append(models, claudeBudget{id: id, window: e.Context, long: gateway.DesktopListed1M(e), compact: work(e.ID), behaves: behaves[id] != ""})
+					}
 				}
 			}
 		}
@@ -2254,6 +2284,7 @@ func claudeIn(at place) *Agent {
 		Bin: "claude", Dir: filepath.Dir(path), Path: path,
 		Fields:       fields,
 		ModelAliases: claudeAliases,
+		Telemetry:    claudeTelemetry(at, path),
 		// Claude Code as it was before magpie: its default puts it back as
 		// installed, on Anthropic's endpoint, where this brings back the
 		// endpoint, token and model the user had
@@ -2424,9 +2455,11 @@ func claudeIn(at place) *Agent {
 			}
 			return wiringOff("Claude Code", path, getEnv, "ANTHROPIC_AUTH_TOKEN", at.gwKey())
 		},
-		// every prompt typed into Claude Code goes into history.jsonl
+		// every prompt typed into Claude Code goes into history.jsonl, and
+		// so does every one magpie's bridge gives it in magpie's own work
+		// folder, which went through magpie (ifccod7391564 on X)
 		LastUsed: func() time.Time {
-			return lastJSONLTime(filepath.Join(filepath.Dir(path), "history.jsonl"), "timestamp", "display")
+			return lastJSONLTime(filepath.Join(filepath.Dir(path), "history.jsonl"), "timestamp", "display", inMagpieWork)
 		},
 		// a session takes a new CLAUDE_CODE_EFFORT_LEVEL on its next
 		// request, but settings.json's effort and ultracode, and the env's
@@ -2852,7 +2885,12 @@ func StandIn(agent, model string) string {
 		// a Codex in a WSL distro is known by the same client
 		return wslCodexStandIn()
 	}
-	if m := claudeStandIn(filepath.Join(here(home).claudeDir(), "settings.json"), model); m != "" || runtime.GOOS != "windows" {
+	if m := claudeStandIn(filepath.Join(here(home).claudeDir(), "settings.json"), model); m != "" {
+		return m
+	}
+	// a claude-magpie session, its settings.json not on magpie, is on
+	// the launch file's models (claude_launch.go)
+	if m := claudeLaunchStandIn(model); m != "" || runtime.GOOS != "windows" {
 		return m
 	}
 	// a Claude Code in WSL is known by the same User-Agent
@@ -3068,4 +3106,18 @@ const claudeCustomOptionEnv = "ANTHROPIC_CUSTOM_MODEL_OPTION"
 func claudeNarrowed() bool {
 	_, hidden := provider.CatalogFor("claude")
 	return len(hidden) > 0
+}
+
+// inMagpieWork: a line of Claude Code's history.jsonl is a prompt magpie's
+// bridge gave it, in magpie's own work folder (os.TempDir()'s
+// magpie-claude-work, magpie-claude-work-<uid> off Windows), whatever the
+// path to it (/private/var/… on a Mac, C:/… or a WSL mount on Windows).
+func inMagpieWork(m map[string]json.RawMessage) bool {
+	var project string
+	if json.Unmarshal(m["project"], &project) != nil {
+		return false
+	}
+	base := strings.TrimRight(project, `/\`)
+	base = base[strings.LastIndexAny(base, `/\`)+1:]
+	return base == "magpie-claude-work" || strings.HasPrefix(base, "magpie-claude-work-")
 }

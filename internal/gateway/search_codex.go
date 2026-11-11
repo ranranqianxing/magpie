@@ -11,7 +11,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -86,9 +85,7 @@ var codexSearchRule = "\n" + strings.Repeat("-", 80) + "\n"
 // codexSearchBy searches with a ChatGPT account: by the backend's search,
 // then, when it fails, by the account's small model.
 func (s *Server) codexSearchBy(ctx context.Context, p provider.Provider, query string) (string, []Hit, error) {
-	start := time.Now()
-	said, hits, err := s.codexSearch(ctx, p, query)
-	logOwnSearch(ctx, p, provider.CodexBase, query, start, len(hits), err)
+	said, hits, err := s.askOwnSearch(ctx, p, provider.CodexBase, query, s.codexSearch)
 	if err == nil || ctx.Err() != nil {
 		return said, hits, err
 	}
@@ -142,6 +139,7 @@ func (s *Server) codexSearch(ctx context.Context, p provider.Provider, query str
 		return "", nil, errors.New(who + why)
 	}
 	res, err := s.client.Do(r)
+	res = tapSearch(ctx, r, body, res)
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", nil, fmt.Errorf("%sno answer in time", who)
@@ -162,7 +160,7 @@ func (s *Server) codexSearch(ctx context.Context, p provider.Provider, query str
 	if err := json.Unmarshal(b, &out); err != nil || out.Output == nil {
 		return "", nil, fmt.Errorf("%sunexpected reply: %s", who, provider.APIError(b, res.Status))
 	}
-	pages := codexPages(*out.Output, out)
+	pages := codexPages(*out.Output, out, searchCount(ctx))
 	if len(pages) == 0 {
 		return "", nil, fmt.Errorf("%s%w", who, errFoundNothing)
 	}
@@ -176,7 +174,7 @@ func (s *Server) codexSearch(ctx context.Context, p provider.Provider, query str
 // then what the page says, and a rule of 80 dashes before the next. The
 // results name each page's title and address by its ref_id, which the
 // mark carries.
-func codexPages(output string, out codexSearchReply) []foundPage {
+func codexPages(output string, out codexSearchReply, n int) []foundPage {
 	type result struct{ title, url, snippet string }
 	byRef := map[string]result{}
 	for _, x := range out.Results {
@@ -219,7 +217,7 @@ func codexPages(output string, out codexSearchReply) []foundPage {
 			title = link
 		}
 		pages = append(pages, foundPage{Title: title, URL: link, Text: clipText(searchPlain(strings.Map(dropPrivateUse, text)), pageText)})
-		if len(pages) == searchHits {
+		if len(pages) == n {
 			break
 		}
 	}

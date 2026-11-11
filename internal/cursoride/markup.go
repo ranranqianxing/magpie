@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // DeepSeek V4 writes a tool call in the reply text, and a relay that also
@@ -20,13 +21,13 @@ import (
 
 var (
 	dsmlTag    = `<\s*/?\s*[|｜][\s|｜]*DSML[\s|｜]*`
-	dsmlInvoke = regexp.MustCompile(`<\s*[|｜][\s|｜]*DSML[\s|｜]*invoke\s+name\s*=\s*"([^"]+)"\s*>`)
-	dsmlParam  = regexp.MustCompile(`(?s)<\s*[|｜][\s|｜]*DSML[\s|｜]*parameter\s+name\s*=\s*"([^"]+)"((?:\s+\w+\s*=\s*"[^"]*")*)\s*>(.*?)` + dsmlTag + `parameter\s*>`)
-	dsmlString = regexp.MustCompile(`string\s*=\s*"true"`)
-	paramHead  = regexp.MustCompile(`^\s*\{\s*"name"\s*:\s*"([^"]+)"\s*\}?\s*>?`)
-	paramOpen  = regexp.MustCompile(`^\s*<parameter(?:\s+name\s*=\s*"([^"]+)"|=([^\s>]+))\s*>`)
-	glmPair    = regexp.MustCompile(`(?s)^\s*<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>`)
-	glmName    = regexp.MustCompile(`^\s*([^\s<>{}"]+)\s*`)
+	dsmlInvoke = lazyre.New(`<\s*[|｜][\s|｜]*DSML[\s|｜]*invoke\s+name\s*=\s*"([^"]+)"\s*>`)
+	dsmlParam  = lazyre.New(`(?s)<\s*[|｜][\s|｜]*DSML[\s|｜]*parameter\s+name\s*=\s*"([^"]+)"((?:\s+\w+\s*=\s*"[^"]*")*)\s*>(.*?)` + dsmlTag + `parameter\s*>`)
+	dsmlString = lazyre.New(`string\s*=\s*"true"`)
+	paramHead  = lazyre.New(`^\s*\{\s*"name"\s*:\s*"([^"]+)"\s*\}?\s*>?`)
+	paramOpen  = lazyre.New(`^\s*<parameter(?:\s+name\s*=\s*"([^"]+)"|=([^\s>]+))\s*>`)
+	glmPair    = lazyre.New(`(?s)^\s*<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>`)
+	glmName    = lazyre.New(`^\s*([^\s<>{}"]+)\s*`)
 )
 
 type writtenArgs struct {

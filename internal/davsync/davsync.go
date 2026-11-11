@@ -98,6 +98,14 @@ type Config struct {
 	// itself: 0 is Every's 3, Manual never — then only Sync now syncs
 	// (#847). Set by SetAuto alone; Configure keeps it.
 	AutoEvery int `json:"autoEvery,omitempty"`
+	// FollowServer is this computer following the setup on the server
+	// rather than syncing both ways (Ramon317317 on X: one computer the
+	// others all take theirs from). Each sync brings in every part that
+	// changed on either side since the last one, and nothing goes up: a
+	// change made here is replaced, a copy of it kept in the sync folder
+	// and named in a notice. The computer the others follow keeps syncing
+	// both ways. Set by SetFollowServer alone; Configure keeps it.
+	FollowServer bool `json:"followServer,omitempty"`
 }
 
 // Manual is AutoEvery's never: sync runs only when asked.
@@ -191,6 +199,10 @@ type Notice struct {
 	Here  []string  `json:"here,omitempty"`  // this computer's parts, replaced by the server's
 	There []string  `json:"there,omitempty"` // the server's parts, replaced by this computer's
 	Saved string    `json:"saved,omitempty"` // the folder the replaced copies are kept in
+	// Followed is that the parts in Here were changed here and replaced
+	// because this computer follows the server (Config.FollowServer), not
+	// because the server's were newer
+	Followed bool `json:"followed,omitempty"`
 	// Restored is a Restore's notice: Here are the parts it brought in,
 	// what was here before kept in Saved, which Undo brings back
 	Restored bool `json:"restored,omitempty"`
@@ -336,7 +348,8 @@ func Configure(c Config) error {
 			if old.Other != nil {
 				c.Servers[strings.ToLower(old.Other.config().Kind())] = *old.Other
 			}
-			c.AutoEvery = old.AutoEvery // SetAuto's, not the form's
+			c.AutoEvery = old.AutoEvery       // SetAuto's, not the form's
+			c.FollowServer = old.FollowServer // SetFollowServer's, not the form's
 			if old.Kind() != c.Kind() {
 				o := old.where()
 				c.Other = &o
@@ -504,6 +517,9 @@ type View struct {
 	// Auto is how many minutes apart it syncs by itself; 0 never: only when
 	// asked
 	Auto int `json:"auto"`
+	// FollowServer is whether this computer takes the server's setup and
+	// sends none of its own (Config.FollowServer)
+	FollowServer bool `json:"followServer,omitempty"`
 	// Undo is whether the last Restore can be undone
 	Undo bool `json:"undo,omitempty"`
 	// File is what the server holds instead of a backup, when Error is
@@ -540,7 +556,7 @@ func Status() View {
 	v := View{On: true, URL: c.URL, User: c.User, PasswordSet: c.Password != "", PassphraseSet: c.Passphrase != "",
 		Keys: c.Keys, Agents: c.Agents, Library: c.library(), Error: st.Error, Notice: st.Notice,
 		Kind: strings.ToLower(c.Kind()), Endpoint: c.Endpoint, Region: c.Region, PathStyle: c.PathStyle, Branch: c.Branch,
-		Auto: int(c.auto() / time.Minute)}
+		Auto: int(c.auto() / time.Minute), FollowServer: c.FollowServer}
 	if st.Key == stateKey(c) {
 		v.Last = st.Last
 		v.Undo = st.Undo != "" && isFile(st.Undo)
@@ -842,10 +858,14 @@ func hashes(b backup.Bundle) map[string]string {
 	settingsHash := h(s)
 	if b.GatewayKeys != nil { // a missing store keeps older bundles' hash
 		settingsHash = h([]any{s, *b.GatewayKeys})
+		if b.AccountGroups != nil { // nor do older bundles without groups
+			settingsHash = h([]any{s, *b.GatewayKeys, *b.AccountGroups})
+		}
 	}
 	ps := slices.Clone(b.Providers)
 	for i := range ps { // this computer's own: kept by Mirror, never synced
 		ps[i].KeepLogin, ps[i].KeepLoginAs, ps[i].SwitchOnly, ps[i].RestartApp = false, "", false, false
+		ps[i].KeepSelf = false
 	}
 	providers := []any{ps, b.Icons, b.Groups}
 	if b.Searches != nil && len(*b.Searches) > 0 { // as before them, without one
@@ -866,6 +886,11 @@ func hashes(b backup.Bundle) map[string]string {
 		c.Subagents = nil
 		lib = &c
 	}
+	if lib != nil && lib.Hooks != nil && len(*lib.Hooks) == 0 { // as before them, without one
+		c := *lib
+		c.Hooks = nil
+		lib = &c
+	}
 	out := map[string]string{
 		"providers": h(providers),
 		"settings":  settingsHash,
@@ -877,6 +902,52 @@ func hashes(b backup.Bundle) map[string]string {
 		out["signins"] = h(b.SignIns.Hashes())
 	}
 	return out
+}
+
+// unset says whether b holds nothing of its own in part p: no provider
+// or routing group, settings as a new magpie has them, no profile, a
+// library with nothing in it. A computer joining a folder whose file's
+// part is unset is joining a folder whose first writer had none of that
+// part, not one where it was removed (#5642): a part is said unset only
+// when nothing a user made is in it, so a part with anything in it is
+// merged as before. The agents' part is never unset: it holds the models
+// every installed agent reads as it is now, set up or not.
+func unset(b backup.Bundle, p string) bool {
+	switch p {
+	case "providers":
+		return len(b.Providers) == 0 && len(b.Groups) == 0
+	case "settings":
+		var s settings.Settings
+		if b.Settings != nil {
+			s = *b.Settings
+		}
+		d := settings.Defaults()
+		s.KeepOwn(settings.Settings{})
+		d.KeepOwn(settings.Settings{})
+		j, _ := json.Marshal(s)
+		dj, _ := json.Marshal(d)
+		return bytes.Equal(j, dj)
+	case "profiles":
+		return len(b.Profiles) == 0
+	case "library":
+		l := b.Library
+		if l == nil {
+			return false // from a magpie before the library went: handled apart
+		}
+		for _, t := range l.Texts {
+			if strings.TrimSpace(t) != "" {
+				return false
+			}
+		}
+		for _, t := range l.Extra {
+			if strings.TrimSpace(t) != "" {
+				return false
+			}
+		}
+		return len(l.MCP) == 0 && len(l.Skills) == 0 &&
+			(l.Subagents == nil || len(*l.Subagents) == 0) && (l.Hooks == nil || len(*l.Hooks) == 0)
+	}
+	return false
 }
 
 func orEmpty[V any](m map[string]V) map[string]V {
@@ -925,15 +996,13 @@ func take(to *backup.Bundle, from backup.Bundle, part string) {
 		}
 		searches := from.Searches
 		if searches != nil && !keys && (to.Keys || (to.ProvidersKeys != nil && *to.ProvidersKeys)) && to.Searches != nil { // the same for the search APIs
-			keys := map[string]string{}
+			keys := map[string]provider.SearchAPI{}
 			for _, a := range *to.Searches {
-				keys[a.Vendor] = a.Key
+				keys[a.Vendor] = a
 			}
 			ss := slices.Clone(*searches)
 			for i, a := range ss {
-				if a.Key == "" {
-					ss[i].Key = keys[a.Vendor]
-				}
+				ss[i].KeepKeysOf(keys[a.Vendor]) // those switched off too
 			}
 			searches = &ss
 		}
@@ -949,6 +1018,7 @@ func take(to *backup.Bundle, from backup.Bundle, part string) {
 			copy := *s
 			copy.LANKey, copy.LANKeyID = to.Settings.LANKey, to.Settings.LANKeyID
 			copy.GitHubToken = to.Settings.GitHubToken
+			copy.BarkKey = to.Settings.BarkKey
 			copy.OTel.Headers = nil
 			if strings.TrimRight(strings.TrimSpace(copy.OTel.Endpoint), "/") == to.Settings.OTel.Endpoint {
 				copy.OTel.Headers = to.Settings.OTel.Headers
@@ -960,6 +1030,9 @@ func take(to *backup.Bundle, from backup.Bundle, part string) {
 		}
 		if keys && from.GatewayKeys != nil {
 			to.GatewayKeys = from.GatewayKeys // an explicit empty store clears it
+		}
+		if keys && from.AccountGroups != nil {
+			to.AccountGroups = from.AccountGroups
 		}
 		to.SettingsKeys = backup.Flag(keys || (to.SettingsKeys != nil && *to.SettingsKeys))
 	case "profiles":
@@ -998,6 +1071,9 @@ func changed(part string, keys bool) time.Time {
 		m := mtime(settings.Path())
 		if k := mtime(access.Path()); keys && k.After(m) {
 			m = k
+		}
+		if g := mtime(access.GroupsPath()); keys && g.After(m) {
+			m = g
 		}
 		return m
 	case "profiles":
@@ -1086,6 +1162,18 @@ func bring(b backup.Bundle, part string) error {
 // This runs on the first sync alone: afterwards absence from a store this
 // computer has seen means a removal, which must go from every computer.
 func keepUnseenGatewayKeys(remote *backup.Bundle, local backup.Bundle) {
+	// the account groups this computer's keys may name, by id, the same
+	// way (LeiWang_2000 on X): one the folder holds is the folder's
+	if local.AccountGroups != nil && len(*local.AccountGroups) > 0 {
+		if remote.AccountGroups == nil {
+			remote.AccountGroups = &[]access.AccountGroup{}
+		}
+		for _, g := range *local.AccountGroups {
+			if !slices.ContainsFunc(*remote.AccountGroups, func(o access.AccountGroup) bool { return o.ID == g.ID }) {
+				*remote.AccountGroups = append(*remote.AccountGroups, g)
+			}
+		}
+	}
 	if local.GatewayKeys == nil || len(*local.GatewayKeys) == 0 || remote.GatewayKeys == nil {
 		return
 	}
@@ -1183,6 +1271,9 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 		remember(sealed)
 		return nil
 	}
+	if data == nil && c.FollowServer {
+		return errNothingToFollow
+	}
 	if data == nil { // nothing there yet: this computer's setup is the first
 		if err := push(local, "", blind{}); err != nil {
 			return err
@@ -1226,7 +1317,9 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 		// damaged file's ETag as the version to replace, so the push is
 		// still checked against the server and another computer's parts
 		// survive the way they would on any sync.
-		if !errors.Is(err, backup.ErrCorrupt) || st.Local == nil {
+		// A computer following the server never writes it, a rebuild
+		// included: the computer it follows, or Upload, replaces the file.
+		if !errors.Is(err, backup.ErrCorrupt) || st.Local == nil || c.FollowServer {
 			return described(c, data, err)
 		}
 		good := cached(st.Sum) // the version this computer last read whole
@@ -1274,12 +1367,38 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 		}
 		lc := !first && L[p] != st.Local[p]
 		rc := first || R[p] != st.Remote[p]
+		if c.FollowServer {
+			// following the server: what changed on either side is the
+			// server's, a change here kept aside first. A part the server's
+			// file holds nothing of on joining is left as it is here
+			// (#5642): nothing has been set there to follow yet.
+			if remote.Library == nil && p == "library" || first && unset(remote, p) && !unset(local, p) {
+				continue
+			}
+			if lc || rc {
+				bringIn = append(bringIn, p)
+			}
+			if lc || first {
+				here = append(here, p)
+			}
+			continue
+		}
 		switch {
 		case lc && !rc:
 			take(&merged, local, p)
 			if p == "agents" {
 				keepServersOwn(&merged, remote, keep)
 			}
+		case rc && !lc && first && unset(remote, p) && !unset(local, p):
+			// Joining a file whose part holds nothing of its own (its
+			// first writer had no providers, no settings of its own, an
+			// empty library): what this computer has goes up, never the
+			// empty part down over it (#5642: three computers syncing the
+			// library, and the one with providers and routing groups lost
+			// them to a fresh one that wrote the file first). After the
+			// join, a part emptied on purpose spreads as before.
+			take(&merged, local, p)
+			there = append(there, p)
 		case rc && !lc:
 			if first && p == "settings" {
 				keepUnseenGatewayKeys(&remote, local)
@@ -1382,12 +1501,12 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 	st.Local, st.Sum, st.Server, st.Remote = pending, sum(data), ver, R
 	remember(data)
 	if len(here)+len(there) > 0 {
-		st.Notice = &Notice{At: time.Now(), Here: here, There: there, Saved: saved}
+		st.Notice = &Notice{At: time.Now(), Here: here, There: there, Saved: saved, Followed: c.FollowServer && !first}
 		st.Undo = "" // a restore's undo goes with its notice
 	}
 	// A rebuild always writes back: the server's file is the damaged one,
 	// so even a merge that matches the cached copy must replace it.
-	if rebuilt || !maps.Equal(M, R) {
+	if !c.FollowServer && (rebuilt || !maps.Equal(M, R)) {
 		if err := push(merged, etag, blind{Remote: R, Local: pending}); err != nil {
 			return err
 		}

@@ -7,12 +7,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -308,7 +308,7 @@ func gitRepoOf(dir string) string {
 	return ""
 }
 
-var originSection = regexp.MustCompile(`^\[\s*remote\s+"origin"\s*\]$`)
+var originSection = lazyre.New(`^\[\s*remote\s+"origin"\s*\]$`)
 
 // originURL is the repository remote "origin" of a git config fetches.
 func originURL(cfg string) string {
@@ -330,7 +330,7 @@ func originURL(cfg string) string {
 	return ""
 }
 
-var scpRemote = regexp.MustCompile(`^(?:[\w.-]+@)?([\w.-]+\.[\w.-]+):(.+)$`)
+var scpRemote = lazyre.New(`^(?:[\w.-]+@)?([\w.-]+\.[\w.-]+):(.+)$`)
 
 // remoteRepo reads a git remote's address as a repository: owner/repo on
 // GitHub, host/path elsewhere. A user or a token in it is never kept.
@@ -406,7 +406,7 @@ func noteFrom(src Source, root string, cands []Candidate) int {
 			if dir := skillDir(s.Name); s.Source == nil && !linked(dir) && sameTree(dir, filepath.Join(root, filepath.FromSlash(c.Path))) {
 				s.Source = &Source{Kind: "github", Repo: src.Repo, Ref: src.Ref, Path: c.Path}
 				s.Hash, s.Own, s.Commit, s.From = hashDir(dir), ownHash(dir), "", ""
-				l.seenAt(src.Repo, src.Ref, c.Path)
+				l.seenAt(repoKey(src.Repo, src.Ref), c.Path)
 				forgetCheck(s.Name)
 				bound++
 			}

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
@@ -70,6 +71,10 @@ const modelUsage = `usage:
                                                  your own (a key) only
   magpie model id <provider/model> --reset       list it by the provider's own id again
   magpie model ids                               the models you list by an id of your own
+  magpie model api <provider/model>... <api>     ask the model(s) on one API of the provider's: chat,
+                                                 responses, anthropic, gemini, or auto (--reset) for the
+                                                 vendor's list and every URL it has (magpie model api --help)
+  magpie model apis [<provider>]                 the models you set an API for, or each of a provider's
   magpie model names                             the models you named or narrowed
   magpie model alias <model> <name>              count the model's usage under another model id in Usage,
                                                  Sessions and the usage summaries, e.g. deepseek-v4.1-flash
@@ -89,6 +94,7 @@ const modelUsage = `usage:
   magpie model enable <model> [<model>...]       take them off the disabled list, as written there
   magpie model disabled                          the disabled list, and the models each one turns off now
   magpie model suffix [on|own|off]               whether the agents' lists name each model with its provider
+  magpie model suffix <agent> [on|own|off|every] one agent's own, or every agent's again
                                                  (or "routing group") after it: on, as by default, "Sol · OpenAI";
                                                  own, a name you gave a model just as you wrote it, "Opus 5.5",
                                                  the others as on; off, "Sol" alone — but two a list would name
@@ -155,6 +161,10 @@ func modelCmd(args []string) error {
 		return modelSpecs()
 	case "id":
 		return modelID(args[1:])
+	case "api", "protocol":
+		return modelAPICmd(args[1:])
+	case "apis", "protocols":
+		return modelAPIs(args[1:])
 	case "ids":
 		return modelIDs()
 	case "alias":
@@ -665,6 +675,11 @@ func modelPrices() error {
 // providers' after them, all but the names the user gave (#92), or none
 // (#335), or sets it.
 func modelSuffix(args []string) error {
+	if len(args) > 0 && !slices.Contains([]string{"on", "yes", "true", "own", "mine", "off", "no", "false"}, strings.ToLower(args[0])) {
+		if a, err := agent.Find(args[0]); err == nil {
+			return agentSuffix(a, args[1:])
+		}
+	}
 	if len(args) == 0 {
 		switch provider.SuffixMode() {
 		case provider.SuffixOff:
@@ -697,6 +712,38 @@ func modelSuffix(args []string) error {
 	default:
 		fmt.Println(green.Render("✓"), "agents' lists name each model with its provider again")
 	}
+	return nil
+}
+
+// agentSuffix says or sets an agent's own Provider in model names
+// (settings.AgentSuffix): every follows the one for every agent.
+func agentSuffix(a *agent.Agent, args []string) error {
+	id := a.ListsFor()
+	if len(args) == 0 {
+		mode := provider.SuffixModeFor(id)
+		if provider.AgentSuffix(id) == "" {
+			fmt.Println("every", muted.Render(fmt.Sprintf("· %s follows every agent's (%s) · magpie model suffix %s on|own|off", id, mode, id)))
+		} else {
+			fmt.Println(mode, muted.Render(fmt.Sprintf("· %s's own · magpie model suffix %s every", id, id)))
+		}
+		return nil
+	}
+	mode := ""
+	switch strings.ToLower(args[0]) {
+	case "every", "all", "default":
+	case "on", "yes", "true":
+		mode = provider.SuffixOn
+	case "own", "mine":
+		mode = provider.SuffixOwn
+	case "off", "no", "false":
+		mode = provider.SuffixOff
+	default:
+		return fmt.Errorf("magpie model suffix %s on|own|off|every, not %q", id, args[0])
+	}
+	if err := provider.SetAgentSuffix(id, mode); err != nil {
+		return err
+	}
+	fmt.Println(green.Render("✓"), id+":", provider.SuffixModeFor(id), muted.Render(map[bool]string{true: "· as every agent's", false: "· its own"}[mode == ""]))
 	return nil
 }
 
