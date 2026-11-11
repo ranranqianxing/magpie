@@ -18,6 +18,7 @@ var noLibrary = map[string]string{
 	"penguin":           "not looked at (#5897)",
 	"aside":             "not looked at (#5897)",
 	"cursor-local":      "not looked at (#5897)",
+	"cursor-ide":        "ordinary Cursor is the IDE proxy; the Library does not write its files",
 	"vscode":            "not looked at (#5897)",
 	"vscode-insiders":   "not looked at (#5897)",
 	"vscodium":          "not looked at (#5897)",
