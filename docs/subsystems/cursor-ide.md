@@ -248,6 +248,8 @@ image was a path. Those lines do not include the path, the image
 bytes, or the tool result text. The route line includes `images=`,
 the number of image parts on the chat.
 
+A 200 chat stream that carries an `error` object, or a line the scanner cannot take (including one over 4 MiB), ends that invocation with the error text and does not seal tool calls. The same rule is the BidiAppend path and `AgentService/Run`. A clean end of the body still seals, including when `finish_reason` and `[DONE]` are absent. `KindCancel` stops the current invocation: that invocation's gateway context is canceled, no completing tool part is queued after the cancel is seen, and the SSE session stays up so a later invoke on the same request id can run. Closing `RunInferenceSSE` does not cancel the gateway call. A later `RunInferenceSSE` for the same request id becomes the reader and takes the frames already queued; replacing the reader is not a stop. Headers are flushed when that reader attaches, including when the queue is empty. The unread frame queue is capped at 256; a push waits for a reader, for that invocation to be canceled, or for the proxy to close. `KindFinish` and closing the proxy cancel an in-flight gateway call. The session is dropped once it is finished and nothing is reading it, and that request id can be used again after that.
+
 An empty catalog encodes no default model. Cursor is not given a stand-in.
 
 ## Verification
@@ -345,7 +347,14 @@ already trusted, and a relaunch that runs after a connect writes
 settings and after a disconnect restores them, and does not run when
 that disconnect leaves the file alone. The relaunch in that test is a hook. A Linux test starts a
 copy of `sleep` and checks that binary is stopped. Neither test opens
-the installed Cursor or a trust store.
+the installed Cursor or a trust store. `go test ./internal/cursoride` also
+covers a 200 stream `error` and a line over the scanner cap, both of which
+end the invocation without a completing tool part; a `KindCancel` that
+cancels the gateway context, sends no tool part, and still accepts a later
+invoke; a `RunInferenceSSE` that drops and is opened again for the same
+request id without canceling the gateway call; a second invoke on that
+stream; a request id used again after `KindFinish`; a frame queue that
+waits at its cap; and a proxy close that cancels the gateway call.
 
 The same lines are written to `cursor-ide/cursor-ide.log` next to
 `ca.crt` (`DiagPath`). Installed, that is

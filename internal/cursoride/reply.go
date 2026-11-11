@@ -148,6 +148,9 @@ type chatPiece struct {
 	tools          []toolDelta
 	seal           bool
 	done           bool
+	// fail is set when the line is a provider error. The rest of the
+	// line is ignored: a tool call beside the error is not executable.
+	fail string
 }
 
 func chatPieces(line string) (chatPiece, bool) {
@@ -172,15 +175,13 @@ func chatPieces(line string) (chatPiece, bool) {
 				ToolCalls []json.RawMessage `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
+		Error json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal([]byte(data), &body) != nil {
 		return chatPiece{}, false
 	}
-	if body.Error.Message != "" {
-		return chatPiece{}, false
+	if msg, bad := chatStreamFail(body.Error); bad {
+		return chatPiece{fail: msg}, true
 	}
 	var p chatPiece
 	for _, c := range body.Choices {
@@ -218,6 +219,51 @@ func chatPieces(line string) (chatPiece, bool) {
 		return chatPiece{}, false
 	}
 	return p, true
+}
+
+// chatStreamFail is the provider error on one SSE data line. A null or
+// absent error is not a failure. The text is clipped so one hostile line
+// cannot fill the inference frame.
+func chatStreamFail(raw json.RawMessage) (string, bool) {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return "", false
+	}
+	if s[0] == '"' {
+		var msg string
+		if json.Unmarshal(raw, &msg) != nil || msg == "" {
+			return "gateway stream error", true
+		}
+		return clipStream(msg), true
+	}
+	var e struct {
+		Message string          `json:"message"`
+		Type    string          `json:"type"`
+		Code    json.RawMessage `json:"code"`
+	}
+	if json.Unmarshal(raw, &e) != nil {
+		return "gateway stream error", true
+	}
+	if e.Message != "" {
+		return clipStream(e.Message), true
+	}
+	code := strings.TrimSpace(string(e.Code))
+	if e.Type != "" || (code != "" && code != "null") {
+		return "gateway stream error", true
+	}
+	return "", false
+}
+
+func clipStream(s string) string {
+	const max = 240
+	n := 0
+	for i := range s {
+		if n == max {
+			return s[:i]
+		}
+		n++
+	}
+	return s
 }
 
 // parseToolDelta reads one streamed tool call. index may be a float
