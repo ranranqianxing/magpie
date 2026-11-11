@@ -26,10 +26,14 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/libc"
+	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/proc"
+	"github.com/yetone/magpie/internal/stall"
 )
 
 // Base is where Anthropic publishes Claude Code's builds, as its installer
@@ -47,7 +51,7 @@ func exeName(goos string) string {
 	return "claude"
 }
 
-var versionRe = regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
+var versionRe = lazyre.New(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
 
 // Downloaded is the Claude Code magpie downloaded and its version, or ""
 // when there is none: the newest of Root's versions that has the binary.
@@ -265,7 +269,22 @@ func prune(kept string) {
 	}
 }
 
+// download fetches r to to, once more over HTTP/1.1 when the connection
+// broke off (netproxy.AgainOverHTTP1): a proxy that cuts HTTP/2 streams
+// part way carries HTTP/1.1 whole.
 func download(ctx context.Context, r Release, to string, progress func(int64)) error {
+	return netproxy.AgainOverHTTP1(ctx, func(ctx context.Context) error { return downloadOnce(ctx, r, to, progress) })
+}
+
+// downloadStall is how long a download waits for its next byte. There is
+// no bound on the whole: a slow link still moving finishes the ~200 MB
+// build (#5572). A var for tests.
+var downloadStall = 60 * time.Second
+
+func downloadOnce(ctx context.Context, r Release, to string, progress func(int64)) (err error) {
+	ctx, w := stall.Start(ctx, downloadStall)
+	defer w.Stop()
+	defer func() { err = w.Err(err) }()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.URL, nil)
 	if err != nil {
 		return err
@@ -283,7 +302,7 @@ func download(ctx context.Context, r Release, to string, progress func(int64)) e
 		return err
 	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(out, h, progressWriter(progress)), io.LimitReader(res.Body, r.Size+1))
+	n, err := io.Copy(io.MultiWriter(out, h, progressWriter(progress)), io.LimitReader(w.Reader(res.Body), r.Size+1))
 	if cerr := out.Close(); err == nil {
 		err = cerr
 	}

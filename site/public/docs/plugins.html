@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Writing plugins · magpie docs</title>
+<title>Writing plugins: add a provider with an OpenCode plugin or pi package · magpie</title>
 <meta name="description" content="How to write a magpie plugin: the OpenCode plugin hooks magpie calls, the pi packages it runs, how it turns them into a provider with accounts, models, requests and usage, and how to test, publish and list one.">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -39,6 +39,54 @@
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/plugins">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "Writing a plugin",
+   "description": "How to write a magpie plugin: the OpenCode plugin hooks magpie calls, the pi packages it runs, how it turns them into a provider with accounts, models, requests and usage, and how to test, publish and list one.",
+   "inLanguage": "en",
+   "url": "https://usemagpie.ai/docs/plugins",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "Docs",
+     "item": "https://usemagpie.ai/docs/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "Writing a plugin",
+     "item": "https://usemagpie.ai/docs/plugins"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -55,6 +103,13 @@
     <a class="toc-only" href="/docs/masking">Privacy masking</a>
     <a class="toc-only" href="/docs/mcp-router">MCP router</a>
     <a class="toc-only" href="/docs/library">Library</a>
+    <a class="toc-only" href="/docs/claude-code-models">Models in Claude Code</a>
+    <a class="toc-only" href="/docs/codex-models">Models in Codex</a>
+    <a class="toc-only" href="/docs/gemini-cli-models">Models in Gemini CLI</a>
+    <a class="toc-only" href="/docs/subscriptions">Subscriptions in any agent</a>
+    <a class="toc-only" href="/docs/local-models">Local models</a>
+    <a class="toc-only" href="/docs/opencode-models">Models in OpenCode</a>
+    <a class="toc-only" href="/docs/alternatives">magpie vs CC Switch vs CCR</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
@@ -303,6 +358,9 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
     </div>
     <p>A model can also say <code>provider: { npm, api }</code> to use another API or address than the provider’s, <code>headers</code>, <code>options</code>, and <code>disabled: true</code> to hide it.</p>
 
+        <h3 id="vendor">In front of a vendor magpie knows</h3>
+    <p>When the provider’s <code>api</code> is the API of a vendor magpie has a preset for (<code>https://api.mistral.ai/v1</code>, <code>https://api.deepseek.com/v1</code>, <code>https://openrouter.ai/api/v1</code>, …), magpie shapes requests to your provider as it does for that vendor before they reach your <code>fetch</code>: Mistral’s thinking parts in place of <code>reasoning_content</code>, DeepSeek’s and xAI’s schema rules, OpenRouter’s free pool, and the rest. There is nothing to add; the base URL you already give is what it reads, even when your loader’s <code>baseURL</code> sends elsewhere. A base on no preset’s host, on <code>localhost</code> or on your network gets no vendor’s handling.</p>
+
         <h3 id="searches">An upstream that searches the web</h3>
     <p>When your plugin sits in front of Anthropic’s or OpenAI’s own API, which runs the hosted web search tool itself, set <code>searches: true</code> on the provider in the <code>config</code> hook. A client’s web search (Claude Code’s WebSearch, Codex’s <code>web_search</code>) then reaches your <code>fetch</code> as it was sent, on the provider’s Anthropic or Responses models, rather than going through magpie’s own search. Its Chat models are unaffected. magpie doesn’t search with it for other models by itself, but it can be named as the searcher in Settings.</p>
 
@@ -544,6 +602,7 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
     amount: 370, limit: 1000, unit: <span class="s">"credits"</span>, <span class="c">// its own count, when it counts amounts</span>
     model: <span class="s">"opus"</span>,              <span class="c">// counts only models whose ids hold this word</span>
     models: [], notModels: [],  <span class="c">// or exactly these ids, or all but these</span>
+    family: <span class="s">"Gemini"</span>, pool: <span class="s">"Gemini"</span>, <span class="c">// a model's family, and the group sharing its allowance: the card shows a pool's own windows (no model, no family) in place of its models'</span>
     aside: false,               <span class="c">// true: using it up doesn't stop the account</span>
     runsOutAt: <span class="s">"2026-10-05T00:00:00Z"</span>, runsOut: 120, <span class="c">// when the soonest credits left are lost, and how many</span>
     balance: 6291,              <span class="c">// a prepaid wallet: what is left, in unit; no used or limit</span>
@@ -599,7 +658,7 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
       <li><b>Values.</b> 100 is as busy as the vendor serves at once; a vendor that queues reports past it (200 is twice that). A number below 0 counts as 0, and one past 10000 as 10000, a sanity cap. Anything else (a string, <code>NaN</code>) is dropped. Model ids match whatever their case, and <code>model@256k</code> has its model’s load unless reported itself. One call takes up to 1000 models and returns how many it took. A provider that isn’t a string, or a <code>loads</code> that isn’t an object, throws a <code>TypeError</code>.</li>
       <li><b>Freshness.</b> Each model’s load counts for five minutes from the call that reported it. After that it is unknown, never 0: a plugin that stops calling leaves its models where they were. A model a call doesn’t name keeps its last load until its own five minutes run out.</li>
       <li><b>Where it shows.</b> The provider editor shows it by the model, a small grey number.</li>
-      <li><b>Routing.</b> With Settings › Network and sharing › Busy models last set (Off by default; over 50, 70, 80 or 90%, or Custom… for any number from 1 to 9999, such as 150 for a vendor that queues), a model reported busier than that goes behind every other candidate a request could go to, ahead of those resting after a failure. A conversation it answered moves to the one that leads at its next turn; within a turn it stays. A model with no load known keeps its place. The Routing trace says <code>busy</code> with the load.</li>
+      <li><b>Routing.</b> With Settings › Models › Routing › Busy models last set (Off by default; over 50, 70, 80 or 90%, or Custom… for any number from 1 to 9999, such as 150 for a vendor that queues), a model reported busier than that goes behind every other candidate a request could go to, ahead of those resting after a failure. A conversation it answered moves to the one that leads at its next turn; within a turn it stays. A model with no load known keeps its place. The Routing trace says <code>busy</code> with the load.</li>
     </ul>
     <p>A plugin written for older hosts checks <code>input.magpie?.load</code> first, as above.</p>
 
@@ -679,8 +738,9 @@ m plugin logout acme</pre>
     <h2 id="gateway-request"><a class="anchor" href="#gateway-request">Async gateway request hooks</a></h2>
     <p>A plugin can await I/O before an agent request is routed, for example to recall project context. Declare <code>"magpie": { "hooks": "./hooks.js" }</code> in package.json, or add a <code>*.hooks.js</code> / <code>.mjs</code> / <code>.ts</code> / <code>.mts</code> file (Bun runs TypeScript without a build step). Export a named async <code>onRequest(body, ctx)</code>. A gateway-only package needs no OpenCode main/exports.</p>
     <p>Optional async <code>onResponse(reply, ctx)</code> receives a best-effort completion notification after output finishes. It cannot change the reply and never holds the live stream. Client tool declarations and tool loops stay with the client.</p>
+    <p>Optional async <code>onSignIn(event, ctx)</code> hears of a subscription account that has to be signed in again: <code>event</code> is <code>{provider, providerName, account, state, endsAt?}</code>, <code>state</code> <code>signed-out</code>, or <code>ending</code> for a Claude sign-in within three days of its end. It is told once until the account works again, and carries no token. A hooks file may export only <code>onSignIn</code>.</p>
 <p>It runs in Bun once per agent request, before the JS gateway middleware, for every provider, Codex's own ChatGPT sign-in included. body is the agent API object. ctx contains <code>protocol</code>, <code>model</code>, <code>stream</code>, <code>path</code>, <code>agent</code>, <code>session</code>, <code>cwd</code>, <code>query</code>, <code>options</code> and <code>signal</code>. The query is the latest user text, excluding tool results and images. Missing identity fields are empty; authorization headers are never included.</p>
-<p>Return an object to replace the request, or undefined to keep it. A hook that changes the model, streaming, the client's tools or its tool choice is rolled back, as a failure, and gets no <code>onResponse</code> for that request. Each hook receives a clone; mutations from failed or undefined hooks are discarded. Successful changes follow enabled plugin order. Each hook defaults to one second; <code>gatewayTimeoutMs</code> accepts integers from 100 to 10000 milliseconds. The chain sums budgets, clamped to 2–10 seconds; startup plus RPC is bounded to 11 seconds. Settings → Plugins offers JSON options and call, latency, failure and outcome diagnostics. <code>ctx.report(code, bytes)</code> accepts ready/empty/unbound/unauthorized/unavailable/invalid/skipped and byte counts only. Statistics reset on reload and retain no private text. Use <code>ctx.signal</code> with fetch. Errors, invalid returns, timeouts and a host busy starting keep the request. Bun plugins have host privileges; install trusted code.</p>
+<p>Return an object to replace the request, or undefined to keep it. A hook that changes the model, streaming, the client's tools or its tool choice is rolled back, as a failure, and gets no <code>onResponse</code> for that request. Each hook receives a clone; mutations from failed or undefined hooks are discarded. Successful changes follow enabled plugin order. Each hook defaults to one second; <code>gatewayTimeoutMs</code> accepts integers from 100 to 30000 milliseconds; a value outside that range is clamped to the nearer bound. The chain sums budgets, clamped to 2–10 seconds, or takes the longest hook's own timeout when that is longer; host startup is bounded to 11 seconds, and startup plus RPC to the chain budget plus one second (at least 11 seconds). Settings → Plugins offers JSON options and call, latency, failure and outcome diagnostics. <code>ctx.report(code, bytes)</code> accepts ready/empty/unbound/unauthorized/unavailable/invalid/skipped and byte counts only. Statistics reset on reload and retain no private text. Use <code>ctx.signal</code> with fetch. Errors, invalid returns, timeouts and a host busy starting keep the request. Bun plugins have host privileges; install trusted code.</p>
 <p>Install with <code>magpie plugin add ./my-plugin</code>; save options with <code>magpie plugin options my-plugin '&lbrace;"serverUrl":"http://127.0.0.1:8000"&rbrace;'</code>. On/off and options changes reload the host; source-only edits need a configuration reload. Internal title/classifier requests skip the hook.</p>
 
     <h2 id="middleware"><a class="anchor" href="#middleware">Gateway middleware</a></h2>
@@ -811,6 +871,7 @@ claude mcp add --transport http magpie-tools http://127.0.0.1:3425/mcp/magpie/to
     <p>Settings → Plugins lists each plugin’s tools by these names and copies the server’s address. <code>args</code> is a zod shape (<code>tool.schema</code> is zod), a zod object or a JSON Schema object. The agent is shown it, and magpie checks a call’s arguments against it before <code>execute</code> runs; a wrong argument is answered as an error naming it. <code>ctx</code> is OpenCode’s, with <code>agent</code> the agent that called. A tool has 55 seconds, and <code>ctx.abort</code> fires when they are up.</p>
     <p>The built-in plugin <span class="ui">Plugin tools</span> serves the server. It stays on while a plugin that is on gives a tool; off, no tool is listed and a call says so. A call made with a gateway key counts against that key’s limits. A tool runs in the plugin host with your rights, as a provider plugin does, and its answer goes only to the agent that called it.</p>
     <p>Each plugin that gives tools is also a server of its own in the Library’s MCP tab, named by the plugin’s short name (<code>search1api</code>), so you don’t have to add the address by hand. With the <a href="mcp-router.html">MCP router</a> on, its tools are in the router of every agent the router is given, as <code>search1api__search</code>; switch it on or off per agent, or turn single tools off, as with any Library server. Removed, it comes back only when you remove the plugin and add it again.</p>
+    <p>To keep a plugin for its providers but give its tools to no agent, press <span class="ui">Hide from agents</span> on its tools line under <span class="ui">Plugins</span> › <span class="ui">Installed</span>. Its server is then given to no agent, nor to an app at the router’s address, through updates, the plugin off and on, and restarts. <span class="ui">Give to agents</span> gives it back to the agents it had.</p>
 
     <h2 id="agents"><a class="anchor" href="#agents">Agent plugins</a></h2>
     <p>A plugin can also add an <em>agent</em>: one magpie has no setup of its own for. It says where the agent keeps its model and what else to write there for the agent to use magpie’s gateway. The agent is then on the <span class="ui">Agents</span> page like magpie’s own: pick one of magpie’s models in its row and magpie writes it into the agent’s config, with the gateway’s address and a key of the agent’s own; switch it off and everything goes back to how the user had it. The example below adds <a href="https://aider.chat">Aider</a>.</p>
@@ -848,6 +909,7 @@ claude mcp add --transport http magpie-tools http://127.0.0.1:3425/mcp/magpie/to
       <tr><td><code>config</code></td><td>The file magpie edits. <code>~</code> and <code>$VAR</code> are expanded. It is made when it isn’t there.</td></tr>
       <tr><td><code>format</code></td><td><code>json</code>, <code>yaml</code> or <code>env</code>, when the file’s name doesn’t say it (<code>.json</code>/<code>.jsonc</code>, <code>.yaml</code>/<code>.yml</code>, <code>.env</code>). TOML isn’t supported yet.</td></tr>
       <tr><td><code>model</code></td><td>The key of the model in the file, as a dotted path for JSON and YAML (<code>llm.model</code>). Leave it out for an agent whose model is picked in the agent itself, among the models <code>connect</code> writes (Raycast): the row is then a switch with no model picker, and <code>connect</code>, which such a plugin must have, is called without <code>model</code>.</td></tr>
+      <tr><td><code>startup</code></td><td>For an agent that keeps the model a session starts on in another file than the one <code>connect</code> writes, in place of <code>model</code>: <code>config</code> and <code>format</code> of that file, <code>model</code> the key of the model in it, and <code>keys</code> written beside the model as they are. PiG keeps its providers in <code>models.json</code> and its default in <code>settings.json</code>: <code>startup: { config: "~/.pig/agent/settings.json", model: "defaultModel", keys: { defaultProvider: "magpie" } }</code>. The row then picks the model, and each file is put back as it was. A magpie older than v0.1.3008 reads such a plugin as one with no <code>model</code>.</td></tr>
       <tr><td><code>prefix</code></td><td>Written before magpie’s model id: <code>openai/</code> for an agent that reaches OpenAI-compatible endpoints through LiteLLM. The id itself is <code>&lt;provider&gt;/&lt;model&gt;</code>, as the gateway takes it.</td></tr>
       <tr><td><code>bin</code>, <code>dir</code></td><td>The command on <code>PATH</code> and the folder that say the agent is installed.</td></tr>
       <tr><td><code>ua</code></td><td>Words of the agent’s User-Agent, to name its requests in Usage when they come without its key.</td></tr>
@@ -1033,6 +1095,13 @@ document.getElementById(<span class="s">"calls"</span>).textContent = `${s.calls
     <a href="/docs/masking">Privacy masking</a>
     <a href="/docs/mcp-router">MCP router</a>
     <a href="/docs/library">Library</a>
+    <a href="/docs/claude-code-models">Models in Claude Code</a>
+    <a href="/docs/codex-models">Models in Codex</a>
+    <a href="/docs/gemini-cli-models">Models in Gemini CLI</a>
+    <a href="/docs/subscriptions">Subscriptions in any agent</a>
+    <a href="/docs/local-models">Local models</a>
+    <a href="/docs/opencode-models">Models in OpenCode</a>
+    <a href="/docs/alternatives">magpie vs CC Switch vs CCR</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>

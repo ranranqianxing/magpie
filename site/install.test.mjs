@@ -9,6 +9,27 @@ import { fileURLToPath } from "node:url";
 
 const installer = fileURLToPath(new URL("./public/install.sh", import.meta.url));
 
+// assetId and TAGS: GitHub's API's ids for the release's files, and its
+// description of the release as it prints it (indented, nested objects)
+const assetId = (name) => 700 + ["magpie-cli-linux-arm64", "magpie-linux-arm64", "magpie-cli-android-arm64"].indexOf(name);
+const TAGS = JSON.stringify(
+  {
+    url: "https://api.github.com/repos/yetone/magpie-releases/releases/1",
+    tag_name: "vtest",
+    author: { login: "x", url: "https://api.github.com/users/x" },
+    assets: ["SHA256SUMS", "magpie-cli-linux-arm64", "magpie-linux-arm64", "magpie-cli-android-arm64"].map((name) => ({
+      url: `https://api.github.com/repos/yetone/magpie-releases/releases/assets/${name === "SHA256SUMS" ? 699 : assetId(name)}`,
+      id: 1,
+      name,
+      label: "",
+      uploader: { login: "github-actions[bot]", url: "https://api.github.com/users/github-actions%5Bbot%5D" },
+      browser_download_url: `https://github.com/yetone/magpie-releases/releases/download/vtest/${name}`,
+    })),
+  },
+  null,
+  2,
+);
+
 // systemPath: a folder of links to what the script runs, without sudo, for
 // a computer that has none
 function systemPath(dir) {
@@ -21,7 +42,7 @@ function systemPath(dir) {
   return sys;
 }
 
-function install(t, { termux = true, arch = "aarch64", override = false, prefixOnly = false, missing = false, corrupt = false, desktop = false, github = false, args = [], env: extra = {}, tamper = "", libs = desktop, cli = !desktop, distro = "ID=ubuntu\nID_LIKE=debian\n", sessions = [], login = "", tty = false, uid = 1000, sudo = true, pmFails = false } = {}) {
+function install(t, { termux = true, arch = "aarch64", override = false, prefixOnly = false, missing = false, corrupt = false, desktop = false, github = false, r2 = false, api = false, args = [], env: extra = {}, tamper = "", libs = desktop, cli = !desktop, distro = "ID=ubuntu\nID_LIKE=debian\n", sessions = [], login = "", tty = false, uid = 1000, sudo = true, pmFails = false, payload = "test binary\n" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "magpie-install-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const tools = join(dir, "tools");
@@ -33,7 +54,6 @@ function install(t, { termux = true, arch = "aarch64", override = false, prefixO
   mkdirSync(tools, { recursive: true });
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(bin, "magpie"), "old installation");
-  const payload = "test binary\n";
   const cpu = arch === "aarch64" ? "arm64" : "amd64";
   const file = termux ? `magpie-cli-android-${cpu}` : desktop ? `magpie-linux-${cpu}` : `magpie-cli-linux-${cpu}`;
   const assets = {};
@@ -41,6 +61,9 @@ function install(t, { termux = true, arch = "aarch64", override = false, prefixO
   for (const name of new Set([file, `magpie-cli-linux-${cpu}`, `magpie-linux-${cpu}`])) {
     if (missing && name === file) continue;
     assets[name] = { url: github ? `https://github.com/yetone/magpie-releases/releases/download/vtest/${name}` : `https://download.invalid/${name}`, sha256: corrupt ? "0".repeat(64) : createHash("sha256").update(payload).digest("hex") };
+    // r2: the site's copy, github.com's address beside it
+    if (r2) assets[name] = { ...assets[name], url: `https://usemagpie.ai/files/vtest/${name}`, github: `https://github.com/yetone/magpie-releases/releases/download/vtest/${name}` };
+    if (api) assets[name].api = `https://api.github.com/repos/yetone/magpie-releases/releases/assets/${assetId(name)}`;
   }
   const requests = join(dir, "requests");
   writeFileSync(join(tools, "uname"), `#!/bin/sh\ncase "$1" in -m) echo '${arch}';; -s) echo Linux;; esac\n`, { mode: 0o755 });
@@ -101,6 +124,9 @@ fs.appendFileSync(process.env.INSTALL_REQUESTS, url + String.fromCharCode(10));
 fs.appendFileSync(process.env.INSTALL_ARGS, JSON.stringify(args) + String.fromCharCode(10));
 const tamper = process.env.INSTALL_TAMPER;
 if (url.endsWith("/api/latest")) process.stdout.write(process.env.INSTALL_FEED);
+else if ((process.env.INSTALL_DOWN || "").split(" ").some((p) => p && url.startsWith(p))) process.exit(22);
+else if (url.includes("/releases/tags/")) process.stdout.write(process.env.INSTALL_TAGS);
+else if (url.includes("/releases/assets/") && !args.includes("Accept: application/octet-stream")) fs.writeFileSync(args[args.indexOf("-o") + 1], "{}");
 else fs.writeFileSync(args[args.indexOf("-o") + 1], tamper && url.startsWith(tamper) ? "changed by the mirror" : process.env.INSTALL_PAYLOAD);
 `, { mode: 0o755 });
   const env = {
@@ -133,6 +159,7 @@ else fs.writeFileSync(args[args.indexOf("-o") + 1], tamper && url.startsWith(tam
     INSTALL_PAYLOAD: payload,
     INSTALL_ARGS: join(dir, "args"),
     INSTALL_TAMPER: tamper,
+    INSTALL_TAGS: TAGS,
     MAGPIE_PROXY: "",
     MAGPIE_MIRROR: "",
     ...extra,
@@ -252,23 +279,33 @@ test("a file the mirror changed is refused and the installed magpie kept", (t) =
 
 // pota on Discord: the script installed magpie and had no way to take it
 // off. --uninstall takes off what it put there and keeps the user's
-// settings; --purge has magpie disconnect the agents and delete them first.
+// settings; --purge has magpie delete them too. Both have magpie
+// disconnect the agents first: taken off alone, it left Codex pointed at
+// a gateway that was gone (whimsical_wolf_15477 on Discord).
+//
+// magpie itself, as far as the uninstall asks it anything: <who> in each
+// call it logs; old, one from before --keep-data
+const fakeMagpie = (who, old = false) => `#!/bin/sh
+echo "${who}$*" >> "$HOME/magpie-calls"
+[ "$1 $2" = "uninstall --help" ] && { echo "usage: magpie uninstall [--yes]${old ? "" : " [--keep-data]"}"; exit 0; }
+[ "$1 $2" = "daemon uninstall" ] && rm -f "$XDG_CONFIG_HOME/systemd/user/magpie.service"
+[ "$1 $2 $3" = "uninstall --yes --keep-data" ] && { [ -z "$MAGPIE_FAIL" ] || exit 1; ${old ? "exit 2" : "echo disconnected > \"$HOME/agents\""}; }
+[ "$1 $2 $3" = "uninstall --yes " ] && { [ -z "$MAGPIE_FAIL" ] || exit 1; echo disconnected > "$HOME/agents"; rm -rf "$XDG_CONFIG_HOME/magpie" "$XDG_DATA_HOME/applications/magpie.desktop"; }
+exit 0
+`;
 function installedDesktop(t, opts = {}) {
-  const r = install(t, { termux: false, desktop: true, ...opts });
+  // sudo: false, the system's tools only: a magpie on this computer's
+  // PATH would be another one
+  const r = install(t, { termux: false, desktop: true, sudo: false, payload: fakeMagpie("downloaded: "), ...opts });
   assert.equal(r.status, 0, r.stderr);
   const exe = join(r.bin, "magpie");
-  // magpie itself, as far as the uninstall asks it anything
-  writeFileSync(exe, `#!/bin/sh
-echo "$*" >> "$HOME/magpie-calls"
-[ "$1 $2" = "daemon uninstall" ] && rm -f "$XDG_CONFIG_HOME/systemd/user/magpie.service"
-[ "$1 $2" = "uninstall --yes" ] && { [ -z "$MAGPIE_FAIL" ] || exit 1; rm -rf "$XDG_CONFIG_HOME/magpie" "$XDG_DATA_HOME/applications/magpie.desktop"; }
-exit 0
-`, { mode: 0o755 });
+  writeFileSync(exe, fakeMagpie("", opts.old), { mode: 0o755 });
   const settings = join(r.config, "magpie", "settings.json");
   mkdirSync(join(r.config, "magpie"), { recursive: true });
   writeFileSync(settings, "{}");
   const calls = () => (existsSync(join(r.home, "magpie-calls")) ? readFileSync(join(r.home, "magpie-calls"), "utf8") : "");
-  return { ...r, exe, settings, calls, entry: join(r.share, "applications/magpie.desktop"), icon: join(r.share, "icons/hicolor/256x256/apps/magpie.png"), mime: join(r.config, "mimeapps.list") };
+  const agents = () => existsSync(join(r.home, "agents"));
+  return { ...r, exe, settings, calls, agents, entry: join(r.share, "applications/magpie.desktop"), icon: join(r.share, "icons/hicolor/256x256/apps/magpie.png"), mime: join(r.config, "mimeapps.list") };
 }
 
 test("--uninstall takes off the command, menu entry, icon and magpie:// default, and keeps the settings", (t) => {
@@ -286,13 +323,94 @@ test("--uninstall takes off the command, menu entry, icon and magpie:// default,
   assert.equal(bu.status, 0, bu.stderr);
   assert.equal(existsSync(bare.mime), false);
   assert.ok(existsSync(r.settings), "the settings stay");
-  assert.equal(r.calls(), "", "magpie isn't asked to uninstall");
+  assert.match(r.calls(), /^uninstall --yes --keep-data$/m, "magpie disconnects the agents first");
+  assert.ok(r.agents());
+  assert.doesNotMatch(r.calls(), /^uninstall --yes$/m);
   assert.equal(u.calls.length, 0, "nothing is downloaded");
   assert.match(u.stdout, /kept your settings.*--purge/);
   // again: nothing there, nothing wrong
   const again = r.run(["--uninstall"]);
   assert.equal(again.status, 0, again.stderr);
   assert.match(again.stdout, /no magpie installed by this script/);
+});
+
+// magpie deleted by hand (or the app dragged to the Trash) left the agents
+// on its gateway, with nothing left to put them back: the newest magpie is
+// downloaded, checked, and does it, and nothing of it stays.
+test("--uninstall with magpie deleted already downloads one to disconnect the agents", (t) => {
+  const r = installedDesktop(t);
+  rmSync(r.exe);
+  const u = r.run(["--uninstall"]);
+  assert.equal(u.status, 0, u.stderr);
+  assert.match(u.requests, /\/api\/latest\n.*magpie-cli-linux-arm64$/m, "the terminal build, which needs no libraries");
+  assert.match(r.calls(), /^downloaded: uninstall --yes --keep-data$/m);
+  assert.ok(r.agents());
+  assert.ok(existsSync(r.settings), "the settings stay");
+  for (const p of [r.entry, r.icon]) assert.equal(existsSync(p), false, p);
+  assert.equal(existsSync(r.exe), false, "the download isn't installed");
+
+  // --purge the same, deleting the settings
+  const p = installedDesktop(t);
+  rmSync(p.exe);
+  const pu = p.run(["--purge"]);
+  assert.equal(pu.status, 0, pu.stderr);
+  assert.match(p.calls(), /^downloaded: uninstall --yes$/m);
+  assert.equal(existsSync(p.settings), false);
+
+  // a download that isn't the release's: never run, nothing taken off
+  const c = installedDesktop(t, { env: {} });
+  rmSync(c.exe);
+  c.env.INSTALL_PAYLOAD = "changed\n";
+  const cu = c.run(["--uninstall"]);
+  assert.notEqual(cu.status, 0);
+  assert.match(cu.stderr, /does not match its checksum/);
+  assert.equal(c.calls(), "");
+  assert.ok(existsSync(c.entry));
+
+  // magpie never run here (no settings): nothing to put back, nothing downloaded
+  const n = installedDesktop(t);
+  rmSync(n.exe);
+  rmSync(join(n.config, "magpie"), { recursive: true });
+  const nu = n.run(["--uninstall"]);
+  assert.equal(nu.status, 0, nu.stderr);
+  assert.equal(nu.calls.length, 0);
+});
+
+// another magpie on the PATH (not this script's) serves the agents still:
+// it is the one to ask, and nothing is downloaded
+test("--uninstall with magpie deleted leaves another magpie's agents to it", (t) => {
+  const r = installedDesktop(t);
+  rmSync(r.exe);
+  const other = join(r.env.PATH.split(":")[0], "magpie");
+  writeFileSync(other, fakeMagpie("other: "), { mode: 0o755 });
+  const u = r.run(["--uninstall"]);
+  assert.equal(u.status, 0, u.stderr);
+  assert.equal(u.calls.length, 0);
+  assert.equal(r.calls(), "");
+  assert.match(u.stdout, /magpie at .*tools\/magpie isn't one this script installed.*uninstall/);
+});
+
+// one from before --keep-data refuses it and changes nothing: the newest
+// does it instead
+test("--uninstall with an older magpie disconnects with the newest", (t) => {
+  const r = installedDesktop(t, { old: true });
+  const u = r.run(["--uninstall"]);
+  assert.equal(u.status, 0, u.stderr);
+  assert.doesNotMatch(r.calls(), /^uninstall --yes --keep-data$/m);
+  assert.match(r.calls(), /^downloaded: uninstall --yes --keep-data$/m);
+  assert.ok(r.agents());
+  assert.ok(existsSync(r.settings));
+  assert.equal(existsSync(r.exe), false);
+});
+
+// magpie unable to (an agent it couldn't put back, an app still open): the
+// command stays, to run it again
+test("--uninstall leaves the install when magpie can't disconnect the agents", (t) => {
+  const f = installedDesktop(t, { env: { MAGPIE_FAIL: "1" } });
+  const fu = f.run(["--uninstall"]);
+  assert.notEqual(fu.status, 0);
+  assert.match(fu.stderr, /couldn't disconnect your agents/);
+  for (const p of [f.exe, f.entry, f.settings]) assert.ok(existsSync(p), p);
 });
 
 test("--uninstall takes the service and login entry that start this magpie, never another's", (t) => {
@@ -344,13 +462,6 @@ test("--purge has magpie uninstall itself first, then takes off the install", (t
   assert.match(fu.stderr, /magpie uninstall didn't finish/);
   for (const p of [f.exe, f.entry, f.settings]) assert.ok(existsSync(p), p);
 
-  // no magpie to ask: refused, the settings kept
-  const n = installedDesktop(t);
-  rmSync(n.exe);
-  const nu = n.run(["--purge"]);
-  assert.notEqual(nu.status, 0);
-  assert.match(nu.stderr, /no magpie at .* --uninstall alone/);
-  assert.ok(existsSync(n.settings));
 });
 
 test("--uninstall in Termux takes off PREFIX/bin/magpie", (t) => {
@@ -515,4 +626,85 @@ test("--gui installs WebKitGTK at a terminal too; --tui, MAGPIE_CLI=1 and a head
     assert.equal(r.gui, false, JSON.stringify(opts));
     assert.equal(r.pm, "", JSON.stringify(opts));
   }
+});
+
+// 2026-11-08: github.com answered 504 for every release file while GitHub's
+// API served them. The file is then asked for through the API (the feed's
+// api, else looked up from the release's tag), and checked the same way.
+test("github.com failing, the file comes through GitHub's API, checked against the site's SHA-256", (t) => {
+  for (const api of [false, true]) {
+    const r = install(t, { termux: false, github: true, api, env: { INSTALL_DOWN: "https://github.com/" } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(join(r.bin, "magpie"), "utf8"), r.payload);
+    const asked = r.requests.trim().split("\n");
+    assert.deepEqual(asked, [
+      "https://usemagpie.ai/api/latest",
+      "https://github.com/yetone/magpie-releases/releases/download/vtest/magpie-cli-linux-arm64",
+      ...(api ? [] : ["https://api.github.com/repos/yetone/magpie-releases/releases/tags/vtest"]),
+      "https://api.github.com/repos/yetone/magpie-releases/releases/assets/700",
+    ], String(api));
+    assert.ok(r.calls.at(-1).includes("Accept: application/octet-stream"), JSON.stringify(r.calls.at(-1)));
+    assert.match(r.stdout, /through GitHub's API/);
+  }
+  // the API's file is checked as any other
+  const bad = install(t, { termux: false, github: true, corrupt: true, env: { INSTALL_DOWN: "https://github.com/" } });
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /does not match its checksum/);
+  assert.equal(readFileSync(join(bad.bin, "magpie"), "utf8"), "old installation");
+});
+
+test("a mirror given keeps precedence: it failing, GitHub's API is not asked", (t) => {
+  const r = install(t, { termux: false, github: true, api: true, args: ["--mirror", "https://gh.mirror.example/"], env: { INSTALL_DOWN: "https://gh.mirror.example/" } });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /could not download https:\/\/gh\.mirror\.example\//);
+  assert.doesNotMatch(r.requests, /api\.github\.com/);
+});
+
+// The feed names the site's copy on R2, github.com's address beside it.
+test("the site's copy is downloaded, checked against the site's SHA-256", (t) => {
+  const r = install(t, { termux: false, r2: true, api: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(join(r.bin, "magpie"), "utf8"), r.payload);
+  assert.deepEqual(r.requests.trim().split("\n"), ["https://usemagpie.ai/api/latest", "https://usemagpie.ai/files/vtest/magpie-cli-linux-arm64"]);
+  const bad = install(t, { termux: false, r2: true, corrupt: true });
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /does not match its checksum/);
+  assert.equal(readFileSync(join(bad.bin, "magpie"), "utf8"), "old installation");
+});
+
+test("the site's copy failing, github.com's address, then GitHub's API looked up from it", (t) => {
+  const site = "https://usemagpie.ai/files/", gh = "https://github.com/yetone/magpie-releases/releases/download/vtest/magpie-cli-linux-arm64";
+  const r = install(t, { termux: false, r2: true, env: { INSTALL_DOWN: site } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.requests.trim().split("\n").slice(1), [site + "vtest/magpie-cli-linux-arm64", gh]);
+  assert.match(r.stdout, /from github\.com instead/);
+  const both = install(t, { termux: false, r2: true, env: { INSTALL_DOWN: site + " https://github.com/" } });
+  assert.equal(both.status, 0, both.stderr);
+  assert.equal(readFileSync(join(both.bin, "magpie"), "utf8"), both.payload);
+  assert.deepEqual(both.requests.trim().split("\n").slice(1), [
+    site + "vtest/magpie-cli-linux-arm64",
+    gh,
+    "https://api.github.com/repos/yetone/magpie-releases/releases/tags/vtest",
+    "https://api.github.com/repos/yetone/magpie-releases/releases/assets/700",
+  ]);
+});
+
+test("a mirror is put before github.com's address, never the site's, and the API isn't asked through one", (t) => {
+  const site = "https://usemagpie.ai/files/vtest/magpie-cli-linux-arm64";
+  const m = "https://gh.mirror.example/https://github.com/yetone/magpie-releases/releases/download/vtest/magpie-cli-linux-arm64";
+  const ok = install(t, { termux: false, r2: true, args: ["--mirror", "https://gh.mirror.example/"] });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.deepEqual(ok.requests.trim().split("\n").slice(1), [site]);
+  const r = install(t, { termux: false, r2: true, api: true, args: ["--mirror", "https://gh.mirror.example/"], env: { INSTALL_DOWN: "https://usemagpie.ai/files/" } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.requests.trim().split("\n").slice(1), [site, m]);
+  assert.match(r.stdout, /from github\.com through https:\/\/gh\.mirror\.example\/ instead/);
+  // the mirror's bytes refused as the mirror's
+  const bad = install(t, { termux: false, r2: true, args: ["--mirror", "https://gh.mirror.example/"], tamper: "https://gh.mirror.example/", env: { INSTALL_DOWN: "https://usemagpie.ai/files/" } });
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /from https:\/\/gh\.mirror\.example\/ does not match its checksum/);
+  const down = install(t, { termux: false, r2: true, api: true, args: ["--mirror", "https://gh.mirror.example/"], env: { INSTALL_DOWN: "https://usemagpie.ai/files/ https://gh.mirror.example/" } });
+  assert.notEqual(down.status, 0);
+  assert.match(down.stderr, /could not download https:\/\/gh\.mirror\.example\//);
+  assert.doesNotMatch(down.requests, /api\.github\.com/);
 });

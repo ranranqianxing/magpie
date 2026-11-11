@@ -40,7 +40,7 @@ func (s *Server) askSearchSignedIn(ctx context.Context, a provider.SearchAPI, v 
 		if p != nil {
 			err = fmt.Errorf("no account of %s is on", name)
 		}
-		logSearch(ctx, usage.Record{Requested: a.Name()}, query, time.Now(), 0, err)
+		s.logSearch(ctx, usage.Record{Requested: a.Name()}, query, time.Now(), 0, err)
 		return nil, err
 	}
 	ids := make([]string, len(cs))
@@ -52,12 +52,13 @@ func (s *Server) askSearchSignedIn(ctx context.Context, a provider.SearchAPI, v 
 	var errs []error
 	for _, i := range searchKeyOrder(inOrder, ids, time.Now()) {
 		q := cs[i].p
-		ctx, cancel := context.WithTimeout(q.Via(ctx), searchTimeout/4)
+		ctx, _ := withSearchWire(q.Via(ctx), "")
+		ctx, cancel := context.WithTimeout(ctx, searchTimeout/4)
 		start := time.Now()
 		pages, err := s.askPluginSearchAs(ctx, v, q, query)
 		cancel()
 		rec := usage.Record{Requested: a.Name(), ProviderKeyID: searchKeyID(a.Vendor, ids[i]), ProviderKeyName: q.Account.User}
-		logSearch(ctx, rec, query, start, len(pages), err)
+		s.logSearch(ctx, rec, query, start, len(pages), err)
 		if err == nil {
 			wakeSearchKey(a.Vendor, ids[i])
 			return pages, nil
@@ -87,7 +88,9 @@ func SearchAccountsOn(p provider.Provider) int { return len(accountsOn(p, "")) }
 // askPluginSearchAs is askPluginSearch as one account of the provider the
 // API signs in to.
 func (s *Server) askPluginSearchAs(ctx context.Context, v provider.SearchVendor, p provider.Provider, query string) ([]foundPage, error) {
-	got, err := runPluginSearchAs(ctx, v.Plugin, v.PluginID, query, searchHits, p.PluginAccountKey())
+	n := searchCount(ctx)
+	got, err := runPluginSearchAs(ctx, v.Plugin, v.PluginID, query, n, p.PluginAccountKey())
+	notePluginSearch(ctx, v.Plugin, pluginSearchAsked(v, query, n, "", "", p.Account.User), got, err)
 	if err != nil {
 		var r plugin.SearchRefused
 		if errors.As(err, &r) {
@@ -101,5 +104,5 @@ func (s *Server) askPluginSearchAs(ctx context.Context, v provider.SearchVendor,
 		}
 		return nil, err
 	}
-	return pluginPages(got), nil
+	return pluginPages(got, n), nil
 }

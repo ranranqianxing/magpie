@@ -14,14 +14,15 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/filememo"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -46,7 +47,9 @@ var Prompt string
 //go:embed codex_instructions.json
 var bundledJSON []byte
 
-var bundled = func() map[string]string {
+// It is read the first time a model asks, not at launch: ~0.5 MB a
+// launch that writes no Codex catalog (`magpie statusline`) never uses.
+var bundled = sync.OnceValue(func() map[string]string {
 	var b struct {
 		Instructions map[string]string `json:"instructions"`
 	}
@@ -54,7 +57,7 @@ var bundled = func() map[string]string {
 		panic(err)
 	}
 	return b.Instructions
-}()
+})
 
 // longestPrefix is the slug of slugs Codex takes a model's entry from:
 // the longest one the model's id starts with (codex-rs models-manager
@@ -97,8 +100,8 @@ func officialFor(own map[string]map[string]any, id string) (string, map[string]a
 			return text, msgs
 		}
 	}
-	if s := longestPrefix(slug, maps.Keys(bundled)); s != "" {
-		return bundled[s], nil
+	if s := longestPrefix(slug, maps.Keys(bundled())); s != "" {
+		return bundled()[s], nil
 	}
 	return Prompt, nil
 }
@@ -332,7 +335,7 @@ type model struct {
 // DeepSeek's own deepseek-flash, a found auto/deepseek-flash), named by
 // the model's own id after its provider's. A routing group is not one: it
 // may hand the turn to any model.
-var deepSeekModel = regexp.MustCompile(`(?i)^deepseek-(v[4-9]|v\d\d|flash|pro|chat|reasoner)`)
+var deepSeekModel = lazyre.New(`(?i)^deepseek-(v[4-9]|v\d\d|flash|pro|chat|reasoner)`)
 
 func deepSeek(id string) bool {
 	if strings.HasPrefix(id, "group/") {
@@ -398,8 +401,10 @@ func entriesAt(ms []catalog.Model, after int, effort string) []any {
 			e.Tiers = namedTiers(own, m.Tiers)
 		}
 		// an OpenAI model: a ChatGPT account's (codex/), or a group one is
-		// in (Fast, see provider.codexListed)
-		if v1 && (strings.HasPrefix(m.ID, "codex/") || m.Fast) {
+		// in (Fast, see provider.codexListed), or one a provider that seals
+		// a V2 lead's subagent tasks serves (Seals: a relay of the ChatGPT
+		// backend)
+		if v1 && (strings.HasPrefix(m.ID, "codex/") || m.Fast || m.Seals) {
 			e.MultiAgent = "v1"
 		} else if m.AgentsV2 {
 			e.MultiAgent = "v2"
@@ -412,7 +417,7 @@ func entriesAt(ms []catalog.Model, after int, effort string) []any {
 			// (KimYx0207 on X). The description still ends " via magpie",
 			// which is how its entry is told from Codex's own
 			// (catalog.MagpieAdded)
-			e.Description = m.Name + " (text only: Accepts images is in its provider's Names & levels in magpie) via magpie"
+			e.Description = m.Name + " (text only: Accepts images is in its provider's Model settings in magpie) via magpie"
 		}
 		if c := m.Context; c > 0 {
 			// the model's or its provider's threshold, else the one for
@@ -456,7 +461,10 @@ func entriesAt(ms []catalog.Model, after int, effort string) []any {
 			if e.MultiAgent == "" {
 				e.MultiAgent = "v2"
 			}
-			e.DetailOriginal = m.Images
+			// The original detail only on DeepSeek's own API: a relay's
+			// may refuse it, as OpenCode Go does with 400 "invalid image
+			// detail" (qiu_eth)
+			e.DetailOriginal = m.Images && strings.HasPrefix(m.ID, "deepseek/")
 		}
 		for _, ef := range m.Efforts {
 			e.Efforts = append(e.Efforts, level{Effort: ef})
@@ -563,7 +571,7 @@ func Keep(cur, b []byte) []byte {
 
 // datedSuffix is a snapshot's date after a model's id (-2026-09-14,
 // -20260914).
-var datedSuffix = regexp.MustCompile(`-(\d{4}-\d{2}-\d{2}|\d{8})$`)
+var datedSuffix = lazyre.New(`-(\d{4}-\d{2}-\d{2}|\d{8})$`)
 
 // agentsEffort is the multi_agent_reasoning_effort of Codex's own entry for
 // the model a third-party one serves (s2a/gpt-6-astra, openai/gpt-6-astra on
@@ -588,7 +596,7 @@ func agentsEffort(own map[string]map[string]any, m catalog.Model) string {
 }
 
 // gptModel is an OpenAI model's id, as a relay may serve it: gpt-6-sol, o4.
-var gptModel = regexp.MustCompile(`^(gpt-|o\d)`)
+var gptModel = lazyre.New(`^(gpt-|o\d)`)
 
 // ownTiers are the service tiers Codex's own entry gives the model a
 // provider the user added by its address serves (openai/gpt-6-sol on a
@@ -1132,6 +1140,22 @@ func listedEntry(m catalog.Model, priority int, work settings.Settings, autoRevi
 			}
 		}
 	}
+	// every level says its description: Codex 0.166 fails the whole
+	// catalog on one without the field (#5024), so a level the vendor
+	// listed without one — kept as it wrote it, or made for an effort of
+	// the user's the vendor doesn't — says the effort's display name
+	levels, _ := e["supported_reasoning_levels"].([]any)
+	for _, l := range levels {
+		o, _ := l.(map[string]any)
+		if o == nil {
+			continue
+		}
+		if _, ok := o["description"].(string); ok {
+			continue
+		}
+		ef, _ := o["effort"].(string)
+		o["description"] = effortLabel(ef)
+	}
 	// images, where the user's say (or magpie describing them) differs
 	if in, ok := e["input_modalities"].([]any); ok {
 		has := slices.Contains(in, any("image"))
@@ -1141,7 +1165,7 @@ func listedEntry(m catalog.Model, priority int, work settings.Settings, autoRevi
 			e["input_modalities"] = slices.DeleteFunc(slices.Clone(in), func(x any) bool { return x == "image" })
 		}
 	}
-	if v1 && m.Fast {
+	if v1 && (m.Fast || m.Seals) {
 		Stamp(e)
 	} else if _, ok := e["multi_agent_version"]; !ok && m.AgentsV2 {
 		e["multi_agent_version"] = "v2"
@@ -1151,6 +1175,19 @@ func listedEntry(m catalog.Model, priority int, work settings.Settings, autoRevi
 		e["auto_review_model_override"] = m.ID
 	}
 	return e, true
+}
+
+// effortLabels are the reasoning efforts' display names, as the pickers say
+// them (T3 Code's labels, internal/agent/t3code.go).
+var effortLabels = map[string]string{"none": "None", "minimal": "Minimal", "low": "Low", "medium": "Medium", "high": "High", "xhigh": "Extra High", "max": "Max", "ultra": "Ultra"}
+
+// effortLabel is the display name of an effort, the effort itself when it
+// has none.
+func effortLabel(ef string) string {
+	if l, ok := effortLabels[ef]; ok {
+		return l
+	}
+	return ef
 }
 
 // Window has one of Codex's own entries say a context window of n tokens

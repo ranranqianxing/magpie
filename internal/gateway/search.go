@@ -1331,8 +1331,11 @@ func (s *Server) searchRounds(ctx context.Context, q *Request, tool string, in <
 			col.add(ev)
 			switch ev.Kind {
 			case KStart:
+				// a round's prompt is told, the rounds before billed as
+				// the reply's Deferred (after)
 				this = ev.Usage
-				ev.Usage = ev.Usage.plus(before, false)
+				ev.Usage = ev.Usage.after(before, false)
+				ev.Usage.restart = started
 				if started {
 					ev = Event{Kind: KUsage, Usage: ev.Usage}
 				}
@@ -1465,6 +1468,9 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 			return nil, 502, p.Name + " " + didNotStream + ": " + provider.APIError(b, "unexpected reply")
 		}
 		events := make(chan Event, 16)
+		// read here, on the request's goroutine: the reader below can
+		// outlive the request (#5973)
+		every, gap := keepaliveEvery, keepaliveGap
 		go func() {
 			defer close(events)
 			defer res.Body.Close()
@@ -1483,8 +1489,8 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 			// provider says nothing at all, as streamTranslated's client
 			// does (keepThroughSilence)
 			var mu sync.Mutex
-			heard, stopKeep := keepThroughSilence(&mu, func() {
-				if failed == nil && time.Since(told) >= keepaliveEvery/2 {
+			heard, stopKeep := keepThroughSilence(every, &mu, func() {
+				if failed == nil && time.Since(told) >= every/2 {
 					failed = send(Event{Kind: KAlive})
 					told = time.Now()
 				}
@@ -1509,7 +1515,7 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 				// a provider still queued or thinking — keepalives,
 				// response.in_progress — is heard from with nothing to
 				// translate: the reader hears that it goes on (#2316)
-				if failed == nil && time.Since(told) >= keepaliveGap {
+				if failed == nil && time.Since(told) >= gap {
 					failed = send(Event{Kind: KAlive})
 					told = time.Now()
 				}

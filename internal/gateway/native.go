@@ -46,11 +46,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/access"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -142,14 +143,17 @@ func (s *Server) nativeArk(w http.ResponseWriter, r *http.Request, p provider.Pr
 			fail(http.StatusForbidden, msg)
 			return
 		}
-		var hits maskHits
-		if err := maskStrings(r.Context(), obj, &hits); err != nil { // fails closed
-			fail(maskStatus(err), err.Error())
-			return
-		}
-		if hits.n > 0 {
-			b, _ := json.Marshal(obj)
-			noteMasked(r, "native", hits, string(b), 0, p.ID, model)
+		// as nativeAny's: one the user set to go unmasked goes as written
+		if !p.SkipsRedaction() {
+			var hits maskHits
+			if err := maskStrings(r.Context(), obj, &hits); err != nil { // fails closed
+				fail(maskStatus(err), err.Error())
+				return
+			}
+			if hits.n > 0 {
+				b, _ := json.Marshal(obj)
+				noteMasked(r, "native", hits, string(b), 0, p.ID, model)
+			}
 		}
 		body, _ = json.Marshal(obj)
 	}
@@ -172,6 +176,8 @@ func (s *Server) nativeArk(w http.ResponseWriter, r *http.Request, p provider.Pr
 		req.Header.Set("Accept", a)
 	}
 	stampUA(ctx, p, req.Header)
+	// the headers the user gave the model the body names
+	ctx = provider.WithModel(ctx, p.ID, call.Model)
 	if err := p.Sign(ctx, req, provider.Chat, body); err != nil {
 		fail(http.StatusBadGateway, err.Error())
 		return
@@ -234,7 +240,7 @@ func nativeProto(p provider.Provider) provider.Protocol {
 
 // schemeLike is a first segment that reads as a URL's scheme ("http:",
 // "javascript:x").
-var schemeLike = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
+var schemeLike = lazyre.New(`^[A-Za-z][A-Za-z0-9+.-]*:`)
 
 // nativeTarget is raw, the path after the provider as the caller escaped
 // it, at base's host: scheme and host from base, nothing of base's path.
@@ -290,18 +296,36 @@ func nativeQuery(raw string) string {
 // nativeDropped are the caller's headers that never go to the vendor:
 // its auth (a gateway key in any place callerKeys reads one, and any
 // other credential), the browser's and a proxy's, the hop's own, and
-// magpie's. The rest go as they came.
+// magpie's; and what a proxy says of the caller (proxyIdentity). The rest
+// go as they came.
 var nativeDropped = map[string]bool{
 	"Authorization": true, "Proxy-Authorization": true, "X-Api-Key": true, "Api-Key": true, "X-Goog-Api-Key": true, "Cookie": true,
-	"Host": true, "Origin": true, "Referer": true, "Forwarded": true, "X-Real-Ip": true, "Via": true,
+	"Host": true, "Origin": true, "Referer": true,
 	"Connection": true, "Proxy-Connection": true, "Keep-Alive": true, "Te": true, "Trailer": true, "Transfer-Encoding": true, "Upgrade": true,
 	"Content-Length": true, "Accept-Encoding": true, "User-Agent": true,
 }
 
 func nativeHeaderDropped(k string) bool {
 	k = http.CanonicalHeaderKey(k)
-	return nativeDropped[k] || strings.HasPrefix(k, "X-Forwarded-") || strings.HasPrefix(k, "X-Magpie-") ||
-		strings.HasPrefix(k, "Sec-") || strings.HasPrefix(k, "Cf-")
+	return nativeDropped[k] || proxyIdentity(k) || strings.HasPrefix(k, "X-Magpie-") || strings.HasPrefix(k, "Sec-")
+}
+
+// proxyIdentity says k is what a proxy or tunnel in front of magpie says
+// of the caller: its address (every forwardHeaders entry, X-Forwarded-*,
+// Cloudflare's Cf-*) or who it is (Tailscale Serve's Tailscale-User-Login,
+// the user's email, -Name and -Profile-Pic). It is for magpie to judge a
+// request by (proxied), never for a vendor or a server magpie passes the
+// request on to.
+func proxyIdentity(k string) bool {
+	k = http.CanonicalHeaderKey(k)
+	if slices.ContainsFunc(forwardHeaders, func(h string) bool { return http.CanonicalHeaderKey(h) == k }) {
+		return true
+	}
+	switch k {
+	case "Forwarded", "Via", "X-Real-Ip", "True-Client-Ip", "X-Client-Ip", "X-Original-Forwarded-For":
+		return true
+	}
+	return strings.HasPrefix(k, "X-Forwarded-") || strings.HasPrefix(k, "Cf-") || strings.HasPrefix(k, "Tailscale-")
 }
 
 // nativeAnswerDropped are the vendor's answer headers that don't come
@@ -415,6 +439,8 @@ func (s *Server) nativeAny(w http.ResponseWriter, r *http.Request, p provider.Pr
 		}
 	}
 	stampUA(ctx, p, req.Header)
+	// the headers the user gave the model the body names
+	ctx = provider.WithModel(ctx, p.ID, call.Model)
 	if err := p.Sign(ctx, req, proto, body); err != nil {
 		fail(http.StatusBadGateway, err.Error())
 		return

@@ -10,6 +10,16 @@ const Command = "claude-tui-helper"
 // answer in their own Claude Code, and the run ends, saying so.
 const TrustEnv = "MAGPIE_CLAUDE_TUI_TRUST"
 
+// BypassEnv, "1", has the shim tell Claude Code yes when it asks to accept
+// running in Bypass Permissions mode (a user's claude that is a wrapper
+// adding --dangerously-skip-permissions, or an account whose default mode
+// it is; #5042). Claude Code records the acceptance in its config folder's
+// settings.json, for every run after, so the bridge sets it only for an
+// account folder of magpie's, whose Claude Code no one else runs. In the
+// account Claude Code is signed in to the acceptance is its user's to give,
+// and the run ends at once, saying so.
+const BypassEnv = "MAGPIE_CLAUDE_TUI_BYPASS"
+
 // DeadlineEnv holds, in Unix milliseconds, when a one-off run's caller
 // (a /usage read, a test's "hi") stops waiting for it. The helper ends
 // then on its own, saying on its stderr what Claude Code hadn't done and
@@ -22,6 +32,14 @@ const DeadlineEnv = "MAGPIE_CLAUDE_TUI_BY"
 // folder it wasn't told to trust: the bridge then runs the turn in a
 // folder of magpie's.
 const Untrusted = "Claude Code asks whether to trust the folder"
+
+// EndedEarly begins what the helper says as it ends over a Claude Code
+// that ended itself before it showed its prompt, as one that can't load
+// the session it was told to go on with does. Every other way the
+// interactive mode doesn't come up (no prompt in ReadyWait, a sign-in or
+// a question only its user answers) is the same for a new Claude Code
+// told the whole conversation: the bridge tries one again only on this.
+const EndedEarly = "Claude Code ended before it showed its prompt"
 
 // WSLEnv holds, as JSON (WSL), how to run a Claude Code that is in a WSL
 // distro: the helper, on Windows, runs wsl.exe in its pseudo console.

@@ -15,6 +15,7 @@ import (
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/sessions"
 	"github.com/yetone/magpie/internal/settings"
@@ -55,7 +56,9 @@ func csvStamp(p usage.Period, day string, now time.Time) string {
 		return "magpie-requests-day-" + day
 	}
 	if p.IsRange() { // the days picked, which already say when
-		return "magpie-requests-" + strings.Replace(string(p), "..", "-to-", 1)
+		// a minute an end names ("T09:30") without the colon Windows
+		// doesn't take in a file name
+		return "magpie-requests-" + strings.ReplaceAll(strings.Replace(string(p), "..", "-to-", 1), ":", "")
 	}
 	// a rolling window ("last:24h0m0s") without the colon, which Windows
 	// doesn't take in a file name (#2075)
@@ -182,6 +185,12 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 		limit, _ := strconv.Atoi(q.Get("limit"))
 		writeJSON(rw, ledgerPage(periodOf(q.Get("period")), ledgerFilter(r), offset, limit))
 	}))
+	// the gateway's bytes up and down so far and its requests in flight,
+	// which the Requests read a moment apart for how fast its traffic flows
+	// now; {} when another magpie serves the gateway
+	mux.HandleFunc("GET /api/usage/traffic", func(rw http.ResponseWriter, r *http.Request) {
+		writeJSON(rw, trafficNow())
+	})
 	// the heatmap (#1369): the last 53 weeks a day each, of the requests the
 	// page's filters keep, read from the same index as the page
 	mux.HandleFunc("GET /api/usage/heatmap", coldTurn(func(rw http.ResponseWriter, r *http.Request) {
@@ -255,10 +264,18 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 	// own /usage is run at once (provider.AskClaudeUsage).
 	// Only then are they read while the user has allowances read only
 	// when asked (#1518).
+	// &all=1 is the user's Refresh of every allowance by hand (the tray
+	// panel's, the Usage page's, routing's): each saved Claude account's
+	// /usage is run too, as its card's refresh runs it (#5380); opening
+	// the page asks without it.
 	mux.HandleFunc("GET /api/usage/quotas", func(rw http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		if r.URL.Query().Get("asked") != "" {
-			provider.AskClaudeUsage()
+		if q := r.URL.Query(); q.Get("asked") != "" {
+			if q.Get("all") != "" {
+				provider.AskEveryClaudeUsage()
+			} else {
+				provider.AskClaudeUsage()
+			}
 			ctx = provider.Asked(ctx)
 		}
 		ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
@@ -427,4 +444,21 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 		}
 		writeJSON(rw, out)
 	})
+}
+
+// trafficJSON is the gateway's bytes so far (gateway.Traffic) with its
+// requests in flight; all left out when this process serves no gateway.
+type trafficJSON struct {
+	*gateway.Traffic
+	Requests *int `json:"requests,omitempty"`
+}
+
+// trafficNow is what /api/usage/traffic answers.
+func trafficNow() trafficJSON {
+	gw := served.Load()
+	if gw == nil {
+		return trafficJSON{}
+	}
+	t, n := gw.Traffic(), gw.Busy().Requests
+	return trafficJSON{Traffic: &t, Requests: &n}
 }

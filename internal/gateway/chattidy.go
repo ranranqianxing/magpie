@@ -77,7 +77,11 @@ import (
 // own log says the reply went (AricRedemption). A nameless call runs
 // nowhere, so it is no call, as a written block naming no offered tool
 // is; a name of another kind on a later fragment is left out, the first
-// one's kept.
+// one's kept. And a finish of tool_calls no delta ever carried a call
+// for (#4944, Hermes: a reply of text alone whose upstream ends it
+// "tool_calls" all the same) ends stop too — a client that reads
+// finish_reason took the turn for one whose calls were dropped and
+// re-prompted, three times a reply.
 //
 // And a legacy function_call that carries nothing — a name and arguments
 // both empty — is left out too (#4659): WorkBuddy's stream ends a reply
@@ -292,9 +296,18 @@ func (t *chatTidy) line(line []byte) []byte {
 			delete(delta, "tool_calls")
 			inDelta = true
 		}
-		if fc, ok := delta["function_call"]; ok && emptyFunctionCall(fc) {
-			delete(delta, "function_call")
-			inDelta = true
+		if fc, ok := delta["function_call"]; ok {
+			if fullFunctionCall(fc) {
+				// a legacy call a client may still be reading (#4659)
+				// keeps a finish that says the turn ended in a call
+				if t.named == nil {
+					t.named = map[int]bool{}
+				}
+				t.named[choice] = true
+			} else if emptyFunctionCall(fc) {
+				delete(delta, "function_call")
+				inDelta = true
+			}
 		}
 		if calls, ok := delta["tool_calls"]; ok {
 			if t.indexes == nil {
@@ -338,20 +351,19 @@ func (t *chatTidy) line(line []byte) []byte {
 			c["delta"], _ = json.Marshal(delta)
 			changed = true
 		}
-		if t.called[choice] {
-			switch end := string(bytes.TrimSpace(c["finish_reason"])); end {
-			case `"stop"`:
-				if t.named[choice] {
-					c["finish_reason"] = json.RawMessage(`"tool_calls"`)
-					changed = true
-				}
-			case `"tool_calls"`:
-				if !t.named[choice] {
-					// the call the finish named named no function: it ends
-					// stop, as a reply that made no call (#1475)
-					c["finish_reason"] = json.RawMessage(`"stop"`)
-					changed = true
-				}
+		switch end := string(bytes.TrimSpace(c["finish_reason"])); end {
+		case `"stop"`:
+			if t.called[choice] && t.named[choice] {
+				c["finish_reason"] = json.RawMessage(`"tool_calls"`)
+				changed = true
+			}
+		case `"tool_calls"`:
+			if !t.named[choice] {
+				// the call the finish named named no function, or no call
+				// was ever made and no delta carried the key (#4944): it
+				// ends stop, as a reply that made no call (#1475)
+				c["finish_reason"] = json.RawMessage(`"stop"`)
+				changed = true
 			}
 		}
 	}
@@ -382,6 +394,21 @@ func emptyFunctionCall(raw json.RawMessage) bool {
 		Arguments string `json:"arguments"`
 	}
 	return decodeJSON(raw, &fc) == nil && fc.Name == "" && fc.Arguments == ""
+}
+
+// fullFunctionCall reports whether raw is a legacy function_call a client
+// may still be reading: a name or arguments that hold something (#4659).
+// A null is the contract's own nothing and an unreadable shape is no call
+// a client reads.
+func fullFunctionCall(raw json.RawMessage) bool {
+	if string(bytes.TrimSpace(raw)) == "null" {
+		return false
+	}
+	var fc struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}
+	return decodeJSON(raw, &fc) == nil && (fc.Name != "" || fc.Arguments != "")
 }
 
 // withoutEmptyNames drops the empty "name" on a delta's tool-call
@@ -426,6 +453,41 @@ type openCall struct {
 	open        bool
 	id          string
 	index, next int
+	// an upstream index's call: the index it goes by and its id, and the
+	// indexes given, for a stream that sends a new call on an index an
+	// earlier call has (renumber)
+	up   map[int]int
+	upID map[int]string
+	used map[int]bool
+}
+
+// renumber is the index a fragment the upstream sent at n goes by. An
+// upstream that turns Responses into Chat itself (OpenDesign's
+// amr-link, jiezhengj on Discord) sometimes sends a second parallel call
+// on the first one's index, 0,0,1 for three: a client that adds up a
+// call's fragments by index (OpenAI's and Vercel's SDKs) wrote the two
+// calls' arguments into one, invalid JSON, and the turn ended. A new id
+// on an index another call has, and each later fragment at that index,
+// goes by the next free one; the calls after it, by one of their own.
+// Only a fragment that names its function starts a call: one that
+// carries only arguments goes on with its index's call, whatever id it
+// has. A stream whose calls each have their own index goes as it came.
+func (o *openCall) renumber(n int, id string, starts bool) int {
+	if o.up == nil {
+		o.up, o.upID, o.used = map[int]int{}, map[int]string{}, map[int]bool{}
+	}
+	out, known := o.up[n]
+	if !known || starts && id != "" && o.upID[n] != "" && id != o.upID[n] {
+		out = n
+		if known || o.used[n] {
+			out = o.next
+		}
+		o.up[n], o.used[out] = out, true
+	}
+	if id != "" {
+		o.upID[n] = id
+	}
+	return out
 }
 
 // give gives each fragment of a delta's tool_calls with no index (none,
@@ -435,7 +497,8 @@ type openCall struct {
 // call with a new id; any other goes on with the open one. So two calls
 // in chunks of their own are 0 and 1: given both 0, by their place, OpenAI's
 // node SDK merged them into one call. A fragment with an index keeps it,
-// and the next one given comes after it.
+// unless another call had it first (renumber), and the next one given
+// comes after it.
 func (s streamCallIndexes) give(choice int, raw json.RawMessage) (json.RawMessage, bool) {
 	var calls []map[string]json.RawMessage
 	if decodeJSON(raw, &calls) != nil {
@@ -452,14 +515,23 @@ func (s streamCallIndexes) give(choice int, raw json.RawMessage) (json.RawMessag
 		if v, ok := c["index"]; ok && string(v) != "null" {
 			var n int
 			if decodeJSON(v, &n) == nil {
-				o.open, o.id, o.index = true, cmp.Or(id, o.id), n
-				o.next = max(o.next, n+1)
+				out := o.renumber(n, id, namesFunction(c["function"]))
+				o.open, o.id, o.index = true, cmp.Or(id, o.id), out
+				o.next = max(o.next, n+1, out+1)
+				if out != n {
+					c["index"], _ = marshalPlain(out)
+					changed = true
+				}
 			}
 			continue
 		}
 		if !o.open || k > 0 || id != "" && id != o.id {
 			o.open, o.id, o.index = true, id, o.next
 			o.next++
+			if o.used == nil {
+				o.up, o.upID, o.used = map[int]int{}, map[int]string{}, map[int]bool{}
+			}
+			o.used[o.index] = true
 		}
 		c["index"], _ = marshalPlain(o.index)
 		changed = true
@@ -472,6 +544,14 @@ func (s streamCallIndexes) give(choice int, raw json.RawMessage) (json.RawMessag
 		return raw, false
 	}
 	return out, true
+}
+
+// namesFunction reports whether a call fragment's function has a name.
+func namesFunction(raw json.RawMessage) bool {
+	var fn struct {
+		Name string `json:"name"`
+	}
+	return decodeJSON(raw, &fn) == nil && fn.Name != ""
 }
 
 // nameless drops the fragments of a streamed call whose first one names
@@ -1017,7 +1097,10 @@ func mistralThinking(body []byte) []byte {
 		}
 		var role string
 		decodeJSON(m["role"], &role)
-		if think == "" || role != "assistant" {
+		// a whitespace-only thinking is the placeholder a DeepSeek
+		// replay puts on a tool turn that had none (#1462): dropped, not
+		// sent as a blank thinking part (#4906)
+		if strings.TrimSpace(think) == "" || role != "assistant" {
 			return true
 		}
 		thinking, _ := marshalPlain(map[string]any{"type": "thinking",

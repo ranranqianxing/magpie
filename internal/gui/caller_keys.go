@@ -10,6 +10,8 @@ import (
 
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/budget"
+	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -39,6 +41,15 @@ type keyModelJSON struct {
 	Decides bool `json:"decides,omitempty"`
 }
 
+// keyMCPJSON is an MCP server a gateway key may be held to, with its
+// tools, as its picker lists it.
+type keyMCPJSON struct {
+	Name  string   `json:"name"`
+	Title string   `json:"title,omitempty"`
+	Tools []string `json:"tools"`
+	Own   bool     `json:"own,omitempty"` // one of magpie's own
+}
+
 func withLimits(keys []access.Key) []keyRow {
 	now := time.Now()
 	out := make([]keyRow, 0, len(keys))
@@ -61,7 +72,7 @@ func callerKeyRoutes(mux *http.ServeMux) {
 			fail(w, err)
 			return
 		}
-		writeJSON(w, map[string]any{"keys": withLimits(keys), "accountNames": provider.AccountNames()})
+		writeJSON(w, map[string]any{"keys": withLimits(keys), "accountNames": provider.AccountNames(), "accountGroups": accountGroupsJSON()})
 	})
 	// the models a key may be held to (#882), and the accounts and keys
 	// (#905): the routing groups, then each provider's models, then its
@@ -79,6 +90,27 @@ func callerKeyRoutes(mux *http.ServeMux) {
 				continue
 			}
 			out = append(out, keyModelJSON{ID: e.Provider.ID + "/" + e.Model, Name: cmp.Or(e.Name, e.Model), Provider: e.Provider.ID, ProviderName: cmp.Or(e.Provider.Name, e.Provider.ID)})
+		}
+		// the models a routing group listing alone keeps out of the lists,
+		// each after its provider's: a key not given the group is listed
+		// those it may use (the gateway's keyListed), so the picker offers
+		// them to pick one at a time too (luckymanjc on Discord: Codex
+		// offered GPT-6-Luna alone)
+		for _, s := range provider.GroupStandIns() {
+			e := s.Entry
+			id := e.Provider.ID + "/" + e.Model
+			if slices.ContainsFunc(out, func(m keyModelJSON) bool { return strings.EqualFold(m.ID, id) }) {
+				continue
+			}
+			m := keyModelJSON{ID: id, Name: cmp.Or(e.Name, e.Model), Provider: e.Provider.ID, ProviderName: cmp.Or(e.Provider.Name, e.Provider.ID)}
+			at := len(out)
+			for i := len(out) - 1; i >= 0; i-- {
+				if out[i].Provider == m.Provider {
+					at = i + 1
+					break
+				}
+			}
+			out = slices.Insert(out, at, m)
 		}
 		// the decision models the routing groups' pickers offer, each
 		// after its provider's chat models: the gateway holds a key to
@@ -113,7 +145,30 @@ func callerKeyRoutes(mux *http.ServeMux) {
 				accounts = append(accounts, keyModelJSON{ID: p.ID + "/" + a.ID, Name: a.Shown(p), Provider: p.ID, ProviderName: name, Account: !a.Key, Key: a.Key, Plan: a.Plan})
 			}
 		}
-		writeJSON(w, map[string]any{"models": out, "accounts": accounts})
+		// the account groups a key's accounts may name, "@<id>" or "!@<id>"
+		// (LeiWang_2000 on X), each with its accounts
+		writeJSON(w, map[string]any{"models": out, "accounts": accounts, "groups": accountGroupsJSON()})
+	})
+	// the MCP servers and tools a key may be held to (wakaka on Discord):
+	// magpie's own, then the Library's, each with its tools by name
+	mux.HandleFunc("GET /api/caller-keys/mcp", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		out := []keyMCPJSON{}
+		for _, o := range gateway.OwnMCPTools(r.Context()) {
+			m := keyMCPJSON{Name: o.Name, Title: o.Title, Tools: o.Tools, Own: true}
+			if m.Tools == nil {
+				m.Tools = []string{}
+			}
+			out = append(out, m)
+		}
+		for _, s := range library.KeyMCPServers() {
+			m := keyMCPJSON{Name: s.Name, Title: s.Title, Tools: []string{}}
+			for _, t := range s.Tools {
+				m.Tools = append(m.Tools, t.Name)
+			}
+			out = append(out, m)
+		}
+		writeJSON(w, map[string]any{"servers": out})
 	})
 	mux.HandleFunc("POST /api/caller-keys/{action}", func(w http.ResponseWriter, r *http.Request) {
 		var in access.Change
@@ -133,6 +188,56 @@ func callerKeyRoutes(mux *http.ServeMux) {
 			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
-		writeJSON(w, map[string]any{"keys": withLimits(keys), "accountNames": provider.AccountNames(), "secret": secret})
+		writeJSON(w, map[string]any{"keys": withLimits(keys), "accountNames": provider.AccountNames(), "accountGroups": accountGroupsJSON(), "secret": secret})
 	})
+	// the account groups a key's accounts may name, "@<id>" or "!@<id>"
+	// (LeiWang_2000 on X): save adds one (no id) or changes it, remove
+	// takes one off unless a key names it
+	mux.HandleFunc("GET /api/account-groups", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		gs, err := access.AccountGroups()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, map[string]any{"groups": gs})
+	})
+	mux.HandleFunc("POST /api/account-groups/{action}", func(w http.ResponseWriter, r *http.Request) {
+		var in access.AccountGroup
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(w, err)
+			return
+		}
+		var err error
+		switch r.PathValue("action") {
+		case "save":
+			_, err = access.SaveAccountGroup(in)
+		case "remove":
+			err = access.RemoveAccountGroup(in.ID)
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		gs, err := access.AccountGroups()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, map[string]any{"groups": gs})
+	})
+}
+
+// accountGroupsJSON are the account groups for the keys' rows, none when
+// they can't be read (a key naming one still holds: identityOf).
+func accountGroupsJSON() []access.AccountGroup {
+	gs, err := access.AccountGroups()
+	if err != nil || gs == nil {
+		return []access.AccountGroup{}
+	}
+	return gs
 }

@@ -139,6 +139,8 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		UsageAliases:         map[string]string{"deepseek-v4.1-flash": "deepseek-flash"},
 		UsageCleared:         []settings.UsageClear{{Provider: "p", Model: "m", At: 1761600000000}},
 		ModelKinds:           map[string]string{"p/m": "video"},
+		ModelHeaders:         map[string]map[string]string{"p/m": {"X-Endpoint": "ep-1"}},
+		ModelSystemPrompts:   map[string]string{"p/m": "Answer in Chinese."},
 		RedactRules:          []redact.Rule{{Kind: "prefix", Prefix: "oc_sk_"}},
 		RedactActions:        map[string]string{"API_KEY": "block", "EMAIL": "warn"},
 		RedactAllow:          []string{"team@kelvarn.io"},
@@ -161,6 +163,7 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		ClientAgents:         map[string]string{"hermes-codex-thread-bridge": "codex"},
 		PlainNames:           true,
 		PlainOwnNames:        true,
+		AgentSuffix:          map[string]string{"pi": "off"},
 		BareModelIDs:         true,
 		CodexAgentsV1:        true,
 		CodexTitles:          "off",
@@ -168,7 +171,9 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		CodexPredictions:     "off",
 		CodexAutoReview:      "fake/m1",
 		CodexSubagentModel:   "codex/gpt-6-astra",
+		CodexServiceTier:     "priority",
 		DesktopSubagentModel: "fake/m2",
+		DshCompactModel:      "fake/m1",
 		ChinaMirror:          true,
 		NPMRegistry:          "https://npm.corp.example",
 		CodexAutoReset:       []string{"me@example.com"},
@@ -186,11 +191,14 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		WindowAt:             []int{-1440, 120},
 		FullContext:          true,
 		DesktopLongest:       true,
+		DesktopIsolated:      true,
 		GuideHidden:          true,
 		GatewayMode:          "off",
 		QuotaReads:           "asked",
 		SearchAll:            true,
+		SearchCount:          9,
 		NoAccountDiscovery:   true,
+		AgentTelemetryOff:    true,
 		RedactModel:          true,
 		RedactModelName:      "astrlink-guard",
 		RedactModelScore:     map[string]float64{"astrlink-guard": 0.9},
@@ -203,11 +211,18 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 	was.ClaudeRunsMost = 3
 	was.RequestArchiveLocal, was.RequestArchiveLocalMB = true, 256
 	was.ProxyCustom = "http://me:secret@proxy.example:8080"
+	was.PluginProxyCustom = "http://me:secret@plugins.example:8080"
 	was.PanelShortcut = "Ctrl+Alt+K"
 	was.SearcherThen = []string{"fake/m1", "fake/m2"} // set in its own row
 	was.RouterNote = "Los Angeles"                    // the Library's servers/hub-note
 	was.RouterAllTools = true                         // the Library's servers/hub-tools
 	was.BusyLoad = 150                                // the Routing page's busy-load
+	was.MTLS = true                                   // Network and sharing's settings/mtls
+	was.HTTPS = true                                  // Network and sharing's settings/https
+	// Settings > Usage's Bark row has its own route (settings/bark)
+	was.BarkServer, was.BarkKey, was.BarkDaily = "https://bark.example.com", "kept", "21:30"
+	// the Routing groups page's defaults for every group (groups/defaults)
+	was.GroupSink, was.GroupFirstToken, was.GroupPatience = true, 30, 120
 	if err := settings.Save(was); err != nil {
 		t.Fatal(err)
 	}

@@ -72,6 +72,13 @@ type RuleHit struct {
 	Small   []string `json:"small,omitempty"`
 	// Bare: the group has no rules, only its effort picked
 	Bare bool `json:"bare,omitempty"`
+	// Ended: the rule (from 1) that sent the conversation's last turn to
+	// its member held by hours that are over now (MinglunZhu on X: a
+	// cheaper provider at night, the usual one by day). No rule puts a
+	// member first this turn, and the vendor's cache of the night's member
+	// doesn't keep the conversation there (affine's "hours"): it goes
+	// where the group routes it, as a new conversation would
+	Ended int `json:"ended,omitempty"`
 	// UseEffort: the reasoning the rule asks the member it names for
 	// (provider.Rule.UseEffort, #2633), in place of the agent's
 	UseEffort string `json:"useEffort,omitempty"`
@@ -139,7 +146,7 @@ var turnRules = struct {
 // ruleKey is the conversation a group's rules keep a turn's decision for:
 // the agent's session and the conversation's first words (firstWords).
 func ruleKey(g provider.Group, in http.Header, req *Request) string {
-	return provider.GroupPrefix + g.ID + "|" + conversationID(in, nil) + "|" + firstWords(req)
+	return provider.GroupPrefix + g.ID + "|" + affinityID(in, nil) + "|" + firstWords(req)
 }
 
 // firstWords tells an agent's subagents from it: they share its session
@@ -195,7 +202,16 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 	turn, within := turnIn(req)
 	now := ruleClock()
 	size := estimate(req)
-	q := provider.RuleRequest{Tokens: size, Thinking: req.Thinking, Effort: req.Effort, Agent: agent, At: now}
+	q := provider.RuleRequest{Tokens: size, Thinking: req.Thinking, Effort: req.Effort, Off: req.ThinkOff, Agent: agent, At: now, Subagent: req.subagent}
+	if provider.RulesRead(g.Rules, "message") {
+		_, q.Message = lastSaid(req, len(req.Messages)) // the user's own words, as the turn began
+	}
+	if provider.RulesRead(g.Rules, "system") {
+		q.System = req.systemTexts()
+	}
+	if provider.RulesRead(g.Rules, "last") {
+		q.Last = lastUserTexts(req)
+	}
 	for _, m := range req.Messages {
 		if slices.ContainsFunc(m.Parts, func(p Part) bool { return p.Kind == Image }) {
 			q.Images = true
@@ -337,6 +353,7 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 			t0 := time.Now()
 			v, cached, err := classify(ask, g.Classifier, intents, prev, effort, text)
 			classifiedFor(g.ID, g.Classifier, err)
+			v.Intent = intentOf(v, g) // the group's own sure of an intent (#5101)
 			c.Intent, c.Said, c.Cached, c.Ms = v.Intent, v.Said, cached, int(time.Since(t0).Milliseconds())
 			if effort {
 				c.Effort, c.Score = v.Effort, v.Score
@@ -363,6 +380,11 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 	}
 	if i := provider.MatchRule(g.Rules, q); i >= 0 {
 		hit.N, hit.Use, hit.More, hit.When = i+1, g.Rules[i].Use, g.Rules[i].More, g.Rules[i].Conditions()
+	}
+	if had && hit.Use == "" && tr.use != "" && tr.n >= 1 && tr.n <= len(g.Rules) {
+		if r := g.Rules[tr.n-1]; r.Use == tr.use && r.Time != nil && !r.Time.Holds(now) {
+			hit.Ended = tr.n
+		}
 	}
 	turnRules.Lock()
 	defer turnRules.Unlock()

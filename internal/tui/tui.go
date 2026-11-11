@@ -383,6 +383,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.flash, m.flashOK = "reloaded", true
 					if m.page == pageUsage {
 						m.quotas = nil
+						// every account read again, a saved Claude
+						// account's /usage run too, as the app's
+						// Refresh does (#5380)
+						provider.AskEveryClaudeUsage()
 						return m, m.loadQuotas(true)
 					}
 					return m, nil
@@ -820,7 +824,7 @@ func (m model) View() string {
 		body = m.viewGroup()
 		// two lines: there is more to do to a group than one holds
 		footer = hints("↑↓", "model / rule", "J K", "move", "a", "add model", "n", "new rule", "↵", "edit rule", "d", "take out", "esc", "back") + "\n" +
-			pad + hints("E", "effort", "F", "fast", "c", "classifier", "o", "routing", "s", "stays", "x", "context", "l", "levels", "f", "family", "R", "rename")
+			pad + hints("E", "effort", "F", "fast", "c", "classifier", "o", "routing", "s", "stays", "x", "context", "l", "levels", "f", "family", "N", "note", "R", "rename")
 	case modeName:
 		body = m.viewName()
 		footer = hints("↵", "save", "esc", "cancel")

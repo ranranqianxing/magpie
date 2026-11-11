@@ -167,7 +167,7 @@ func targetOf(a *agent.Agent) *Target {
 		t.Instructions = filepath.Join(d, "GEMINI.md")
 		t.MCP = &mcpFile{Path: filepath.Join(d, "settings.json"), Format: fmtGemini}
 		t.Skills = filepath.Join(d, "skills")
-	case "agy":
+	case "agy", "antigravity":
 		// Antigravity — the app and agy alike — reads its user-wide
 		// customizations from ~/.gemini/config: GEMINI.md there (as well as
 		// Gemini CLI's ~/.gemini/GEMINI.md), mcp_config.json and skills
@@ -241,6 +241,16 @@ func targetOf(a *agent.Agent) *Target {
 		// are found as Pi's are: AGENTS.override.md, else the first there
 		// is of AGENTS.md, AGENTS.MD, CLAUDE.md and CLAUDE.MD
 		// (loadContextFileFromDir, @code-yeongyu/senpi 2026.10.12)
+		d := a.Dir
+		t.Instructions = firstThere(d, "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD")
+		t.Override = filepath.Join(d, "AGENTS.override.md")
+		t.MCP = &mcpFile{Path: filepath.Join(d, "mcp.json"), Format: fmtPiNative}
+		t.Skills = filepath.Join(d, "skills")
+	case "mu":
+		// mu is Pi 1.4.0 (packages/coding-agent, qybaihe/mu b71cd18) on
+		// its own agent folder (agent.muDir): Pi's AGENTS.override.md, else
+		// the first there is of AGENTS.md, AGENTS.MD, CLAUDE.md and
+		// CLAUDE.MD, its mcp.json (Pi's own MCP servers) and its skills
 		d := a.Dir
 		t.Instructions = firstThere(d, "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD")
 		t.Override = filepath.Join(d, "AGENTS.override.md")
@@ -333,6 +343,23 @@ func targetOf(a *agent.Agent) *Target {
 	case "cindy":
 		// Cindy keeps its user-wide skills in ~/.agents/skills
 		t.Skills = sharedSkillsDir()
+	case "craft-agents":
+		// Craft Agents reads user-wide skills from ~/.agents/skills
+		// (skills/storage.ts, GLOBAL_AGENT_SKILLS_DIR) beside its
+		// workspaces' own. Its MCP servers are sources of a workspace,
+		// which magpie doesn't write.
+		t.Skills = sharedSkillsDir()
+	case "tuanjie-cowork":
+		// Tuanjie Cowork counts ~/.agents/skills as the user's skills beside
+		// Codely's own ~/.codely-cli/skills (its core's skill scan, scope
+		// "user-alias", 2.1.6-stable). Its MCP servers are Codely's settings,
+		// which magpie doesn't write for it.
+		t.Skills = sharedSkillsDir()
+	case "openbot":
+		// OpenBot reads skills only from ~/.agents/skills (home-skills.ts,
+		// HOME_SKILL_FOLDER). Its MCP servers are rows in its SQLite
+		// database (McpServerStore), which magpie doesn't write.
+		t.Skills = sharedSkillsDir()
 	case "hermes":
 		// Hermes Agent reads mcp_servers from $HERMES_HOME/config.yaml, the
 		// file magpie sets its model in too (tools/mcp_tool.py), and skills
@@ -340,8 +367,10 @@ func targetOf(a *agent.Agent) *Target {
 		t.MCP = &mcpFile{Path: a.Path, Format: fmtHermes}
 		t.Skills = filepath.Join(a.Dir, "skills")
 	case "minimax-code":
-		// MiniMax Code loads the skills in its data folder ($MINIMAX_DATA_DIR,
-		// else ~/.minimax); it has no user-wide MCP file, only plugins' own
+		// MiniMax Code loads the skills in its data folder (a.Dir,
+		// appdir.MiniMaxDirIn: $MINIMAX_DATA_DIR, the folder its desktop app
+		// moved it to, else ~/.minimax); it has no user-wide MCP file, only
+		// plugins' own
 		t.Skills = filepath.Join(a.Dir, "skills")
 	case "devin":
 		// Devin reads its user-wide MCP servers from mcp_config.json
@@ -374,7 +403,7 @@ func targetOf(a *agent.Agent) *Target {
 		// type stdio, http or sse as Claude Code's (docs.factory.ai/cli/
 		// configuration/mcp); its personal instructions are ~/.factory/
 		// AGENTS.md, which project files override (cli/configuration/agents-md)
-		t.MCP = &mcpFile{Path: filepath.Join(a.Dir, "mcp.json"), Format: fmtClaude}
+		t.MCP = &mcpFile{Path: filepath.Join(a.Dir, "mcp.json"), Format: fmtClaude, NoCmdRefs: true}
 		t.Instructions = filepath.Join(a.Dir, "AGENTS.md")
 		t.Skills = filepath.Join(a.Dir, "skills")
 	case "qoder", "qoder-cn":
@@ -515,6 +544,17 @@ func targetOf(a *agent.Agent) *Target {
 		t.Instructions = filepath.Join(d, "steering", "AGENTS.md")
 		t.MCP = &mcpFile{Path: filepath.Join(d, "settings", "mcp.json"), Format: fmtKiro}
 		t.Skills = filepath.Join(d, "skills")
+	case "liveagent":
+		// LiveAgent's engine, K-brain, keeps its MCP servers in
+		// config.json.live-mcp.json beside its config.json, in the folder
+		// LiveAgent hands it as $LIVEAGENT_HOME (agent.liveAgentDir), and
+		// its own skills in skills there, as copies: it refuses a link in
+		// a skill's path. A skill there is used once it is picked in
+		// skills-settings.json (liveagent.go; K-brain 507f560 cmd/kn/
+		// backend.go, internal/skills/managed.go; zero2sin on Discord)
+		t.MCP = &mcpFile{Path: filepath.Join(a.Dir, liveAgentMCP), Format: fmtLiveAgent}
+		t.Skills = filepath.Join(a.Dir, "skills")
+		t.Copy = true
 	case "claude-desktop":
 		// Claude Desktop reads only commands from its file: a remote server
 		// is added in its own Connectors settings. In its 3p mode (magpie's
@@ -682,6 +722,12 @@ func wslTargetOf(a *agent.Agent) *Target {
 		t.Override = filepath.Join(d, "AGENTS.override.md")
 		t.MCP = &mcpFile{Path: filepath.Join(d, "mcp.json"), Format: fmtPiNative}
 		t.Skills = filepath.Join(d, "skills")
+	case "mu":
+		d := j(h, ".mu", "agent")
+		t.Instructions = firstThere(d, "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD")
+		t.Override = filepath.Join(d, "AGENTS.override.md")
+		t.MCP = &mcpFile{Path: filepath.Join(d, "mcp.json"), Format: fmtPiNative}
+		t.Skills = filepath.Join(d, "skills")
 	case "gemini":
 		// as targetOf's, under the distro's home
 		d := j(h, ".gemini")
@@ -813,19 +859,21 @@ func wslOwnFolder(a *agent.Agent) *Target {
 
 // apps are what the library can give MCP servers to that aren't agents
 // magpie sets up: known by the folder they keep their settings in
-// (Claude Desktop), or by their program alone (Kiro CLI).
+// (Claude Desktop; on Windows by its program, agent.DesktopApp), or by
+// their program alone (Kiro CLI).
 func apps() []*agent.Agent {
 	// Desktop's own folder (%APPDATA%\Claude on Windows, the MSIX
 	// package's for a packaged Desktop, which doesn't see a file written
 	// into %APPDATA%). Desktop only ever run in its 3p mode has no Claude
 	// folder, only Claude-3p: its file is the one there
 	d := desktopdir.Here()
+	home, _ := os.UserHomeDir()
 	dir := d.Data
 	if !isDir(dir) && isDir(d.ThreeP) {
 		dir = d.ThreeP
 	}
 	out := []*agent.Agent{
-		{ID: "claude-desktop", Name: "Claude Desktop", Icon: "claude-color", Dir: dir, Path: filepath.Join(dir, "claude_desktop_config.json")},
+		agent.DesktopApp(home, dir, filepath.Join(dir, "claude_desktop_config.json")),
 	}
 	// Kiro CLI (#4769) is no agent magpie wires a model into, but the
 	// library can give it skills, MCP servers and instructions. It is
@@ -926,7 +974,7 @@ func (l *Library) held(have []*Target) []*Target {
 		in[t.Agent.ID] = true
 	}
 	has := func(id string) bool {
-		if a := l.Applied[id]; a != nil && (len(a.Skills) > 0 || len(a.MCP) > 0 || len(a.Hooks) > 0) {
+		if a := l.Applied[id]; a != nil && (len(a.Skills) > 0 || len(a.MCP) > 0 || len(a.Hooks) > 0 || a.Router || len(a.RouterRules) > 0) {
 			return true
 		}
 		return slices.ContainsFunc(l.Skills, func(s *Skill) bool { return s.gives(id) }) ||
@@ -952,8 +1000,9 @@ func (l *Library) held(have []*Target) []*Target {
 // ~/.kimi-code/skills besides it (#4379). OmO's engine, senpi, a fork of
 // Pi from after Pi 0.54 (its oldest on npm is 0.74.0), reads it as Pi
 // does (core/package-manager.js, userAgentsSkillsDir, @code-yeongyu/senpi
-// 2026.5.13).
-var readsShared = []string{"codex", "gemini", "opencode", "deveco", "crush", "dsh", "commandcode", "devin", "droid", "cline", "grok", "grok-app", "fx", "alma", "kimi", "omo"}
+// 2026.5.13). ZCode reads it beside ~/.zcode/skills (#4987). mu is Pi
+// 1.4.0 (core/package-manager.ts, qybaihe/mu b71cd18).
+var readsShared = []string{"codex", "gemini", "opencode", "deveco", "crush", "dsh", "commandcode", "devin", "droid", "cline", "grok", "grok-app", "fx", "alma", "kimi", "omo", "zcode", "mu"}
 
 // Pi reads ~/.agents/skills from 0.54.0 (2026-02-19, its CHANGELOG: "Added
 // default skill auto-discovery for .agents/skills locations … global

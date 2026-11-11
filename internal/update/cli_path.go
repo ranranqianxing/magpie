@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
 	"sync"
 
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 )
 
@@ -118,7 +118,19 @@ func ReadCLI() *CLI {
 // AddCLI puts this app's magpie on the PATH: of every shell whose PATH has
 // the folder ReadCLI names (shell ""), or of the one shell named, by
 // linking it in ~/.local/bin and adding that folder to the shell's profile.
+// The launchers magpie keeps (Launchers: claude-magpie) go beside it, so
+// they are there with nothing more asked.
 func AddCLI(shell string) (*CLI, error) {
+	v, err := addCLI(shell)
+	if err == nil && v != nil && v.Ours && v.Command != "" {
+		for name, args := range Launchers {
+			_ = addLauncherBeside(v, name, args...) // one of the user's own by that name stays
+		}
+	}
+	return v, err
+}
+
+func addCLI(shell string) (*CLI, error) {
 	cliMu.Lock()
 	defer cliMu.Unlock()
 	exe, err := cliExe()
@@ -242,8 +254,8 @@ func sameFile(a, b string) bool {
 }
 
 var (
-	plistVersion = regexp.MustCompile(`<key>CFBundleShortVersionString</key>\s*<string>([^<]+)</string>`)
-	cellarVer    = regexp.MustCompile(`/Cellar/magpie/([^/]+)/`)
+	plistVersion = lazyre.New(`<key>CFBundleShortVersionString</key>\s*<string>([^<]+)</string>`)
+	cellarVer    = lazyre.New(`/Cellar/magpie/([^/]+)/`)
 )
 
 // otherVersion is the version of the magpie at cmd, read from its .app's
