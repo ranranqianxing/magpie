@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 )
 
@@ -33,7 +33,8 @@ import (
 // DisplayVersion): its installer lets the user pick another folder. more
 // are the app's other builds, each under a bundle id of its own (CodeBuddy's
 // China build beside its international one). linux is the folder the
-// vendor's own Linux packages install the app to.
+// vendor's own Linux packages install the app to; onLinux finds an app
+// others package for Linux (linuxApp).
 type desktopApp struct {
 	id        string
 	names     []string
@@ -42,6 +43,7 @@ type desktopApp struct {
 	publisher string
 	guid      string
 	linux     string
+	onLinux   *linuxApp
 	more      []desktopApp
 }
 
@@ -62,8 +64,25 @@ var desktopApps = map[string]desktopApp{
 	// by default; the folder can be changed ("Choose an empty folder or the
 	// registered DeepSeek Harness installation folder"), and the installer
 	// registers it under HKCU\Software\1bf39983-… (#2279, read from
-	// 0.2.0-rc.2's dsh-latest-windows-x64.exe installer script).
-	"dsh": {id: "com.deepseek.dsh", names: []string{"DeepSeek Harness.app"}, win: filepath.Join("DeepSeek Harness", "DeepSeek Harness.exe"), guid: "1bf39983-50d0-5fe0-9ef4-cece76f67c5e"},
+	// 0.2.0-rc.2's dsh-latest-windows-x64.exe installer script). DeepSeek
+	// publishes no Linux build; its electron-builder config (0.2.2-rc.1)
+	// has an AppImage target, productName DeepSeek Harness, executable
+	// deepseek-harness and the dsh:// scheme. The AUR's
+	// deepseek-harness-desktop builds it into
+	// /usr/lib/deepseek-harness-desktop, with a deepseek-harness-desktop
+	// script in /usr/bin and deepseek-ai-dsh-desktop.desktop (xianhongtao
+	// on Discord: ~/.dsh shown as "CLI not found" and wired as the web
+	// profile with that app in use); deepseek-harness-desktop-bin unpacks a
+	// .deb of it into /opt/DeepSeek Harness, electron-builder's folder.
+	"dsh": {id: "com.deepseek.dsh", names: []string{"DeepSeek Harness.app"}, win: filepath.Join("DeepSeek Harness", "DeepSeek Harness.exe"), guid: "1bf39983-50d0-5fe0-9ef4-cece76f67c5e",
+		onLinux: &linuxApp{dirs: []string{"/usr/lib/deepseek-harness-desktop", "/opt/DeepSeek Harness"}, exe: "deepseek-harness", name: "DeepSeek Harness", scheme: "dsh"}},
+	// DS Bot's desktop app (app/electron-builder.yml, 0.3.0: appId
+	// io.github.fei2411.dsbot, productName DS Bot, DS Bot.app; DeepSeek
+	// Bot, its name before) runs a DSH of its own on its data folder
+	// (dsbot.go) and needs no CLI. On Windows its per-user NSIS installer
+	// puts it under %LOCALAPPDATA%\Programs by default, lets the folder be
+	// changed, and registers it under the guid its config names.
+	"ds-bot": {id: "io.github.fei2411.dsbot", names: []string{"DS Bot.app", "DeepSeek Bot.app"}, win: filepath.Join("DS Bot", "DS Bot.exe"), guid: "32c46dfc-ed78-5d41-85a4-a3c7f083f2e0"},
 	// PenguinHarness's desktop app (packages/desktop's electron-builder.yml,
 	// desktop 0.2.17: appId com.prismshadow.penguinharness, productName
 	// PenguinHarness) runs its own server on the CLI's data root,
@@ -77,6 +96,38 @@ var desktopApps = map[string]desktopApp{
 	// electron-builder registers it under, the UUID v5 of the appId in its
 	// namespace, as dsh's above is of com.deepseek.dsh. Linux's deb links
 	// /usr/bin/penguin, so Bin finds it there.
+	// mu's desktop app (desktop/packages/desktop/electron-builder.yml,
+	// qybaihe/mu b71cd18: appId io.github.qybaihe.mu, productName and
+	// executable mu) carries mu-agent itself (resources/harness) and runs
+	// it on the CLI's agent folder (MU_AGENT_DIR, kyrn/naming.ts), so it
+	// needs no CLI. Windows' assisted NSIS installer and its guid as
+	// penguin's below; Linux's deb puts it in /opt/mu (v0.3.9's
+	// mu-0.3.9-linux-amd64.deb), whose /usr/bin/mu link is no mu-agent
+	// (notMuAgent).
+	"mu": {id: "io.github.qybaihe.mu", names: []string{"mu.app"}, win: filepath.Join("mu", "mu.exe"), guid: "8be59721-9051-5f2b-8372-96932fdbf5da",
+		onLinux: &linuxApp{dirs: []string{"/opt/mu"}, exe: "mu", name: "mu", scheme: "mu"}},
+	// Craft Agents (apps/electron/electron-builder.yml, 0.15.8: appId
+	// com.lukilabs.craft-agent, productName Craft Agents) reads its config
+	// folder on its own (craftagents.go). Its NSIS installer is one-click
+	// and per user, so electron-builder names the folder under
+	// %LOCALAPPDATA%\Programs after the package, @craft-agent/electron
+	// with its "/" taken out (getWindowsInstallationDirName; the README's
+	// own path); guid is the UUID v5 of the appId, as dsh's above.
+	"craft-agents": {id: "com.lukilabs.craft-agent", names: []string{"Craft Agents.app"}, win: filepath.Join("@craft-agentelectron", "Craft Agents.exe"), guid: "61dc82ee-e3b9-557b-98c4-20b9178a0f78"},
+	// Tuanjie Cowork (2.1.6-stable: Tuanjie Cowork.app,
+	// dev.codelycowork.desktop, a Tauri app) reads ~/.codely on its own
+	// (tuanjiecowork.go). Its Windows build is a Tauri NSIS installer, whose
+	// per-user folder isn't under %LOCALAPPDATA%\Programs, so on Windows
+	// it is found by its ~/.codely folder alone.
+	"tuanjie-cowork": {id: "dev.codelycowork.desktop", names: []string{"Tuanjie Cowork.app"}},
+	// Kun (electron-builder.config.cjs, 0.4.5: appId
+	// com.xingyuzhong.deepseekgui from its DeepSeek GUI days, productName
+	// Kun, package kun-gui). Its Windows installer is a per-user assisted
+	// NSIS one, so it goes to %LOCALAPPDATA%\Programs\Kun unless the user
+	// picks another folder; guid is the UUID v5 of the appId, as dsh's
+	// above. Its deb installs /opt/Kun, with the kun:// scheme.
+	"kun": {id: "com.xingyuzhong.deepseekgui", names: []string{"Kun.app"}, win: filepath.Join("Kun", "Kun.exe"), guid: "af3c880c-15f8-5a1f-a7e8-6e299ab90803",
+		onLinux: &linuxApp{dirs: []string{"/opt/Kun"}, exe: "kun-gui", name: "Kun", scheme: "kun"}},
 	"penguin": {id: "com.prismshadow.penguinharness", names: []string{"PenguinHarness.app"}, win: filepath.Join("PenguinHarness", "PenguinHarness.exe"), guid: "8bb9acb7-2bdc-596b-9669-7b014ab1c47f"},
 	// The CodeBuddy IDE (Tencent's VS Code fork, 4.12.2: CodeBuddy.app,
 	// com.tencent.codebuddy, from codebuddy.ai; CodeBuddy CN.app,
@@ -207,8 +258,8 @@ func registeredExeDir(v string) string {
 }
 
 var (
-	plistIDRe      = regexp.MustCompile(`<key>CFBundleIdentifier</key>\s*<string>([^<]+)</string>`)
-	plistVersionRe = regexp.MustCompile(`<key>CFBundleShortVersionString</key>\s*<string>([^<]+)</string>`)
+	plistIDRe      = lazyre.New(`<key>CFBundleIdentifier</key>\s*<string>([^<]+)</string>`)
+	plistVersionRe = lazyre.New(`<key>CFBundleShortVersionString</key>\s*<string>([^<]+)</string>`)
 )
 
 // macBundle reports whether app's bundle is in one of appFolders, under one
@@ -237,11 +288,10 @@ type plistInfo struct {
 // to tell two writes apart is read again (racyDir).
 func bundleInfo(bundle string) (plistInfo, bool) {
 	p := filepath.Join(bundle, "Contents", "Info.plist")
-	st, err := os.Stat(p)
-	if err != nil {
+	mod, size, ok := statStamp(p)
+	if !ok {
 		return plistInfo{}, false
 	}
-	mod, size := st.ModTime(), st.Size()
 	plists.Lock()
 	k, ok := plists.m[p]
 	plists.Unlock()
@@ -322,11 +372,10 @@ func inAppFolders(dirs []string, names ...string) []string {
 // it. A time too recent to tell two changes apart is not trusted, as git
 // treats a racily clean index.
 func folderSubs(dir string) []string {
-	st, err := os.Stat(dir)
-	if err != nil {
+	mod, _, ok := statStamp(dir)
+	if !ok {
 		return nil
 	}
-	mod := st.ModTime()
 	appSubs.Lock()
 	k, ok := appSubs.m[dir]
 	appSubs.Unlock()
@@ -371,17 +420,17 @@ type keptSubs struct {
 // none elsewhere. A var so tests never ask this machine's Spotlight.
 var spotlightApps = spotlightBundles
 
-// spotlight keeps each bundle id's answer for spotlightFresh: the Agents
-// page asks whether an app is installed on every read, and an app that
-// isn't anywhere would ask mdfind each time.
+// spotlight keeps Spotlight's answer for every bundle id desktopApps
+// names, asked in one mdfind (13 one by one took ~0.7s, each request that
+// came after spotlightFresh waiting on them under the lock). An answer
+// older than spotlightFresh is still given while one goroutine asks
+// again, so only the first ask after start waits.
 var spotlight struct {
 	sync.Mutex
-	m map[string]spotlightAnswer
-}
-
-type spotlightAnswer struct {
-	paths []string
-	at    time.Time
+	m       map[string][]string
+	at      time.Time
+	asking  bool
+	settled chan struct{}
 }
 
 const spotlightFresh = 5 * time.Minute
@@ -391,31 +440,119 @@ const spotlightFresh = 5 * time.Minute
 // developer's own apps (#1823) from every package that asks for one.
 const spotlightSandbox = "MAGPIE_TEST_SANDBOX"
 
+// spotlightIDs are the bundle ids of every desktop app magpie knows.
+func spotlightIDs() []string {
+	var ids []string
+	for _, app := range desktopApps {
+		for _, b := range app.builds() {
+			if b.id != "" && !slices.Contains(ids, b.id) {
+				ids = append(ids, b.id)
+			}
+		}
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// spotlightAttr separates a path from its bundle id in mdfind -attr's
+// lines: "/Applications/ChatGPT.app   kMDItemCFBundleIdentifier = com.openai.codex".
+const spotlightAttr = "   kMDItemCFBundleIdentifier = "
+
+// spotlightAsk asks Spotlight once for the bundles of ids, by id; nil
+// when mdfind failed, so the answer before it stays.
+var spotlightAsk = func(ids []string) map[string][]string {
+	q := make([]string, len(ids))
+	for i, id := range ids {
+		q[i] = "kMDItemCFBundleIdentifier == '" + id + "'"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := proc.CommandContext(ctx, "mdfind", "-attr", "kMDItemCFBundleIdentifier", strings.Join(q, " || ")).Output()
+	if err != nil {
+		return nil
+	}
+	return spotlightParse(string(out), ids)
+}
+
+// spotlightParse reads mdfind -attr kMDItemCFBundleIdentifier's lines
+// into the paths of each of ids.
+func spotlightParse(out string, ids []string) map[string][]string {
+	m := make(map[string][]string, len(ids))
+	for _, id := range ids {
+		m[id] = nil
+	}
+	for _, line := range strings.Split(out, "\n") {
+		i := strings.LastIndex(line, spotlightAttr)
+		if i < 0 {
+			continue
+		}
+		p, id := strings.TrimSpace(line[:i]), strings.TrimSpace(line[i+len(spotlightAttr):])
+		// an app dragged to the Trash, as a Mac app is uninstalled,
+		// is still in Spotlight: it isn't installed
+		if _, ok := m[id]; ok && p != "" && !inTrash(p) {
+			m[id] = append(m[id], p)
+		}
+	}
+	return m
+}
+
 func spotlightBundles(id string) []string {
 	if runtime.GOOS != "darwin" || os.Getenv(spotlightSandbox) != "" {
 		return nil
 	}
+	return spotlightKept(id)
+}
+
+// spotlightKept is id's bundles from the kept answer, asking Spotlight
+// (spotlightAsk) for the first or when it is older than spotlightFresh.
+func spotlightKept(id string) []string {
+	spotlight.Lock()
+	if spotlight.m != nil {
+		if time.Since(spotlight.at) >= spotlightFresh && !spotlight.asking {
+			spotlight.asking = true
+			go spotlightRefresh()
+		}
+		paths := spotlight.m[id]
+		spotlight.Unlock()
+		return paths
+	}
+	// the first ask: wait for it, once for every caller
+	if !spotlight.asking {
+		spotlight.asking = true
+		spotlight.settled = make(chan struct{})
+		go spotlightRefresh()
+	}
+	settled := spotlight.settled
+	spotlight.Unlock()
+	<-settled
 	spotlight.Lock()
 	defer spotlight.Unlock()
-	if a, ok := spotlight.m[id]; ok && time.Since(a.at) < spotlightFresh {
-		return a.paths
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	var paths []string
-	out, err := proc.CommandContext(ctx, "mdfind", "kMDItemCFBundleIdentifier == '"+id+"'").Output()
-	if err == nil {
-		for _, p := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			if p = strings.TrimSpace(p); p != "" {
-				paths = append(paths, p)
-			}
+	return spotlight.m[id]
+}
+
+// spotlightRefresh asks Spotlight for every known id and keeps the answer.
+func spotlightRefresh() {
+	m := spotlightAsk(spotlightIDs())
+	spotlight.Lock()
+	defer spotlight.Unlock()
+	if m != nil || spotlight.m == nil {
+		if m == nil {
+			m = map[string][]string{}
 		}
+		spotlight.m = m
 	}
-	if spotlight.m == nil {
-		spotlight.m = map[string]spotlightAnswer{}
+	spotlight.at = time.Now()
+	spotlight.asking = false
+	if spotlight.settled != nil {
+		close(spotlight.settled)
+		spotlight.settled = nil
 	}
-	spotlight.m[id] = spotlightAnswer{paths: paths, at: time.Now()}
-	return paths
+}
+
+// inTrash reports whether p is in a Mac's Trash: the user's ~/.Trash, or
+// a volume's .Trashes.
+func inTrash(p string) bool {
+	return strings.Contains(p, "/.Trash/") || strings.Contains(p, "/.Trashes/")
 }
 
 // AppVersion is the version of the agent's desktop app installed here, ""
@@ -474,7 +611,7 @@ func (app desktopApp) linuxDir() string {
 	return dir
 }
 
-var linuxPackageVersionRe = regexp.MustCompile(`"version"\s*:\s*"([^"]+)"`)
+var linuxPackageVersionRe = lazyre.New(`"version"\s*:\s*"([^"]+)"`)
 
 // linuxVersion is the version of the app's Linux package, from its
 // resources/linux-package-metadata.json ({"codexAppBrand":"chatgpt",
@@ -549,7 +686,8 @@ func storeAppVersion(packages []string, name, publisher string) string {
 // HasApp reports whether the agent's desktop app is installed here: its
 // bundle on macOS (AppVersion), its executable on Windows: under
 // %LOCALAPPDATA%\Programs, or in the folder its installer registered; on
-// Linux the folder its package installed (desktopApp.linux).
+// Linux the folder its package installed (desktopApp.linux), or one a
+// packager's install or an AppImage's desktop entry names (linuxApp).
 func (a *Agent) HasApp() bool {
 	app, ok := desktopApps[a.ID]
 	return ok && a.WSL == "" && slices.ContainsFunc(app.builds(), desktopApp.installed)
@@ -557,7 +695,7 @@ func (a *Agent) HasApp() bool {
 
 // installed reports whether app is installed on this machine (see HasApp).
 func (app desktopApp) installed() bool {
-	if app.version() != "" || app.linuxDir() != "" {
+	if app.version() != "" || app.linuxDir() != "" || app.onLinux.installed() {
 		return true
 	}
 	if app.win == "" {

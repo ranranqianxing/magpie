@@ -25,14 +25,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
 
-// jevSure is how confident Jev must be of an intent for it to count.
-// Confidence runs from 0, every option as likely, to 1, one certain, as
-// System One gives it (provider.Confidence), read from the answer's
-// probabilities wherever it has them (sureOf).
+// jevSure is how confident Jev must be of an intent for it to count, a
+// group setting its own (provider.Group.IntentSure). Confidence runs from
+// 0, every option as likely, to 1, one certain, as System One gives it
+// (provider.Confidence), read from the answer's probabilities wherever it
+// has them (sureOf).
 const jevSure = 0.4
 
 // sureOf is how sure an answer is of its choice on jevSure's scale: from
@@ -234,7 +236,13 @@ func effortAsk(prev before) string {
 }
 
 // readJev is the verdict in a System One reply to jevBody, the answer
-// without "none of these" counting when the intents are levels.
+// without "none of these" counting when the intents are levels. The sure
+// an intent needs is the group's own (rulesOf applies it): Jev's likeliest
+// intent is kept as it said it (Said), and the intents' own answer as Said
+// with Topic marking it a topic — a message may be none of those — rather
+// than a level every message is at, whose torn pick holds (the level half
+// below). Whether an intent came of it is decided where the group's own
+// sure is known, so the answer still tells why it went as it did.
 func readJev(b []byte, intents []string, levels bool, prev before) (verdict, error) {
 	var out struct {
 		Model   string `json:"model"`
@@ -256,7 +264,8 @@ func readJev(b []byte, intents []string, levels bool, prev before) (verdict, err
 	if a, ok := out.Answers["intent"]; ok && len(intents) > 0 && !levels {
 		v.Sure = sureOf(a.Confidence, a.Probabilities)
 		v.Said = a.Choice // as it said it, no intent come of it or not (#4598)
-		if a.Choice != noIntent && v.Sure >= jevSure {
+		v.Topic = true
+		if a.Choice != noIntent {
 			v.Intent = intentNamed(intents, a.Choice)
 		}
 	}
@@ -278,6 +287,30 @@ func readJev(b []byte, intents []string, levels bool, prev before) (verdict, err
 		v.Effort, v.Score = jevLevels[i].effort, a.Score
 	}
 	return v, nil
+}
+
+// sureNeeded is how sure a group asks its classifier to be of an intent:
+// the group's own (IntentSure), or 0.4 as groups have always asked.
+func sureNeeded(g provider.Group) float64 {
+	if g.IntentSure != nil {
+		return *g.IntentSure
+	}
+	return jevSure
+}
+
+// intentOf v is the intent of v's answer at the group's own sure
+// (sureNeeded): a topic answer counts once Jev is sure enough of it —
+// "none of these", said or picked, never being an intent — while a level
+// is the level it said, every message being at one. A topic answer unsure
+// at the group's sure is no intent.
+func intentOf(v verdict, g provider.Group) string {
+	if !v.Topic {
+		return v.Intent
+	}
+	if v.Sure < sureNeeded(g) || v.Said == noIntent || v.Intent == "" {
+		return ""
+	}
+	return v.Intent
 }
 
 // intentNamed is the one of intents named, or "".
@@ -478,6 +511,8 @@ type decided struct {
 // another one. DecideURL and Sign errors are as they are; a transport
 // error is named with p. The request it sent is there once one was.
 func (s *Server) postDecideSent(ctx context.Context, p provider.Provider, model string, body []byte) (decided, error) {
+	// the headers the user gave the decision model
+	ctx = provider.WithModel(ctx, p.ID, model)
 	// every decision call goes through here — System One, a group rule's
 	// classifier, a decision group's members: a model the user disabled
 	// (#1867) is never asked
@@ -540,6 +575,13 @@ func (s *Server) serveSystemOne(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	s.serveSystemOneBody(w, r, body)
+}
+
+// serveSystemOneBody answers a System One request read: from
+// /v1/systemone, or one /v1/decisions was translated to
+// (decisions_systemone.go).
+func (s *Server) serveSystemOneBody(w http.ResponseWriter, r *http.Request, body []byte) {
 	var q struct {
 		Model string `json:"model"`
 	}
@@ -563,6 +605,12 @@ func (s *Server) serveSystemOne(w http.ResponseWriter, r *http.Request) {
 	}
 	p, model, err := provider.RouteDecider(q.Model)
 	if err != nil {
+		// no decision model by that name, but one OpenAI's Decisions
+		// API serves: asked there, the request and its answer
+		// translated (decisions_systemone.go)
+		if st := provider.DecideRouteStatus(err); st == http.StatusNotFound && s.systemOneByDecisions(w, r, body, q.Model) {
+			return
+		}
 		writeError(w, provider.Chat, provider.DecideRouteStatus(err), err.Error())
 		return
 	}
@@ -579,7 +627,8 @@ func (s *Server) serveSystemOne(w http.ResponseWriter, r *http.Request) {
 	// a gateway key held to some models (#882) is refused another; a
 	// decision model is a model, and System One asks one directly
 	if keyWho, held := keyHolds(r); held && !modelAllowed(keyWho, p, model) {
-		writeError(w, provider.Chat, http.StatusForbidden, keyModelError(keyWho, asked))
+		st, msg := keyModelRefusal(w, keyWho, p.ID+"/"+model)
+		writeError(w, provider.Chat, st, msg)
 		return
 	}
 	// its keys or accounts in its routing's order, each asked until one
@@ -587,7 +636,7 @@ func (s *Server) serveSystemOne(w http.ResponseWriter, r *http.Request) {
 	// request (fflake33 on Discord). One the user set not to serve the
 	// model is never asked; with every one so, the request is refused
 	cs, pl := s.decideKeys(p, model)
-	barred := len(cs) == 0 && len(pl.left) > 0 && !slices.ContainsFunc(pl.left, func(w Weighed) bool { return !w.Barred })
+	barred := len(cs) == 0 && slices.ContainsFunc(pl.left, func(w Weighed) bool { return w.Barred }) && !slices.ContainsFunc(pl.left, func(w Weighed) bool { return !w.Barred && !w.StandIn })
 	// and held to some accounts (#905): the decision model's provider must
 	// have one the key may use and that is let serve the model, the call
 	// spend landing on it as any's, and only those are asked
@@ -703,21 +752,43 @@ func requestEffort(proto provider.Protocol, body []byte) string {
 	if e := effortOf(v.OutputConfig.Effort); e != "" {
 		return e
 	}
+	if e := turnEffort(body); e != "" {
+		return e
+	}
 	return effortOfBudget(v.Thinking.Budget)
 }
 
 // outputConfigEffort is the effort an Anthropic request's output_config
-// names, whatever it asks of thinking; "" when it names none.
+// names, whatever it asks of thinking; "" when it names none. A request
+// whose own output_config names none but carries the level of its turns
+// (Claude Code's {role: "system"} message with an output_config, which a
+// relay may keep when it drops the request's own) is asked at the last
+// of them.
 func outputConfigEffort(body []byte) string {
 	var v struct {
 		OutputConfig struct {
 			Effort string `json:"effort"`
 		} `json:"output_config"`
+		Messages []struct {
+			OutputConfig *struct {
+				Effort string `json:"effort"`
+			} `json:"output_config"`
+		} `json:"messages"`
 	}
 	if decodeJSON(body, &v) != nil {
 		return ""
 	}
-	return effortOf(v.OutputConfig.Effort)
+	if e := effortOf(v.OutputConfig.Effort); e != "" {
+		return e
+	}
+	for i := len(v.Messages) - 1; i >= 0; i-- {
+		if oc := v.Messages[i].OutputConfig; oc != nil {
+			if e := effortOf(oc.Effort); e != "" {
+				return e
+			}
+		}
+	}
+	return ""
 }
 
 // sentEffort is the reasoning a request goes to model at: what it asks
@@ -806,8 +877,147 @@ func withFixedEffort(proto provider.Protocol, body []byte, effort string) []byte
 			return body
 		}
 		return withFields(body, map[string]any{"thinking": map[string]any{"type": "enabled", "budget_tokens": budget}})
+	case provider.Gemini:
+		var v struct {
+			Model string `json:"model"`
+		}
+		if decodeJSON(body, &v) != nil {
+			return body
+		}
+		return withGeminiEffort(body, v.Model, effort)
 	}
 	return body
+}
+
+// agyLevelAsked is whether Antigravity CLI's own request names a thinking
+// level: its /effort on a Google model it knows, or --effort at launch.
+// That is the user's pick of the moment and beats the row's, which stands
+// for the sessions that send only thinkingBudget -1.
+func agyLevelAsked(agent string, proto provider.Protocol, body []byte) bool {
+	if agent != "agy" || proto != provider.Gemini {
+		return false
+	}
+	var v struct {
+		GC *struct {
+			TC *struct {
+				Level string `json:"thinkingLevel"`
+			} `json:"thinkingConfig"`
+		} `json:"generationConfig"`
+		GC2 *struct {
+			TC *struct {
+				Level string `json:"thinking_level"`
+			} `json:"thinking_config"`
+		} `json:"generation_config"`
+	}
+	if decodeJSON(body, &v) != nil {
+		return false
+	}
+	if v.GC != nil && v.GC.TC != nil && strings.TrimSpace(v.GC.TC.Level) != "" {
+		return true
+	}
+	return v.GC2 != nil && v.GC2.TC != nil && strings.TrimSpace(v.GC2.TC.Level) != ""
+}
+
+// withModelEffort is withFixedEffort for a request going to model: a
+// Gemini request's thinkingConfig is the one model takes (withGeminiEffort),
+// which the model the client named needn't tell.
+func withModelEffort(proto provider.Protocol, body []byte, model, effort string) []byte {
+	if proto == provider.Gemini && effort != "" {
+		return withGeminiEffort(body, model, effort)
+	}
+	return withFixedEffort(proto, body, effort)
+}
+
+// withGeminiEffort asks a Gemini request's generationConfig.thinkingConfig
+// for effort, as model takes it, keeping includeThoughts as asked: a
+// Gemini 2.5 a budget in its range (vertexBudgets; it turns a level away),
+// a Gemini 3 a level of low..high (none takes xhigh or max, and it can't
+// stop thinking, so none is low; above high only where the catalog lists
+// it, Gemini 4 Hydrogen's xhigh), a Gemini before 2.5 nothing, as it
+// doesn't think. Another model (agy asking an OpenAI one on Gemini's API)
+// is asked the level itself, which the translation reads, and none as a
+// budget of 0. Antigravity CLI's own request sends thinkingBudget -1, or
+// an upper-case level with --effort, which agy allows only per session.
+func withGeminiEffort(body []byte, model, effort string) []byte {
+	if effort == "" {
+		return body
+	}
+	m := strings.ToLower(strings.TrimPrefix(model, "models/"))
+	if i := strings.LastIndex(m, "/"); i >= 0 {
+		m = m[i+1:]
+	}
+	if strings.HasPrefix(m, "gemini-1") || strings.HasPrefix(m, "gemini-2.0") {
+		return body
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var top map[string]any
+	if dec.Decode(&top) != nil {
+		return body
+	}
+	gcKey, tcKey := "generationConfig", "thinkingConfig"
+	if _, ok := top[gcKey]; !ok {
+		if _, ok := top["generation_config"]; ok {
+			gcKey = "generation_config"
+		}
+	}
+	gc, _ := top[gcKey].(map[string]any)
+	if gc == nil {
+		gc = map[string]any{}
+	}
+	if _, ok := gc[tcKey]; !ok {
+		if _, ok := gc["thinking_config"]; ok {
+			tcKey = "thinking_config"
+		}
+	}
+	old, _ := gc[tcKey].(map[string]any)
+	include := old["includeThoughts"]
+	if include == nil {
+		include = old["include_thoughts"]
+	}
+	tc := map[string]any{}
+	if include != nil {
+		tc["includeThoughts"] = include
+	}
+	// the level as fitted to the model's own (a Gemini 3 Flash takes
+	// minimal), in effortRank's words
+	level := strings.ToLower(strings.TrimSpace(effort))
+	if l := effortOf(level); l != "" && level != "none" && level != "minimal" {
+		level = l
+	}
+	switch off, least, most, ok := vertexBudgets(m); {
+	case ok && level == "none":
+		// asked to think no more than it can help: thoughts aren't asked
+		// for where thinking is off ("include_thoughts is only enabled
+		// when thinking is enabled")
+		tc = map[string]any{"thinkingBudget": off}
+	case ok:
+		tc["thinkingBudget"] = min(max(budgetOf(effortOf(level)), least), most)
+	case strings.HasPrefix(m, "gemini-"):
+		switch at := slices.Index(effortRank, level); {
+		case level == "none" || at >= 0 && at < slices.Index(effortRank, "low"):
+			if level != "minimal" {
+				level = "low"
+			}
+		case at > slices.Index(effortRank, "high"):
+			// above high only where the model lists such a level: Gemini
+			// 4 Hydrogen takes xhigh, every Gemini before it high at most
+			fit := "high"
+			if ls := catalog.EffortsOf(m); len(ls) > 0 {
+				if l := catalog.NearestEffort(level, ls); slices.Index(effortRank, l) > slices.Index(effortRank, "high") {
+					fit = l
+				}
+			}
+			level = fit
+		}
+		tc["thinkingLevel"] = level
+	case level == "none":
+		tc = map[string]any{"thinkingBudget": 0}
+	default:
+		tc["thinkingLevel"] = level
+	}
+	gc[tcKey] = tc
+	return withFields(body, map[string]any{gcKey: gc})
 }
 
 // groupLevels are the reasoning levels the group offers for the member a
@@ -856,4 +1066,39 @@ func agentEffort(proto provider.Protocol, body []byte) string {
 		return requestEffort(proto, body)
 	}
 	return strings.ToLower(strings.TrimSpace(bodyEffort(proto, body)))
+}
+
+// askedLevel is the reasoning level a request asks for (agentEffort),
+// and "none" for an Anthropic one that turns thinking off: a member's
+// EffortMaps may send it a level all the same.
+func askedLevel(proto provider.Protocol, body []byte) string {
+	if e := agentEffort(proto, body); e != "" || proto != provider.Anthropic {
+		return e
+	}
+	var v struct {
+		Thinking *struct {
+			Type string `json:"type"`
+		} `json:"thinking"`
+	}
+	if decodeJSON(body, &v) == nil && v.Thinking != nil && v.Thinking.Type == "disabled" {
+		return "none"
+	}
+	return ""
+}
+
+// mappedLevel is the level a member's map sends in place of in, and
+// whether it names one. Codex's ultra is max with agents of its own, so
+// a map from max takes it too.
+func mappedLevel(to map[string]string, in string) (string, bool) {
+	if in == "" {
+		return "", false
+	}
+	if l, ok := to[in]; ok {
+		return l, true
+	}
+	if in == "ultra" {
+		l, ok := to["max"]
+		return l, ok
+	}
+	return "", false
 }

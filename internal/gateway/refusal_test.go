@@ -201,6 +201,74 @@ func TestContentFilterFailsOver(t *testing.T) {
 	}
 }
 
+// Chat Completions' content_filter after a canned refusal line as the
+// whole content (#5075): CodeArts's word-list filter answers a fixed
+// politeness line and has its finish code say the turn was filtered —
+// 10/10 on the same body, the line byte-identical, while another member
+// of the group answered 620 tokens. A group kept the member that answered
+// with the line, its mates never asked; a client that reads finish
+// reasons ended the whole turn on it.
+var chatCannedRefusal = sse(`data: {"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}`,
+	`data: {"id":"c1","choices":[{"index":0,"delta":{"content":"As an AI language model I have not learned to answer this, please ask me something else"}}]}`,
+	`data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}`,
+	`data: {"id":"c1","choices":[],"usage":{"prompt_tokens":44,"completion_tokens":47}}`,
+	`data: [DONE]`)
+
+var chatStreamsAnswer = sse(`data: {"id":"c2","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}`,
+	`data: {"id":"c2","choices":[{"index":0,"delta":{"content":"a pool is a container"}}]}`,
+	`data: {"id":"c2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	`data: {"id":"c2","choices":[],"usage":{"prompt_tokens":44,"completion_tokens":5}}`,
+	`data: [DONE]`)
+
+// A vendor's finish code saying content_filter after its own canned
+// refusal line went out as the content (#5075) still says the turn was
+// never answered: the next member answers in the same stream, as a
+// refusal after reasoning does (refusalHandover), the line that went out
+// first staying as the reasoning of a handed-over try does. The member
+// isn't set aside: the request was refused, not the account (#248).
+func TestCannedRefusalFinishFailsOver(t *testing.T) {
+	fresh(t)
+	a := &scripted{replies: []reply{{200, "text/event-stream", chatCannedRefusal}}}
+	b := &scripted{replies: []reply{{200, "text/event-stream", chatStreamsAnswer}}}
+	scriptedOn(t, "a", provider.Chat, a)
+	scriptedOn(t, "b", provider.Chat, b)
+	refusalGroup(t, "a/m", "b/m")
+	s := New()
+	code, body := sendTo(s, "/v1/chat/completions", `{"model":"group/g","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if code != 200 || a.n != 1 || b.n != 1 || !strings.Contains(body, "a pool is a container") || strings.Contains(body, "content_filter") {
+		t.Fatalf("chat: %d %s (a %d, b %d)", code, body, a.n, b.n)
+	}
+	r := s.trace.routes[len(s.trace.routes)-1]
+	if len(r.Tries) != 2 || r.Tries[0].Fail != failRefused || r.Tries[0].Rest != nil || r.Tries[1].Fail != "" {
+		t.Fatalf("tries: %+v", r.Tries)
+	}
+	if s.resting("a") {
+		t.Fatal("the member that answered with the canned line was set aside")
+	}
+}
+
+// A content_filter code after a tool call has gone to the agent is not
+// handed over (#5075, handsOff): the agent holds that call, and the next
+// member's would sit beside it, doubled or broken. The reply ends on the
+// vendor's code as it did before, and nobody else is asked.
+func TestFilterFinishAfterACallStays(t *testing.T) {
+	fresh(t)
+	called := sse(`data: {"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}`,
+		`data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}}]}}]}`,
+		`data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}`,
+		`data: [DONE]`)
+	a := &scripted{replies: []reply{{200, "text/event-stream", called}}}
+	b := &scripted{replies: []reply{{200, "text/event-stream", chatStreamsAnswer}}}
+	scriptedOn(t, "a", provider.Chat, a)
+	scriptedOn(t, "b", provider.Chat, b)
+	refusalGroup(t, "a/m", "b/m")
+	s := New()
+	code, body := sendTo(s, "/v1/chat/completions", `{"model":"group/g","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if code != 200 || a.n != 1 || b.n != 0 || !strings.Contains(body, "call_1") || strings.Contains(body, "a pool is a container") {
+		t.Fatalf("chat: %d %s (a %d, b %d)", code, body, a.n, b.n)
+	}
+}
+
 // With nobody else to ask, the agent is told it was refused, as a request
 // not to send again as it is — not handed an empty reply that looks whole —
 // and the usage says it failed. An agent on Anthropic's API has the
@@ -328,10 +396,10 @@ func TestStreamEventRefusals(t *testing.T) {
 		{`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hm"}}`, eventThinking},
 		{`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`, eventContent},
 		{`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"refusal"}}`, eventRefusal},
-		{`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`, eventContent},
+		{`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`, eventEmptyEnd},
 		{`data: {"id":"c","choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}`, eventRefusal},
 		{`data: {"id":"c","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"content_filter"}]}`, eventContent},
-		{`data: {"id":"c","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`, eventContent},
+		{`data: {"id":"c","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`, eventEmptyEnd},
 		{`data: {"type":"response.output_item.added","item":{"type":"reasoning","summary":[]}}`, eventThinking},
 		{`data: {"type":"response.reasoning_summary_text.delta","delta":"**Plan**"}`, eventThinking},
 		{`data: {"id":"c","choices":[{"index":0,"delta":{"reasoning_content":"hm"}}]}`, eventThinking},
@@ -343,7 +411,7 @@ func TestStreamEventRefusals(t *testing.T) {
 		{`data: {"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":""}}`, eventThinking},
 		{`data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"content_filter"}}}`, eventRefusal},
 		{`data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}`, eventContent},
-		{`data: {"type":"response.completed","response":{"status":"completed"}}`, eventContent},
+		{`data: {"type":"response.completed","response":{"status":"completed"}}`, eventEmptyEnd},
 		{`data: {"type":"error","error":{"code":"content_filter","message":"filtered"}}`, eventRefusalError},
 		{`data: {"candidates":[{"content":{"parts":[]},"finishReason":"SAFETY"}]}`, eventRefusal},
 		{`data: {"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"SAFETY"}]}`, eventContent},

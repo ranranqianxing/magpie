@@ -10,13 +10,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -167,16 +167,16 @@ func missingSeerNote() string {
 // none of its members is marked as taking images.
 func textOnlyNote(p provider.Provider, model string, group string) string {
 	if group != "" {
-		return fmt.Sprintf("; no model in the group %s is marked as taking images: turn on Accepts images for one that does, in its provider's Names, prices & levels in magpie", group)
+		return fmt.Sprintf("; no model in the group %s is marked as taking images: turn on Accepts images for one that does, in its provider's Model settings in magpie", group)
 	}
 	name := p.Name
 	if name == "" {
 		name = p.ID
 	}
 	if v, ok := provider.ImageOverride(p.ID, model); ok && !v {
-		return fmt.Sprintf("; Accepts images is turned off for it in magpie, in Providers → %s → Names, prices & levels", name)
+		return fmt.Sprintf("; Accepts images is turned off for it in magpie, in Providers → %s → Model settings", name)
 	}
-	return fmt.Sprintf("; %s's model list marks it as not taking images: if it does, turn on Accepts images for it in magpie, in Providers → %s → Names, prices & levels", name, name)
+	return fmt.Sprintf("; %s's model list marks it as not taking images: if it does, turn on Accepts images for it in magpie, in Providers → %s → Model settings", name, name)
 }
 
 // noSeerNote is what a request turned away for an image says of why no
@@ -834,7 +834,7 @@ func smallModelWhere(p provider.Provider, kind string, keep func(catalog.Model) 
 // endpoints found that support image input", vLLM's "is not a multimodal
 // model", and the plain "does not support image input" / "image input is
 // not supported" / "不支持图片" of the rest.
-var imageRefusedWords = regexp.MustCompile("(?i)unknown variant [`'\"\\\\]*(?:image_url|input_image|image)\\b|image_url is only supported by certain models|no endpoints found that support image|not a multi-?modal model|(?:does not|doesn't|do not|don't|cannot|can't|unable to) (?:support|accept|process|handle|take|read) (?:the )?(?:image|images|vision|multi-?modal)|\\b(?:image|images|vision|multi-?modal|image_url|input_image)(?: (?:input|inputs|content|parts?))? (?:is |are )?(?:not supported|unsupported|not enabled|not allowed)|不支持(?:图片|图像|多模态|视觉|识图)")
+var imageRefusedWords = lazyre.New("(?i)unknown variant [`'\"\\\\]*(?:image_url|input_image|image)\\b|image_url is only supported by certain models|no endpoints found that support image|not a multi-?modal model|(?:does not|doesn't|do not|don't|cannot|can't|unable to) (?:support|accept|process|handle|take|read) (?:the )?(?:image|images|vision|multi-?modal)|\\b(?:image|images|vision|multi-?modal|image_url|input_image)(?: (?:input|inputs|content|parts?))? (?:is |are )?(?:not supported|unsupported|not enabled|not allowed)|不支持(?:图片|图像|多模态|视觉|识图)")
 
 // imageRefused says a failure was the model turning the request's image
 // away: what a describer fixes by describing it, not what another

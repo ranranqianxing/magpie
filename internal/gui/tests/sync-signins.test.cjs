@@ -132,6 +132,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         let form = list.locator(".sync-form");
         const siTick = form.locator("label.tick", { hasText: w("Sign-ins: subscription accounts and plugin sign-ins") }).locator("input");
         assert.equal(await siTick.isChecked(), false, "sync's sign-ins on before picked");
+        // under the form's Advanced, folded while nothing in it is set
+        assert.equal(await form.locator("details.sync-advanced").evaluate((d) => d.open), false, "Advanced open with nothing in it set");
+        await click(form.locator("details.sync-advanced summary"));
         const say = form.locator(".sync-signins-say");
         assert.equal(await say.isVisible(), false, "the line shows before the tick");
         await click(siTick);
@@ -164,7 +167,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await p2.fill("correct horse");
         await noneWider(page);
         await click(form.locator("button.primary"));
-        assert.deepEqual(await waitPost("/api/backup/export"), { pass: "correct horse", keys: true, library: true, signIns: true });
+        assert.deepEqual(await waitPost("/api/backup/export"), { pass: "correct horse", keys: true, library: true, signIns: true, memory: true });
         await form.locator(".done").waitFor();
         await click(exportRow.locator("button"));
 
@@ -210,6 +213,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           w("Your providers, settings and profiles, without API keys, and the sign-ins sealed with a passphrase, into a folder on this computer"));
         assert.equal(await ask.count(), 0);
         assert.equal(await rowNamed(w("Sign-ins in backups")).locator(".who > .sub").textContent(), w("Subscription accounts and plugin sign-ins, sealed with the passphrase set here"));
+        // the versions are folded under Versions until it is clicked
+        await click(rowNamed(w("Versions")).locator(".auto-backup-fold"));
         const version = list.locator(".auto-backup-version").first();
         assert.ok((await version.locator(".sub").textContent()).includes(w("sign-ins")));
         // a restore: asked, then says the sign-ins were sealed with another

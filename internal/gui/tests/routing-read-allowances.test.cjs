@@ -38,7 +38,8 @@ function serve(lang, order, asks, held) {
     }
     if (url.pathname === "/api/usage/quotas") {
       const asked = url.searchParams.get("asked") === "1";
-      asks.push(asked);
+      // the button's read is of every account, a saved Claude one's too (#5380)
+      asks.push(asked && url.searchParams.get("all") === "1" ? "all" : asked);
       if (!asked) return json(card(40));
       await held; // the vendor takes its time
       return json(card(70));
@@ -95,7 +96,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             page.on("pageerror", (e) => errors.push(e.message));
             await page.route("**/*", serve(lang, [acct], asks, held));
             await page.goto("http://magpie.test/?view=routing");
-            const tip = (want) => page.waitForFunction((want) => [...document.querySelectorAll(".rt-act")].some((e) => e.textContent.includes("work@example.com") && (e.querySelector(".st")?.title || "").includes(want)), want);
+            const tip = (want) => page.waitForFunction((want) => [...document.querySelectorAll(".rt-act")].some((e) => e.textContent.includes("work@example.com") && (e.querySelector(".wq")?.title || "").includes(want)), want);
             await tip(w.before);
             const b = page.locator("#rtReadAllowances");
             await b.waitFor({ state: "visible" });
@@ -110,7 +111,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             const box = await b.boundingBox();
             await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
             await page.waitForFunction(() => document.querySelector("#rtReadAllowances").classList.contains("busy"));
-            assert.equal(asks.filter(Boolean).length, 1, "one asked read");
+            assert.deepEqual(asks.filter(Boolean), ["all"], "one asked read, of every account");
             // a second click while it turns asks nothing more
             await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
             release();

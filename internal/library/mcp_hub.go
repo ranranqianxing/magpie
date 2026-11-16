@@ -21,7 +21,9 @@ package library
 // a server started once for every agent can't ask its client for: the
 // gateway asks the agent for its roots on each call (gateway.HubCaller)
 // and the call carries them to it, in _meta (imageMeta). An agent in WSL
-// is given it directly still, run in the distro, whose paths it takes. A
+// is given it directly still, run in the distro, whose paths it takes.
+// magpie's memory server (isMemory) is sent the same, for the project and
+// the agent a memory is kept for. A
 // server the user keeps direct (Server.Hub, #4382) is each agent's own
 // too: a command that reads its project from the folder it starts in, or
 // keeps a session's state. What a server lists is kept until it says its
@@ -198,11 +200,27 @@ func hubServers(agentID string) []*Server {
 	return l.hubServers(agentID)
 }
 
-// hubServers are the servers the hub gives agentID from l, by name.
+// hubServers are the servers the hub gives agentID from l, by name. An
+// id with a project's key after it (gateway.HubProjectSep, projectHubs)
+// is the agent in that project: the global set with the project's own
+// servers added and those it turns off left out.
 func (l *Library) hubServers(agentID string) []*Server {
+	id, key, scoped := strings.Cut(agentID, gateway.HubProjectSep)
+	var p *Project
+	if scoped {
+		p = l.projectByKey(key)
+	}
 	var out []*Server
 	for _, s := range l.MCP {
-		if (agentID == "" || slices.Contains(s.Agents, agentID)) && inHub(s, agentID) {
+		on := id == "" && !s.Hidden || slices.Contains(s.Agents, id)
+		if p != nil {
+			if slices.Contains(p.ServersOff[s.Name], id) {
+				on = false
+			} else if !s.Hidden && slices.Contains(p.Servers[s.Name], id) {
+				on = true
+			}
+		}
+		if on && inHub(s, id) {
 			out = append(out, s)
 		}
 	}
@@ -221,8 +239,42 @@ func hubAbouts(ss []*Server) []gateway.HubServer {
 	return out
 }
 
+// hereOnly is whether s acts as this computer's user beyond what its
+// tools' arguments say (gateway.HubServer's HereOnly): Magpie Browser and
+// another magpie's router (keepsSession), and magpie's image, memory and
+// sessions servers.
+func hereOnly(s *Server) bool { return keepsSession(s) || isSelf(s) || isMemory(s) || isSessions(s) }
+
+// isSessions is whether s is magpie's own sessions server (`magpie mcp
+// sessions`), which reads this computer's user's conversations.
+func isSessions(s *Server) bool {
+	return !s.Remote() && len(s.Args) >= 2 && s.Args[0] == "mcp" && s.Args[1] == "sessions"
+}
+
+// isMemory is whether s is magpie's own memory server (`magpie mcp
+// memory`), which holds what is known about this computer's user.
+func isMemory(s *Server) bool {
+	return !s.Remote() && len(s.Args) >= 2 && s.Args[0] == "mcp" && s.Args[1] == "memory"
+}
+
+// wantsCaller is whether a call of s is made with the calling agent's
+// roots and name (imageMeta): magpie's image and memory servers.
+func wantsCaller(s *Server) bool { return isSelf(s) || isMemory(s) }
+
+// visitorServers are ss without those the hub's caller of ctx isn't
+// given (gateway.HubVisitor): the gateway leaves them out too, and this
+// holds when it doesn't.
+func visitorServers(ctx context.Context, ss []*Server) []*Server {
+	v := gateway.HubVisitorOf(ctx)
+	return slices.DeleteFunc(ss, func(s *Server) bool { return !v.Gives(hubServerOf(s)) })
+}
+
 func (theHub) Tools(ctx context.Context, agentID string) []gateway.HubTool {
-	ss := hubServers(agentID)
+	ss := visitorServers(ctx, hubServers(agentID))
+	if gateway.FromRouter(ctx) {
+		// another magpie's router: not given a Remote magpie's back
+		ss = slices.DeleteFunc(ss, func(s *Server) bool { return s.Bridge != "" })
+	}
 	lists := make([][]gateway.HubTool, len(ss))
 	var wg sync.WaitGroup
 	for i, s := range ss {
@@ -248,7 +300,7 @@ func (theHub) Tools(ctx context.Context, agentID string) []gateway.HubTool {
 				if json.Unmarshal(t["name"], &name) != nil || name == "" || slices.Contains(s.DisabledTools, name) {
 					continue
 				}
-				lists[i] = append(lists[i], gateway.HubTool{Server: s.Name, Tool: name, Spec: t, Roots: isSelf(s)})
+				lists[i] = append(lists[i], gateway.HubTool{Server: s.Name, Tool: name, Spec: t, Roots: wantsCaller(s)})
 			}
 		}()
 	}
@@ -263,18 +315,24 @@ func (theHub) Tools(ctx context.Context, agentID string) []gateway.HubTool {
 func (theHub) Call(ctx context.Context, agentID, server, tool string, args json.RawMessage) (json.RawMessage, error) {
 	ss := hubServers(agentID)
 	i := slices.IndexFunc(ss, func(s *Server) bool { return s.Name == server })
+	if i >= 0 && !gateway.HubVisitorOf(ctx).Gives(hubServerOf(ss[i])) {
+		return nil, errors.New("it acts as this computer's user, so magpie runs it for this computer's agents only")
+	}
 	if i < 0 && agentID == "" {
 		return nil, errors.New("it isn't in magpie's Library")
 	}
 	if i < 0 {
-		return nil, fmt.Errorf("it isn't switched on for %s in magpie's Library", agentID)
+		return nil, fmt.Errorf("it isn't switched on for %s in magpie's Library", gateway.HubAgentOf(agentID))
 	}
 	s := ss[i]
+	if s.Bridge != "" && gateway.FromRouter(ctx) {
+		return nil, errors.New("it is another magpie's router, which isn't run for a magpie's router")
+	}
 	if slices.Contains(s.DisabledTools, tool) {
 		return nil, errors.New("the tool is turned off in magpie's Library")
 	}
 	var meta map[string]any
-	if isSelf(s) {
+	if wantsCaller(s) {
 		meta = imageMeta(gateway.HubCallerOf(ctx))
 	}
 	if c := gateway.HubCallerOf(ctx); c.Session != "" && keepsSession(s) {
@@ -284,7 +342,7 @@ func (theHub) Call(ctx context.Context, agentID, server, tool string, args json.
 		meta[gateway.HubSessionMeta] = c.Session
 	}
 	if s.Plugin != "" {
-		return pluginHubCall(ctx, agentID, s, tool, args)
+		return pluginHubCall(ctx, gateway.HubAgentOf(agentID), s, tool, args)
 	}
 	return backendOf(s).call(ctx, tool, args, meta)
 }
@@ -302,7 +360,8 @@ func keepsSession(s *Server) bool {
 	return len(s.Args) >= 2 && s.Args[0] == "mcp" && s.Args[1] == "browser"
 }
 
-// imageMeta is the _meta a call of magpie's image server is made with:
+// imageMeta is the _meta a call of magpie's image or memory server is
+// made with:
 // the calling agent's roots, which it saves into, and its name, which its
 // requests go under.
 func imageMeta(c gateway.HubCaller) map[string]any {
@@ -367,10 +426,12 @@ var hubPool = struct {
 // hubKey is the server as it is run: an edit, or a sign-in since, is
 // another to start.
 func hubKey(s *Server) string {
-	c := *s
-	c.Agents, c.DisabledTools = nil, nil
+	c := *s.live()
+	c.Agents, c.DisabledTools, c.Accounts, c.Account = nil, nil, nil, ""
 	b, _ := json.Marshal(c)
-	return fmt.Sprintf("%s|%v", b, s.Transport == "http" && mcpauth.SignedIn(s.Name, s.URL))
+	// the sign-in in use too: another account is another to start
+	in := s.Transport == "http" && mcpauth.SignedIn(s.Name, s.URL)
+	return fmt.Sprintf("%s|%v|%s", b, in, map[bool]string{true: mcpauth.InUse(s.Name)}[in])
 }
 
 func backendOf(s *Server) *backend {
@@ -851,7 +912,7 @@ func (c *streamConn) close() {
 // dialStdio starts the command s runs, as the check starts it.
 func dialStdio(s *Server, changed func()) (*streamConn, error) {
 	// the hub's server lives until the hub ends it, not with a request
-	tree, stdin, stdout, errs, stop, bad := startServer(context.Background(), s, "")
+	tree, stdin, stdout, errs, stop, bad := startServer(context.Background(), s, "", "")
 	if bad != nil {
 		return nil, healthErr(*bad)
 	}

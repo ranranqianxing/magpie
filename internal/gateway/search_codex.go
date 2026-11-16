@@ -11,7 +11,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -83,12 +82,36 @@ type codexSearchReply struct {
 // codexSearchRule is the line between the pages of a search's output.
 var codexSearchRule = "\n" + strings.Repeat("-", 80) + "\n"
 
+// codexBlocks are a search's output cut at its rules. A rule doesn't
+// always start a line: a real image search (2026-11-15) put every rule
+// straight after its page's last word ("…beauty.----…----\n"), and a page
+// search after some, so cutting only at "\n"+rule read twelve images as
+// one. A rule is 80 dashes ending a line with no dash before them, so a
+// longer line of dashes in a page's text is no rule.
+func codexBlocks(output string) []string {
+	dashes := strings.Repeat("-", 80) + "\n"
+	var blocks []string
+	from, at := 0, 0
+	for {
+		i := strings.Index(output[at:], dashes)
+		if i < 0 {
+			break
+		}
+		i += at
+		at = i + len(dashes)
+		if i > 0 && output[i-1] == '-' {
+			continue
+		}
+		blocks = append(blocks, output[from:i])
+		from = at
+	}
+	return append(blocks, output[from:])
+}
+
 // codexSearchBy searches with a ChatGPT account: by the backend's search,
 // then, when it fails, by the account's small model.
 func (s *Server) codexSearchBy(ctx context.Context, p provider.Provider, query string) (string, []Hit, error) {
-	start := time.Now()
-	said, hits, err := s.codexSearch(ctx, p, query)
-	logOwnSearch(ctx, p, provider.CodexBase, query, start, len(hits), err)
+	said, hits, err := s.askOwnSearch(ctx, p, provider.CodexBase, query, s.codexSearch)
 	if err == nil || ctx.Err() != nil {
 		return said, hits, err
 	}
@@ -108,7 +131,7 @@ func (s *Server) codexSearchBy(ctx context.Context, p provider.Provider, query s
 func (s *Server) codexSearch(ctx context.Context, p provider.Provider, query string) (string, []Hit, error) {
 	ctx, cancel := context.WithTimeout(s.metered(p.Via(ctx), p, ""), searchTimeout/2)
 	defer cancel()
-	q, err := maskedQuery(ctx, query, &p)
+	q, err := maskedQuery(ctx, unscoped(ctx, query), &p)
 	if err != nil {
 		return "", nil, err
 	}
@@ -118,14 +141,43 @@ func (s *Server) codexSearch(ctx context.Context, p provider.Provider, query str
 	if model == "" {
 		model = "gpt-5"
 	}
+	sc := scopeOf(ctx)
+	query1 := map[string]any{"q": q}
+	settingsBody := map[string]any{
+		"allowed_callers":     []string{"direct"},
+		"external_web_access": webAccess(ctx),
+	}
+	kind := "search_query"
+	if sc != nil {
+		if sc.RecencyDays > 0 {
+			query1["recency"] = sc.RecencyDays
+		}
+		if len(sc.Allowed) > 0 {
+			query1["domains"] = sc.Allowed
+		}
+		filters := map[string]any{}
+		if len(sc.Allowed) > 0 {
+			filters["allowed_domains"] = sc.Allowed
+		}
+		if len(sc.Blocked) > 0 {
+			filters["blocked_domains"] = sc.Blocked
+		}
+		if len(filters) > 0 {
+			settingsBody["filters"] = filters
+		}
+		if sc.Size != "" {
+			settingsBody["search_context_size"] = sc.Size
+		}
+		if sc.Images {
+			kind = "image_query"
+			settingsBody["image_settings"] = map[string]any{"max_results": searchCount(ctx), "caption": true}
+		}
+	}
 	body, _ := json.Marshal(map[string]any{
-		"id":       newUUID(),
-		"model":    model,
-		"commands": map[string]any{"search_query": []map[string]any{{"q": q}}},
-		"settings": map[string]any{
-			"allowed_callers":     []string{"direct"},
-			"external_web_access": webAccess(ctx),
-		},
+		"id":                newUUID(),
+		"model":             model,
+		"commands":          map[string]any{kind: []map[string]any{query1}},
+		"settings":          settingsBody,
 		"max_output_tokens": codexSearchBudget,
 	})
 	who := p.Name + ": "
@@ -142,6 +194,7 @@ func (s *Server) codexSearch(ctx context.Context, p provider.Provider, query str
 		return "", nil, errors.New(who + why)
 	}
 	res, err := s.client.Do(r)
+	res = tapSearch(ctx, r, body, res)
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", nil, fmt.Errorf("%sno answer in time", who)
@@ -162,7 +215,7 @@ func (s *Server) codexSearch(ctx context.Context, p provider.Provider, query str
 	if err := json.Unmarshal(b, &out); err != nil || out.Output == nil {
 		return "", nil, fmt.Errorf("%sunexpected reply: %s", who, provider.APIError(b, res.Status))
 	}
-	pages := codexPages(*out.Output, out)
+	pages := codexPages(*out.Output, out, searchCount(ctx))
 	if len(pages) == 0 {
 		return "", nil, fmt.Errorf("%s%w", who, errFoundNothing)
 	}
@@ -176,7 +229,7 @@ func (s *Server) codexSearch(ctx context.Context, p provider.Provider, query str
 // then what the page says, and a rule of 80 dashes before the next. The
 // results name each page's title and address by its ref_id, which the
 // mark carries.
-func codexPages(output string, out codexSearchReply) []foundPage {
+func codexPages(output string, out codexSearchReply, n int) []foundPage {
 	type result struct{ title, url, snippet string }
 	byRef := map[string]result{}
 	for _, x := range out.Results {
@@ -185,7 +238,7 @@ func codexPages(output string, out codexSearchReply) []foundPage {
 		}
 	}
 	var pages []foundPage
-	for _, block := range strings.Split(output, codexSearchRule) {
+	for _, block := range codexBlocks(output) {
 		head, rest, _ := strings.Cut(strings.TrimSpace(block), "\n")
 		title, link := head, ""
 		if i := strings.LastIndex(head, " ("); i >= 0 && strings.HasSuffix(head, ")") {
@@ -204,7 +257,7 @@ func codexPages(output string, out codexSearchReply) []foundPage {
 				rest = after
 			}
 		}
-		text := rest
+		text := imageSaid(rest)
 		if r, ok := byRef[ref]; ok {
 			title, link = cmp.Or(strings.TrimSpace(r.title), title), r.url
 			if strings.TrimSpace(text) == "" {
@@ -219,7 +272,7 @@ func codexPages(output string, out codexSearchReply) []foundPage {
 			title = link
 		}
 		pages = append(pages, foundPage{Title: title, URL: link, Text: clipText(searchPlain(strings.Map(dropPrivateUse, text)), pageText)})
-		if len(pages) == searchHits {
+		if len(pages) == n {
 			break
 		}
 	}
@@ -233,4 +286,16 @@ func dropPrivateUse(r rune) rune {
 		return -1
 	}
 	return r
+}
+
+// imageSaid sets an image result's text out: the backend gives it as
+// "Image URL: <url># <caption>" with no break between the two.
+func imageSaid(text string) string {
+	t := strings.TrimSpace(text)
+	u, ok := strings.CutPrefix(t, "Image URL:")
+	if !ok {
+		return text
+	}
+	img, caption, _ := strings.Cut(strings.TrimSpace(u), "# ")
+	return strings.TrimSpace("Image: " + strings.TrimSpace(img) + "\n" + strings.TrimSpace(caption))
 }

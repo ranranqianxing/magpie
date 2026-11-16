@@ -5,16 +5,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // userQuery is the tag Cursor wraps around what the user typed. The
 // rest of a user blob (user_info, rules, open files) stays, because the
 // model needs that context. Only the tag itself is removed.
-var userQuery = regexp.MustCompile(`(?s)<user_query>\s*(.*?)\s*</user_query>`)
+var userQuery = lazyre.New(`(?s)<user_query>\s*(.*?)\s*</user_query>`)
 
 // replayConversation reads ConversationStateStructure. root_prompt_messages_json
 // (field 1) is the prompt: each entry is either a JSON message or a

@@ -239,6 +239,7 @@ func forkBranches(t *testing.T, mode string) {
 	config := filepath.Join(home, ".claude")
 	t.Setenv("CLAUDE_CONFIG_DIR", config)
 	os.MkdirAll(config, 0o755)
+	pickFiveMinutes(t)
 	os.WriteFile(filepath.Join(config, ".credentials.json"), mustJSON(map[string]any{"claudeAiOauth": map[string]any{
 		"accessToken": "tok-lead", "refreshToken": "r-lead", "expiresAt": time.Now().Add(24 * time.Hour).UnixMilli(), "subscriptionType": "max"}}), 0o600)
 	os.WriteFile(filepath.Join(home, ".claude.json"), mustJSON(map[string]any{
@@ -250,12 +251,16 @@ func forkBranches(t *testing.T, mode string) {
 	// written after it. Resumed, it goes on from the session's last line,
 	// or as -p from the one --resume-session-at names, and says which, and
 	// whether every line is that session's; the interactive mode takes no
-	// --resume-session-at (Claude Code 2.1.316).
+	// --resume-session-at (Claude Code 2.1.316). The interactive mode's
+	// line of a call comes after the reply's stream, once the run has
+	// parked on it, as the real one's is read from the file (kay20475 on
+	// X: told before the park here, the branch was never missed).
 	dir, logs := t.TempDir(), t.TempDir()
 	testenv.Program(t, filepath.Join(dir, "claude"), `#!/bin/sh
 if [ "$1" = auth ]; then echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"lead@example.com","subscriptionType":"max"}'; exit 0; fi
 log=`+logs+`/$$
 echo "args $*" > $log
+echo "ttl ${CLAUDE_CODE_PROMPT_CACHE_TTL-unset}" >> $log
 echo "mode ${FAKE_TUI:-print}" >> $log
 cb=$(cat "$(printf '%s\n' "$@" | grep -o '"claude-mcp-helper","[^"]*"' | head -1 | sed 's/.*","//; s/"$//')")
 sid=lead$$; resumed=; at=; fork=; prev=
@@ -301,12 +306,17 @@ while read -r line; do
   echo '{"type":"stream_event","event":{"type":"content_block_stop","index":0}}'
   echo '{"type":"user","uuid":"ask-'$$'","sessionId":"'$sid'"}' >> "$file"
   echo '{"type":"assistant","uuid":"line-'$$'","sessionId":"'$sid'","message":{"id":"m'$$'","model":"claude-opus-5-5"}}' >> "$file"
-  echo '{"type":"assistant","uuid":"line-'$$'","message":{"id":"m'$$'","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"toolu_L'$$'","name":"mcp__magpie__Agent","input":{"part":1}}]}}'
+  row='{"type":"assistant","uuid":"line-'$$'","message":{"id":"m'$$'","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"toolu_L'$$'","name":"mcp__magpie__Agent","input":{"part":1}}]}}'
+  [ -n "$FAKE_TUI" ] || echo "$row"
   echo '{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":3}}}'
   echo '{"type":"stream_event","event":{"type":"message_stop"}}'
   (
     call='{"tool_call_id":"toolu_L'$$'","name":"Agent","arguments":{"part":1}}'
     got=$(curl --noproxy '*' -s -X POST -H 'Content-Type: application/json' --data "$call" "$cb")
+    # the interactive mode tells a reply's session line after its stream,
+    # read from the file, so the run has parked on the call by then: here
+    # once its result is handed over, after the park for certain
+    [ -z "$FAKE_TUI" ] || echo "$row"
     echo '{"type":"user","uuid":"result-'$$'","sessionId":"'$sid'"}' >> "$file"
     case "$got" in *"agent launched"*) say "heard:agent launched" ;; *) say "heard:something else" ;; esac
   ) &
@@ -416,4 +426,6 @@ FAKE_TUI=interactive exec "$claude" "$@"
 	if files, _ := filepath.Glob(filepath.Join(config, "projects", "*", "lead"+pid+".jsonl")); len(files) == 0 {
 		t.Error("the lead's session file is gone")
 	}
+	// the fork's branch keeps the 5m cache its lead had
+	everyRunKept5m(t, logs)
 }

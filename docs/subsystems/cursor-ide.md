@@ -35,7 +35,9 @@ writes `state.vscdb`, Cursor's Open configuration, or
 (`cursor-ide/ca.crt`). Connect installs that certificate into the user
 trust store (`TrustCA` in [`trust.go`](../../internal/cursoride/trust.go)).
 It does not write the machine-wide store and does not ask for an
-administrator.
+administrator. The Library does not write skills, MCP servers or
+instructions for this row (`cursor-ide` in `noLibrary`): connect only
+changes the IDE proxy settings.
 
 ## Field meanings
 

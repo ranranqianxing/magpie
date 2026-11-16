@@ -19,18 +19,29 @@ import (
 // in readOnlyRoutes fails TestReadOnlyKeyEveryRoute, so a new one is
 // classified before it ships: the guard refuses it until then.
 var readOnlyRefused = []string{
+	// the Library's skills and prompts: a held key is a display, not a client
+	"GET /v1/magpie/library",
 	// model lists and their Ollama spellings: what the key could use
 	"GET /v1/models", "GET /models", "GET /v1/models/{id...}", "GET /muse-code/models",
 	"GET /api/hello", "GET /api/version", "GET /api/tags",
 	"POST /api/show", "POST /api/chat", "POST /api/generate",
 	// writes, another key's routes, the whole trace, debugging
 	"POST /v1/magpie/usage/requests", "POST " + provider.RemoteRefreshPath,
+	// the chat page's models, its chat, files and speech
+	"GET " + ChatPagePath + "/models",
+	"POST " + ChatPagePath + "/anthropic/v1/messages",
+	"POST " + ChatPagePath + "/anthropic/v1/files",
+	"DELETE " + ChatPagePath + "/anthropic/v1/files/{id}",
+	"POST " + ChatPagePath + "/v1/tools/asr",
+	"POST " + ChatPagePath + "/v1/tools/tts",
 	// a Codex reset, which can't be undone (#3850)
 	"POST " + provider.RemoteCodexResetPath,
+	// an update another magpie asks for
+	"POST " + provider.RemoteUpdatePath,
 	"GET /v1/magpie/route", "GET /v1/magpie/trace",
 	"GET " + ClaudeRunsPath, "GET " + HeapPath, "GET " + CPUPath, "GET " + GoroutinesPath,
 	"POST " + RestartPath,
-	"POST " + KeysPath, "GET " + KeysPath, "DELETE " + KeysPath + "/{id}", "POST " + OIDCKeysPath,
+	AdminPath, "POST " + KeysPath, "GET " + KeysPath, "DELETE " + KeysPath + "/{id}", "POST " + OIDCKeysPath,
 	"GET /v1/magpie/omarchy", "OPTIONS /v1/magpie/omarchy",
 	// models, a WebSocket's upgrade and count_tokens among them
 	"POST /v1/chat/completions", "POST /chat/completions",
@@ -39,6 +50,7 @@ var readOnlyRefused = []string{
 	"POST /v1" + AlphaSearchPath, "POST " + AlphaSearchPath, "POST /v1/messages/count_tokens",
 	"POST /v1/images/generations", "POST /images/generations", "POST /v1/images/edits", "POST /images/edits",
 	"POST /v1/embeddings", "POST /embeddings", "POST /v1/rerank", "POST /rerank",
+	"POST /v1/decisions", "POST /decisions",
 	"POST /v1/audio/transcriptions", "POST /audio/transcriptions",
 	"POST /v1/audio/translations", "POST /audio/translations",
 	"POST /v1/audio/speech", "POST /audio/speech",
@@ -49,7 +61,7 @@ var readOnlyRefused = []string{
 	// MCP servers, plugins' and Codex's backends, Gemini, everything else
 	"POST " + claudeMCPPath + "{token}", "/mcp/{name}", "/mcp/run/{name}",
 	SearchMCPPath, VisionMCPPath, ImageMCPPath, ImageMCPFiles + "{name}",
-	BrowserMCPPath, "GET " + BrowserExtensionPath, "GET " + BrowserStatusPath, ToolsMCPPath, ToolsMCPOne + "{plugin}",
+	BrowserMCPPath, MemoryMCPPath, SessionsMCPPath, "GET " + BrowserExtensionPath, "GET " + BrowserStatusPath, ToolsMCPPath, ToolsMCPOne + "{plugin}",
 	HubMCPPath + "{agent}", HubMCPAll, CodexPath + "/", "GET " + CodexCatalogPath,
 	"GET /v1beta/models", "POST /v1beta/models/{call...}", "/",
 }

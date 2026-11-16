@@ -68,10 +68,18 @@ func IsGroupRef(ref string) bool {
 // back to it before key limits, routing and the usage log see it, so the
 // two ids of one group are one.
 func CanonicalRef(ref string) string {
+	if !strings.HasPrefix(strings.TrimSpace(ref), AutoPrefix) {
+		return ref
+	}
+	return canonicalRef(ref, autoRefsOn())
+}
+
+// canonicalRef uses the ownership read by its caller, without reading settings.
+func canonicalRef(ref string, enabled bool) string {
 	s := strings.TrimSpace(ref)
 	s, marked := strings.CutSuffix(s, "[1m]")
 	m, ok := strings.CutPrefix(s, AutoPrefix)
-	if !ok || strings.TrimSpace(m) == "" || !autoRefsOn() {
+	if !ok || strings.TrimSpace(m) == "" || !enabled {
 		return ref
 	}
 	level := ""
@@ -94,7 +102,7 @@ func CanonicalRef(ref string) string {
 // as group/auto-<slug>, so its members, off and fast lists, weights, rules
 // and classifier name it by one id. g's lists are its own (Group.own).
 func (g *Group) canonicalRefs() {
-	for _, l := range [][]string{g.Members, g.Off, g.Fast} {
+	for _, l := range [][]string{g.Members, g.Off, g.Fast, g.Ultra} {
 		for i, v := range l {
 			l[i] = CanonicalRef(v)
 		}
@@ -105,6 +113,7 @@ func (g *Group) canonicalRefs() {
 			g.Weights[c] = v
 		}
 	}
+	g.EffortMaps = renamedEffortMaps(g.EffortMaps, CanonicalRef)
 	for i := range g.Rules {
 		g.Rules[i].MapUses(CanonicalRef)
 	}
@@ -135,23 +144,52 @@ func (g Group) Ref() string {
 // found group magpie has none of now too.
 func PublicRef(ref string) string {
 	s := strings.TrimSpace(ref)
+	if !strings.HasPrefix(s, AutoPrefix) && !strings.HasPrefix(s, GroupPrefix+"auto-") {
+		return ref
+	}
+	if !autoRefsOn() {
+		return ref
+	}
+	return publicRef(ref, func(gid string) string {
+		g, _ := groupOf(sharedGroups(), gid)
+		return g.Spelled
+	})
+}
+
+// PublicRefs snapshots the found groups' public spellings for a whole usage
+// read. The returned mapper reads no files or shared catalog; nil means the
+// public namespace is inactive or no found group has a public spelling.
+func PublicRefs() func(string) string {
+	groups := usageGroupNames()
+	if len(groups) == 0 {
+		return nil
+	}
+	return func(ref string) string {
+		return publicRef(ref, func(gid string) string { return groups[gid] })
+	}
+}
+
+// publicRef uses a group's spelling read by the caller. Usage takes a snapshot
+// before its locks, so naming each row never reads providers or settings.
+func publicRef(ref string, spelling func(string) string) string {
+	s := strings.TrimSpace(ref)
 	if strings.HasPrefix(s, AutoPrefix) {
-		s = CanonicalRef(s)
+		s = canonicalRef(s, true)
 	}
 	s, marked := strings.CutSuffix(s, "[1m]")
 	gid, ok := strings.CutPrefix(s, GroupPrefix)
-	if !ok || !strings.HasPrefix(gid, "auto-") || !autoRefsOn() {
+	if !ok || !strings.HasPrefix(gid, "auto-") {
 		return ref
 	}
 	level := ""
 	if i := strings.LastIndex(gid, ":"); i > 0 {
 		gid, level = gid[:i], gid[i:]
 	}
-	g, ok := groupOf(sharedGroups(), gid)
-	if !ok || g.Spelled == "" {
+	model := spelling(gid)
+	if model == "" {
 		return ref
 	}
-	out := g.Ref() + level
+	out := AutoPrefix + model + level
 	if marked {
 		out += "[1m]"
 	}

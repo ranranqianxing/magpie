@@ -160,9 +160,9 @@ func upgrade() {
 		return
 	}
 	defer upgrading.Store(false)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-	if err := ensureServe(ctx); err != nil {
+	// no bound on the whole, as the model's download has none: get's
+	// stall timer ends one that stops sending (#5572)
+	if err := ensureServe(context.Background()); err != nil {
 		return
 	}
 	stopWhenFree()
@@ -235,6 +235,13 @@ func unzipTo(f *zip.File, path string) error {
 	return out.Close()
 }
 
+// Fetch is fetch for another package's pinned file (memembed's model):
+// through magpie's proxy, taken up where a stopped one left off, and
+// renamed into place only when its sha256 is want.
+func Fetch(ctx context.Context, url, path string, size int64, want string, done *atomic.Int64) error {
+	return fetch(ctx, url, path, size, want, done)
+}
+
 // fetch downloads url to path through path+".part", taking up a part
 // already there with a Range request, and renames it to path only when
 // its sha256 is want (and its size size, unless that is -1). done counts
@@ -254,6 +261,16 @@ func fetch(ctx context.Context, url, path string, size int64, want string, done 
 	}
 	if size < 0 || have < size {
 		got, err := get(ctx, url, part, have, done)
+		if err != nil && ctx.Err() == nil && netproxy.BrokeOff(err) {
+			// once more over HTTP/1.1, from what is on disk: a proxy
+			// that cuts HTTP/2 streams part way carries HTTP/1.1 whole
+			// (netproxy.OverHTTP1)
+			have = 0
+			if fi, serr := os.Stat(part); serr == nil {
+				have = fi.Size()
+			}
+			got, err = get(netproxy.OverHTTP1(ctx), url, part, have, done)
+		}
 		if err != nil {
 			return err
 		}

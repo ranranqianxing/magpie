@@ -74,7 +74,7 @@ func (f *compactFails) held(key, model string) (string, bool) {
 		return "", false
 	}
 	left := (compactHeldFor - time.Since(c.last)).Round(time.Second)
-	return fmt.Sprintf("compaction: %s failed to summarise this conversation %d times in a row (last: %s); magpie doesn't ask it again for %s, so a compaction that can't succeed isn't paid for over and over. Pick another model for this conversation, or a group whose compaction rule sends it to one that answers",
+	return fmt.Sprintf("Couldn't compact the conversation: %s failed %d times in a row (last: %s). magpie waits %s before asking it again. To compact now, switch this conversation to another model.",
 		model, c.n, c.why, left), true
 }
 
@@ -138,6 +138,15 @@ func asksCompaction(ctx context.Context) bool {
 
 func askCompaction(r *http.Request) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), compactionAskKey{}, true))
+}
+
+// askAsSent is a summary ask taken back to the roles the client sent,
+// after the swap was refused: the ChatGPT backend behind a relay takes
+// developer alone, and the summary went to it as system (forVendor,
+// #5067). Its turns, developer as they came, are taken, and the summary
+// goes the same way.
+func askAsSent(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), compactionAskKey{}, false))
 }
 
 func askWhole(r *http.Request) *http.Request {

@@ -57,13 +57,17 @@ var claudeWindowsExpected = []QuotaWindow{{Name: "5 hours", Span: 5 * time.Hour}
 
 // claudeWarmedNow has what the Claude account user has left read again,
 // not taken from the last few minutes' read: the window a warm-up started
-// has its reset known, and routing ranks the account by it at once.
+// has its reset known, and routing ranks the account by it at once. The
+// next read is due as for an account never read (claudeWindows), and what
+// is kept keeps its own time until then: cleared, the card stamped the
+// windows read before the warm-up as read just now, and no read was due
+// (koohoko5924).
 func claudeWarmedNow(user string) {
 	key := strings.ToLower(user)
 	c := &claudeUsage
 	c.Lock()
 	if e, ok := c.m[key]; ok {
-		e.at = time.Time{}
+		e.tried = time.Time{}
 		c.m[key] = e
 	}
 	c.Unlock()
@@ -78,6 +82,17 @@ func ClaudeWarmed() map[string]time.Time { return codexWarmedIn(claudeWarmPath()
 // while settings say to, each with one request send makes.
 func KeepClaudeWindowsWarm(ctx context.Context, send func(ctx context.Context, configDir string) error) {
 	w := codexWarmer{path: claudeWarmPath(), now: time.Now, usage: claudeWarmUsage, send: warmClaudeLogin(send),
-		expect: claudeWindowsExpected, warmed: claudeWarmedNow}
+		expect: claudeWindowsExpected, warmed: claudeWarmedNow, held: claudeHeldFull}
 	keepWarm(ctx, "claude", w, func() (string, []string) { s := settings.Load(); return s.ClaudeWarmup, s.ClaudeWarmAts })
+}
+
+// claudeHeldFull says whether the Claude account user, read as q, is held at 100% of
+// a used-up window rather than spending extra usage: set so for every
+// account (ClaudeExtraUsage), or its extra usage at the cap set on its
+// Usage credits (Allowance.extraCapped).
+func claudeHeldFull(user string, q SubscriptionQuota, now time.Time) bool {
+	if !ClaudeExtraUsage() {
+		return true
+	}
+	return allowanceOf(q.Windows, now).extraCapped("", AccountCapsOf("claude", user), now).Credits
 }

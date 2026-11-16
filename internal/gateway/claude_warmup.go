@@ -6,12 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -20,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/yetone/magpie/internal/claudetui"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
@@ -114,6 +113,7 @@ func askClaudeTUI(ctx context.Context, binary claudeCLI, configDir, model string
 	}
 	// the folder is magpie's own: asked whether to trust it, say yes
 	env = append(env, claudetui.TrustEnv+"=1")
+	env = append(env, claudeBypassEnv(true, configDir)...)
 	env = append(env, helperDeadline(ctx)...)
 	cmd.Env = binary.tuiEnv(binary.env(binary.asRoot(env), configDir), configDir)
 	stdin, err := cmd.StdinPipe()
@@ -182,15 +182,23 @@ func init() {
 }
 
 // claudeUsage is what Claude Code's /usage prints for the account in
-// configDir (empty for its own): a command asking no model, run as
-// askClaude runs it, with nothing of the user's settings and nothing kept.
+// configDir (empty for its own), run as askClaude runs it, with nothing of
+// the user's settings and nothing kept. It always runs as -p, the
+// interactive mode on or off (#5582): an interactive Claude Code (2.1.316)
+// sends a model request as it starts, before anything is typed
+// (probeQuotaStatus: haiku, max_tokens 1, "quota"), unless
+// CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set, which also keeps
+// /usage from loading. That request is counted, so on an account with no
+// five-hour window open it started one: magpie's reads, at its start and
+// as a window ended, opened the user's window with warm-up off. -p skips
+// that request (it is sent only when interactive) and its /usage asks
+// only the usage endpoint, and prints the plan's windows for a Claude
+// subscription's sign-in (one with the user:profile scope; a setup-token
+// account has none, and provider never reads one).
 func claudeUsage(ctx context.Context, configDir string) (string, error) {
 	binary, err := claudeBinary()
 	if err != nil {
 		return "", err
-	}
-	if claudeTUIOn() {
-		return claudeUsageTUI(ctx, binary, configDir)
 	}
 	tmp, err := os.MkdirTemp("", "magpie-claude-")
 	if err != nil {
@@ -216,7 +224,7 @@ func claudeUsage(ctx context.Context, configDir string) (string, error) {
 		if res.IsError {
 			return "", errors.New("Claude Code: " + clip(res.Result))
 		}
-		return res.Result, nil
+		return res.Result + claudeExtraUsage(out.Bytes()), nil
 	}
 	msg := strings.TrimSpace(stderr.String())
 	if msg == "" {
@@ -226,6 +234,43 @@ func claudeUsage(ctx context.Context, configDir string) (string, error) {
 		return "", runErr
 	}
 	return "", errors.New("Claude Code: " + clip(msg))
+}
+
+// claudeExtraUsage is the line (provider.ClaudeExtraLine) for the extra
+// usage, Anthropic's usage credits, an account has on and a monthly cap
+// for, from the usage_report Claude Code's verbose json carries with its
+// /usage; "" when out has none, as from a Claude Code that sends none.
+func claudeExtraUsage(out []byte) string {
+	var all []struct {
+		Report *struct {
+			Limits *struct {
+				Extra *struct {
+					On       bool     `json:"is_enabled"`
+					Limit    *float64 `json:"monthly_limit"`
+					Used     *float64 `json:"used_credits"`
+					Currency string   `json:"currency"`
+				} `json:"extra_usage"`
+			} `json:"rate_limits"`
+		} `json:"usage_report"`
+	}
+	if json.Unmarshal(out, &all) != nil {
+		return ""
+	}
+	for _, m := range all {
+		if m.Report == nil || m.Report.Limits == nil || m.Report.Limits.Extra == nil {
+			continue
+		}
+		x := m.Report.Limits.Extra
+		if !x.On || x.Limit == nil || *x.Limit <= 0 {
+			return ""
+		}
+		used := 0.0
+		if x.Used != nil {
+			used = *x.Used
+		}
+		return "\n" + provider.ClaudeExtraLine(used, *x.Limit, x.Currency)
+	}
+	return ""
 }
 
 // claudeUsageEnv is the environment a /usage read runs Claude Code in:
@@ -242,60 +287,7 @@ func claudeUsageEnv() []string {
 	return append(env, "DISABLE_TELEMETRY=1", "DISABLE_ERROR_REPORTING=1", "DISABLE_AUTOUPDATER=1")
 }
 
-// claudeUsageTUI is claudeUsage with the interactive mode on
-// (claudeTUIOn): /usage is typed in it, through its helper, which tells
-// the plan's windows its panel shows as -p's /usage lines say them
-// (claudetui's usageText). -p's /usage tells only the session's cost
-// there (Claude Code 2.1.316), so the plan's allowance is read only so.
-func claudeUsageTUI(ctx context.Context, binary claudeCLI, configDir string) (string, error) {
-	if _, why := claudeMachineWhy(binary); why != "" {
-		return "", claudeTUIErr(why)
-	}
-	work, done, err := oneOffDir()
-	if err != nil {
-		return "", err
-	}
-	defer done()
-	trustWork(binary, configDir, work)
-	cmd, err := binary.tuiCommand(ctx, claudeTUIUsageArgs()...)
-	if err != nil {
-		return "", err
-	}
-	cmd.Dir = work
-	env, err := binary.proxied(ctx, claudeUsageEnv())
-	if err != nil {
-		return "", err
-	}
-	// the folder is magpie's own: asked whether to trust it, say yes
-	env = append(env, claudetui.TrustEnv+"=1")
-	env = append(env, helperDeadline(ctx)...)
-	cmd.Env = binary.tuiEnv(binary.env(binary.asRoot(env), configDir), configDir)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return "", err
-	}
-	go func() { _, _ = io.WriteString(stdin, `{"type":"command","command":"/usage"}`+"\n") }()
-	out := &resultLines{done: func() { _ = stdin.Close() }}
-	var stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = out, &stderr
-	runErr := runClaudeTree(ctx, cmd, "a Claude Code /usage read")
-	dropOneOff(binary, configDir, work, out.sid)
-	var full *claudeFull
-	if errors.As(runErr, &full) {
-		return "", runErr
-	}
-	if out.res != nil {
-		if out.res.IsError {
-			return "", errors.New("Claude Code: " + clip(out.res.Result))
-		}
-		return out.res.Result, nil
-	}
-	err = oneOffErr(ctx, stderr.String(), runErr)
-	logOneOff("a /usage read", configDir, stderr.String(), err)
-	return "", err
-}
-
-// oneOffDir is the folder a one-off interactive run (a test, a /usage)
+// oneOffDir is the folder a one-off interactive run (a test, a warm-up)
 // works in: magpie's own, the one the bridge's runs work in
 // (claudeWorkDir). Claude Code asks whether to trust a folder once for
 // each of its state files, and keeps the answer there: a folder of each
@@ -348,15 +340,21 @@ func claudeTrustKeys(binary claudeCLI, work string) []string {
 	}
 	var keys []string
 	for _, w := range []string{work, evalSymlinks(work)} {
-		k := norm.NFC.String(filepath.Clean(w))
-		if trustGOOS == "windows" {
-			k = strings.ReplaceAll(k, `\`, "/")
-		}
-		if !slices.Contains(keys, k) {
+		if k := claudeTrustKey(w); !slices.Contains(keys, k) {
 			keys = append(keys, k)
 		}
 	}
 	return keys
+}
+
+// claudeTrustKey is the projects key Claude Code (2.1.316) gives folder
+// dir: its path in NFC, on Windows with forward slashes.
+func claudeTrustKey(dir string) string {
+	k := norm.NFC.String(filepath.Clean(dir))
+	if trustGOOS == "windows" {
+		k = strings.ReplaceAll(k, `\`, "/")
+	}
+	return k
 }
 
 // dropOneOff removes the session a one-off interactive run left in
@@ -424,7 +422,7 @@ func logOneOff(what, configDir, stderr string, err error) {
 
 // homePath is a user's home folder in a path, on Windows, a Mac or
 // Linux, with either slash: what follows it is kept, the user's name not.
-var homePath = regexp.MustCompile(`(?i)(?:\b[a-z]:)?[\\/]+(?:users|home)[\\/]+[^\\/\s"'│:]+`)
+var homePath = lazyre.New(`(?i)(?:\b[a-z]:)?[\\/]+(?:users|home)[\\/]+[^\\/\s"'│:]+`)
 
 // logSafe is s for app.log: secrets out (redact.Scrub), this user's home
 // folder and any other home folder in it written ~, its spaces
@@ -508,16 +506,19 @@ func claudeResult(b []byte) (claudeRun, bool) {
 // read.
 const disableDeepLinkSettings = `{"disableDeepLinkRegistration":"disable"}`
 
+// claudeRunSettings is a run's settings: no deep link, and the thinking
+// shown as a summary. -p has --thinking-display, but the interactive mode
+// (interactiveArgs drops that flag) shows none unless showThinkingSummaries
+// is on, so a client saw no thinking at all (DIYgod on X, #5379). It costs
+// no quota.
+const claudeRunSettings = `{"disableDeepLinkRegistration":"disable","showThinkingSummaries":true}`
+
 func claudeUsageArgs() []string {
 	return []string{"-p", "/usage", "--output-format", "json",
+		// verbose: the array of every message, whose usage_report holds
+		// the extra usage (claudeExtraUsage); claudeResult reads it
+		"--verbose",
 		"--tools", "", "--strict-mcp-config", "--setting-sources", "", "--settings", disableDeepLinkSettings, "--no-session-persistence"}
-}
-
-// claudeTUIUsageArgs are claudeUsageArgs for the interactive mode's
-// helper, /usage typed in it rather than given.
-func claudeTUIUsageArgs() []string {
-	return []string{"-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose",
-		"--tools", "", "--strict-mcp-config", "--setting-sources", "", "--settings", disableDeepLinkSettings}
 }
 
 func claudeWarmArgs(model string) []string {
@@ -537,4 +538,16 @@ func clip(s string) string {
 		return s[:300] + "…"
 	}
 	return s
+}
+
+// claudeBypassEnv lets the shim accept Claude Code's Bypass Permissions
+// disclaimer (#5042) only in an account folder of magpie's: Claude Code
+// records the acceptance in that folder's settings.json for good, and in
+// the account it is signed in to (configDir "", the user's own config
+// folder) that is the user's to give.
+func claudeBypassEnv(tui bool, configDir string) []string {
+	if !tui || configDir == "" {
+		return nil
+	}
+	return []string{claudetui.BypassEnv + "=1"}
 }

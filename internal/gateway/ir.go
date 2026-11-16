@@ -28,6 +28,10 @@ const (
 	ToolResult Kind = "tool_result"
 	Thinking   Kind = "thinking"
 	Search     Kind = "web_search" // a web search run for the model: its query and hits
+	// Advice is Claude Code's advisor run by magpie for the model
+	// (advisor_serve.go): ID the call's, Text the advice, or Name an
+	// error_code and nothing in Text
+	Advice Kind = "advisor"
 )
 
 // Part is one block of a message.
@@ -54,6 +58,12 @@ type Part struct {
 	IsError    bool
 	Images     []Part         // the images the tool returned beside its text
 	Standalone map[string]any // native Responses notification with no call ID
+	// Audio is the recordings the tool returned (a Chat tool message's
+	// input_audio parts), as File parts with an audio/* type: a Gemini
+	// upstream is given them inline after the response, as its images;
+	// every other upstream is told of them in the result's text, which
+	// toolOutput already ends with a note for each
+	Audio []Part
 	// Loads are the tools a tool's result loads, by name: Claude Code's
 	// ToolSearch answers with tool_reference blocks naming the deferred
 	// tools it found (#2660)
@@ -175,6 +185,17 @@ type Request struct {
 	// marks: the Claude bridge's explicit opt-in, and a Messages ask
 	// translated to an Anthropic upstream (parseTranslated, #4571).
 	clientCache *clientCache
+	// cacheTTL is how long a Claude bridge run started for the request
+	// keeps its prompt cache (claudeRunTTL), which the marks magpie adds
+	// follow (runMark); "" is an hour
+	cacheTTL string
+	// askedTTL is the longest TTL the request's own cache marks ask for
+	// (askedCacheTTL), "" for one that marks nothing or came in another API
+	askedTTL string
+	// pickedTTL is the cache lifetime the user of the computer the
+	// request's Claude Code runs on picked, "default" for none, "" when
+	// unknown (claudeTTLOf)
+	pickedTTL string
 	// leanPrompt has the Claude bridge give the caller's instructions as
 	// the run's system prompt, in place of Claude Code's (ClaudeLeanPrompt).
 	leanPrompt bool
@@ -223,6 +244,17 @@ type Request struct {
 	// request is Claude Code's interactive mode, not claude -p: what a
 	// refusal it ends in is told with (thirdPartyRefused, #4503)
 	interactive bool
+	// tuiRefused, for the Claude bridge, is a request whose agent's
+	// system prompt Anthropic refused in the interactive mode as a
+	// third-party app's (#4503): its run is claude -p, which is served
+	// such prompts, with the interactive mode on all the same
+	// (thirdPartyPrint)
+	tuiRefused bool
+	// unpasted, for the Claude bridge, is a request whose message Claude
+	// Code's interactive mode didn't take, or one with images on a
+	// machine where it didn't take an image (ok123now on X): its run is
+	// claude -p, with the interactive mode on all the same
+	unpasted bool
 	// hourMarks has the cache marks magpie adds on Anthropic's Messages
 	// (anthropicBody) last an hour: a Responses client's (Codex's), whose
 	// turns are often more than five minutes apart and whose own vendor
@@ -230,6 +262,14 @@ type Request struct {
 	// client asked prompt_cache_retention "in_memory", or the upstream
 	// turned the ttl away (hourMarksRefused).
 	hourMarks bool
+	// videoOff is set on a request built for a model known not to take
+	// video (videoInput): a video of an earlier turn is told of in words
+	// (attachmentText) where it would go as a video block (video_input.go)
+	videoOff bool
+	// signer, on a request built for chat completions, is the provider
+	// it goes to: a tool call's Gemini signature that provider gave goes
+	// back to it in extra_content, whatever its host (buildChat)
+	signer string
 	// draws asks the model for images beside text: a drawing asked on
 	// Gemini's API of a model not named for images (drawCodeAssist).
 	draws bool
@@ -238,6 +278,20 @@ type Request struct {
 	// false included, as OpenCode's own do: Zen's free tier
 	// (zenFreeTools).
 	strictSaid bool
+
+	// subagent: the request is from a subagent the agent started, as
+	// Claude Code (x-claude-code-agent-id) and Codex (collab_spawn) tell
+	// it, for a rule's subagent condition. Other agents don't say.
+	subagent bool
+
+	// systemParts: each block of the system prompt as the client sent it
+	// (Anthropic's system blocks, a system or developer message, Responses'
+	// instructions), before magpie adds to or joins them, for a rule's
+	// system condition (SucroseMoE on X). systemRaw holds the ones still
+	// as JSON (a string or text blocks), read only when a rule asks
+	// (systemTexts): a Claude Code system prompt is tens of KB.
+	systemParts []string
+	systemRaw   []json.RawMessage
 
 	Model      string
 	System     string
@@ -257,6 +311,19 @@ type Request struct {
 	ThinkOff  bool
 	Parallel  *bool // parallel tool calls allowed
 	WebSearch bool  // the client offered its provider's own web search
+	// GoogleTools are Gemini's own tools other than googleSearch (which
+	// is WebSearch) that the client offered, each one tool object as
+	// Google spells it — {"urlContext":{}}, {"codeExecution":{}},
+	// {"googleMaps":{}} — for an upstream that speaks Gemini, inside
+	// Code Assist's envelope too (buildCodeAssistSent). A Gemini client's
+	// tools, or the same objects in a Chat request's tools. Left out, a
+	// client's URL context and code execution were dropped on every
+	// translated route (daoche_wuzui on X). No other API runs them.
+	GoogleTools []json.RawMessage
+	// Advisor is the model of Claude Code's advisor that magpie runs
+	// itself (advisor_serve.go), "" when it doesn't: its calls and results
+	// in the conversation are ToolCall and ToolResult parts then
+	Advisor string
 	// WebAccess is the external_web_access of the client's web_search
 	// tool, as it sent it: Codex's web_search mode (false for "cached",
 	// true for "live"), which magpie's own search for a model that can't
@@ -320,6 +387,15 @@ type Request struct {
 	// (buildCodeAssistSent). Left out, the picture came back at the
 	// model's default size (#3820). No other API is known to take it.
 	ImageConfig json.RawMessage
+	// GenConfig holds a Gemini client's generationConfig keys magpie
+	// doesn't read or write itself — topK, seed, the penalties, responseModalities, mediaResolution, speechConfig,
+	// responseFormat — which go on as they were sent when the request is
+	// built again for an upstream that speaks Gemini's own API (the Gemini
+	// one and Vertex AI, geminiRequest): left out, everything else the
+	// client asked was dropped (#3937). Code Assist's and Antigravity's
+	// envelope has no documented spelling of them, so they are not passed
+	// there.
+	GenConfig map[string]json.RawMessage
 	// Safeguards are the caller's safety context, opaque to the gateway.
 	Safeguards    json.RawMessage
 	SafeguardBeta string
@@ -407,6 +483,9 @@ const (
 	// keepaliveGap of nothing else: a reply read in rounds (searchReply)
 	// keeps its client alive with it as a translated stream does (#2316)
 	KAlive
+	// KAdvice: Claude Code's advisor run by magpie (advisor_serve.go), ID
+	// the call's, Text the advice, or Code its error_code
+	KAdvice
 )
 
 // Event is one thing a streaming reply said.
@@ -430,6 +509,10 @@ type Event struct {
 	// StopDetails: Anthropic's stop_details, what its classifier said of
 	// a refusal (#1768), carried to the client as it came
 	StopDetails json.RawMessage
+	// Estimated: the vendor's estimated_tokens on an empty thinking_delta,
+	// its live progress beat during a long think (#5390); nil when the
+	// delta carried none
+	Estimated *int
 
 	// Wait: for KError, how long the vendor said to wait before asking
 	// again, when it said; sent on as Retry-After
@@ -464,6 +547,10 @@ type Usage struct {
 	// provider's own tool (searchTally), for the request log's Web search
 	// rows; told nowhere else
 	searches int
+	// restart: the usage of a request that goes on with a reply another
+	// began (after): its prompt counts are the reply's from now on, a
+	// zero too, as what the earlier one counted is the reply's Deferred
+	restart bool
 
 	Reasoning int `json:"reasoning"`
 	// Served: the model the vendor's reply says answered, when it named
@@ -526,6 +613,9 @@ func (u Usage) prompt() int {
 }
 
 func (u *Usage) add(v Usage) {
+	if v.restart {
+		u.Input, u.CacheRead, u.CacheWrite, u.CacheWrite1h = v.Input, v.CacheRead, v.CacheWrite, v.CacheWrite1h
+	}
 	if v.Input > 0 {
 		u.Input = v.Input
 	}
@@ -733,6 +823,9 @@ func (c *collector) add(ev Event) {
 	case KImage:
 		c.closeTool()
 		c.res.Parts = append(c.res.Parts, Part{Kind: Image, MediaType: ev.Name, Data: ev.Text})
+	case KAdvice:
+		c.closeTool()
+		c.res.Parts = append(c.res.Parts, Part{Kind: Advice, ID: ev.ID, Text: ev.Text, Name: ev.Code})
 	}
 	switch ev.Kind {
 	case KStart, KUsage, KError, KAlive:
@@ -807,6 +900,52 @@ func text(parts []Part) string {
 	return b.String()
 }
 
+// systemTexts is each block of the system prompt as the client sent it
+// (systemParts, systemRaw).
+func (r *Request) systemTexts() []string {
+	out := slices.Clone(r.systemParts)
+	for _, raw := range r.systemRaw {
+		var s string
+		if decodeJSON(raw, &s) == nil {
+			if s != "" {
+				out = append(out, s)
+			}
+			continue
+		}
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if decodeJSON(raw, &blocks) == nil {
+			for _, b := range blocks {
+				if b.Text != "" && (b.Type == "text" || b.Type == "input_text") {
+					out = append(out, b.Text)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// lastUserTexts is each text of the request's last user message as the
+// client sent it, the agent's reminders and all; none when that message
+// holds only tool results.
+func lastUserTexts(r *Request) []string {
+	for i := len(r.Messages) - 1; i >= 0; i-- {
+		if r.Messages[i].Role != "user" {
+			continue
+		}
+		var out []string
+		for _, p := range r.Messages[i].Parts {
+			if p.Kind == Text && p.Text != "" {
+				out = append(out, p.Text)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 // stringOrText reads a JSON value that is either a string or an array of
 // {type:"text", text} blocks (Anthropic's system, tool results…).
 func stringOrText(raw json.RawMessage) string {
@@ -844,11 +983,15 @@ func stringOrText(raw json.RawMessage) string {
 }
 
 // toolOutput reads a tool's result: its text, as stringOrText reads it,
-// and the images in it. Anthropic's tool_result holds image blocks, a
-// Responses function_call_output input_image parts and a Chat tool message,
-// from clients that send them, image_url parts. An image named only by a
-// vendor's file id has nothing to carry and is left out.
-func toolOutput(raw json.RawMessage) (string, []Part) {
+// the images in it and the recordings. Anthropic's tool_result holds image
+// blocks, a Responses function_call_output input_image parts and a Chat
+// tool message, from clients that send them, image_url and input_audio
+// parts. An image named only by a vendor's file id has nothing to carry and
+// is left out. Each recording is also told of at the end of the text
+// ("[attachment audio/wav]", as a Chat user's input_audio is told of to an
+// upstream that can't hear it), so an upstream given the text alone knows
+// the tool returned one; a Gemini upstream is given the recording too.
+func toolOutput(raw json.RawMessage) (string, []Part, []Part) {
 	text := stringOrText(raw)
 	var blocks []struct {
 		Type   string `json:"type"`
@@ -857,13 +1000,17 @@ func toolOutput(raw json.RawMessage) (string, []Part) {
 			Data      string `json:"data"`
 			URL       string `json:"url"`
 		} `json:"source"`
-		ImageURL json.RawMessage `json:"image_url"`
-		Detail   string          `json:"detail"` // a Responses input_image's
+		ImageURL   json.RawMessage `json:"image_url"`
+		Detail     string          `json:"detail"` // a Responses input_image's
+		InputAudio struct {
+			Data   string `json:"data"`
+			Format string `json:"format"`
+		} `json:"input_audio"`
 	}
 	if len(raw) == 0 || raw[0] != '[' || decodeJSON(raw, &blocks) != nil {
-		return text, nil
+		return text, nil, nil
 	}
-	var images []Part
+	var images, audio []Part
 	for _, b := range blocks {
 		switch b.Type {
 		case "image":
@@ -888,9 +1035,22 @@ func toolOutput(raw json.RawMessage) (string, []Part) {
 				im.Detail = detail
 				images = append(images, im)
 			}
+		case "input_audio":
+			// a tool's recording, as a Chat user's input_audio is read
+			// (chatParts): left out before, so Gemini answered without
+			// it (Parlevent_ on X)
+			if b.InputAudio.Data != "" {
+				audio = append(audio, Part{Kind: File, MediaType: audioType(b.InputAudio.Format), Data: b.InputAudio.Data})
+			}
 		}
 	}
-	return text, images
+	for _, a := range audio {
+		if text != "" {
+			text += "\n"
+		}
+		text += attachmentText(a)
+	}
+	return text, images, audio
 }
 
 // effortOf normalises the reasoning effort names the APIs use.

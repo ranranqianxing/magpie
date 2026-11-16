@@ -1,6 +1,8 @@
 package provider
 
 import (
+	"slices"
+	"sync"
 	"testing"
 	"time"
 )
@@ -11,7 +13,7 @@ func resetUsed(t *testing.T) {
 	reset := func() {
 		usedCache.Lock()
 		usedCache.m, usedCache.at, usedCache.loading = map[string]map[string]Allowance{}, map[string]time.Time{}, map[string]chan struct{}{}
-		usedCache.stale, usedCache.seen = nil, nil
+		usedCache.stale, usedCache.seen, usedCache.heard = nil, nil, nil
 		usedCache.Unlock()
 	}
 	reset()
@@ -111,5 +113,201 @@ func TestNoteCodexLimitsHoldsTheCap(t *testing.T) {
 	}
 	if time.Since(e.at) < 29*time.Second {
 		t.Fatal("a reply was taken for a whole reading")
+	}
+}
+
+// An account whose reading fails, every minute, is known from what its
+// replies tell of its week, until a reading tells it: kept as not known,
+// Use before expiry counted it a whole week ahead and Smart put it after
+// every account known, so with ten others it was never sent a request
+// while the week magpie's own turns started ran out unspent
+// (peterpark8527 on Discord, 11 ChatGPT accounts). A reply telling the
+// five hours alone makes nothing up; a reading that comes back wins.
+func TestNoteCodexLimitsKnowsAnUnreadAccount(t *testing.T) {
+	signIn(t)
+	rememberLogins(true)
+	resetUsed(t)
+	now := time.Now()
+	failed := func() {
+		loginUsageCache.Lock()
+		loginUsageCache.m = map[string]loginUsageEntry{"codex/me@example.com": {at: time.Now(),
+			q: SubscriptionQuota{Provider: "codex", Windows: []QuotaWindow{}, Error: "usage: 403"}}}
+		loginUsageCache.Unlock()
+	}
+	readAgain := func() map[string]Allowance {
+		usedCache.Lock()
+		usedCache.at["codex"] = time.Time{}
+		usedCache.Unlock()
+		Allowances("codex")
+		for {
+			usedCache.Lock()
+			done := usedCache.loading["codex"]
+			usedCache.Unlock()
+			if done == nil {
+				break
+			}
+			<-done
+		}
+		return Allowances("codex")
+	}
+	failed()
+	if _, ok := readAgain()["me@example.com"]; ok {
+		t.Fatal("a failed reading is known")
+	}
+	NoteCodexLimits("codex", "me@example.com", []CodexLimit{{Used: 10, Span: 5 * time.Hour, Resets: now.Add(time.Hour)}})
+	if _, ok := Allowances("codex")["me@example.com"]; ok {
+		t.Fatal("the five hours alone made the account known")
+	}
+	week := now.Add(2 * 24 * time.Hour).Truncate(time.Second)
+	NoteCodexLimits("codex", "me@example.com", []CodexLimit{
+		{Used: 10, Span: 5 * time.Hour, Resets: now.Add(time.Hour)},
+		{Used: 20, Span: 7 * 24 * time.Hour, Resets: week}})
+	a, ok := Allowances("codex")["me@example.com"]
+	if !ok {
+		t.Fatal("a reply telling the week left the account not known")
+	}
+	if pc, due := a.Pace("gpt-5.5", now); !due.Equal(week) || pc < 80/48.0-0.01 || pc > 80/48.0+0.01 {
+		t.Fatalf("pace %v due %v, want 80%% over 48h, due %v", pc, due, week)
+	}
+	// its reading fails again: still known from the reply
+	failed()
+	if _, ok := readAgain()["me@example.com"]; !ok {
+		t.Fatal("the next failed reading forgot what the reply told")
+	}
+	// a reading comes back: it is the account's
+	read := now.Add(5 * 24 * time.Hour)
+	loginUsageCache.Lock()
+	loginUsageCache.m = map[string]loginUsageEntry{"codex/me@example.com": {at: time.Now(),
+		q: SubscriptionQuota{Provider: "codex", Windows: []QuotaWindow{{Name: "7 days", Used: 60, ResetsAt: &read, Span: 7 * 24 * time.Hour}}}}}
+	loginUsageCache.Unlock()
+	if u, _ := readAgain()["me@example.com"].For("gpt-5.5", now); u != 60 {
+		t.Fatalf("the reading said 60%%, routing has %v%%", u)
+	}
+	failed()
+	if _, ok := readAgain()["me@example.com"]; ok {
+		t.Fatal("what a reply told outlived the reading that replaced it")
+	}
+}
+
+// creditsTold records the accounts OnCredits tells of, from now on.
+func creditsTold(t *testing.T) func() []string {
+	t.Helper()
+	var mu sync.Mutex
+	var told []string
+	on := true
+	OnCredits(func(agent, user string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if on {
+			told = append(told, agent+"/"+user)
+		}
+	})
+	t.Cleanup(func() { mu.Lock(); on = false; mu.Unlock() })
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		out := slices.Clone(told)
+		told = nil
+		return out
+	}
+}
+
+// @123xtv03k on X: a ChatGPT account whose plan ran out goes on on credits
+// it bought, which Codex reads from every reply, the refusal too. What a
+// reply says of them is routing's and the Usage page's at once, held by
+// the Codex app no more, and those OnCredits asked are told when it is
+// newly so — not again, not when it says none, and not for an account
+// set not to spend them.
+func TestNoteCodexCreditsKeepsThem(t *testing.T) {
+	isolate(t)
+	resetUsed(t)
+	told := creditsTold(t)
+	now := time.Now()
+	five, week := now.Add(2*time.Hour), now.Add(4*24*time.Hour)
+	usedCache.Lock()
+	usedCache.m["codex"] = map[string]Allowance{
+		"Me@example.com":    {{Used: 100, Resets: five, Span: 5 * time.Hour}, {Used: 100, Resets: week, Span: 7 * 24 * time.Hour}},
+		"spare@example.com": {{Used: 20, Resets: five, Span: 5 * time.Hour}},
+	}
+	usedCache.at["codex"] = now
+	usedCache.Unlock()
+	loginUsageCache.Lock()
+	loginUsageCache.m = map[string]loginUsageEntry{"codex/me@example.com": {at: now,
+		q: SubscriptionQuota{Provider: "codex", Held: true, Windows: []QuotaWindow{
+			{Name: "5 hours", Used: 100, ResetsAt: &five, Span: 5 * time.Hour},
+			{Name: "7 days", Used: 100, ResetsAt: &week, Span: 7 * 24 * time.Hour}}}}}
+	loginUsageCache.Unlock()
+
+	NoteCodexCredits("codex", "me@example.com", true)
+	m := Allowances("codex")
+	if !m["Me@example.com"].OnCredits() || m["spare@example.com"].OnCredits() {
+		t.Fatalf("after the reply: %+v", m)
+	}
+	loginUsageCache.Lock()
+	e := loginUsageCache.m["codex/me@example.com"]
+	loginUsageCache.Unlock()
+	if e.q.Held || !e.q.Windows[0].Credits || !e.q.Windows[1].Credits {
+		t.Fatalf("the Usage page's reading: held %v, %+v", e.q.Held, e.q.Windows)
+	}
+	if got := told(); !slices.Equal(got, []string{"codex/me@example.com"}) {
+		t.Fatalf("told %v", got)
+	}
+	NoteCodexCredits("codex", "me@example.com", true)
+	if got := told(); len(got) != 0 {
+		t.Fatalf("told again: %v", got)
+	}
+	NoteCodexCredits("codex", "me@example.com", false)
+	if Allowances("codex")["Me@example.com"].OnCredits() {
+		t.Fatal("a reply saying none left it on its credits")
+	}
+	if err := SetCodexCredits("me@example.com", false); err != nil {
+		t.Fatal(err)
+	}
+	NoteCodexCredits("codex", "me@example.com", true)
+	if got := told(); len(got) != 0 {
+		t.Fatalf("told of an account set not to spend them: %v", got)
+	}
+}
+
+// Credits bought after the plan ran out show first in a reading: routing
+// is told (OnCredits) as the reading finds them, not only when a reply
+// says so.
+func TestReadingTellsCreditsBought(t *testing.T) {
+	signIn(t)
+	rememberLogins(true)
+	resetUsed(t)
+	told := creditsTold(t)
+	readAgain := func(credits bool) {
+		five := time.Now().Add(2 * time.Hour)
+		loginUsageCache.Lock()
+		loginUsageCache.m = map[string]loginUsageEntry{"codex/me@example.com": {at: time.Now(),
+			q: SubscriptionQuota{Provider: "codex", Windows: []QuotaWindow{{Name: "5 hours", Used: 100, ResetsAt: &five, Span: 5 * time.Hour, Credits: credits}}}}}
+		loginUsageCache.Unlock()
+		usedCache.Lock()
+		usedCache.at["codex"] = time.Time{}
+		usedCache.Unlock()
+		Allowances("codex")
+		for {
+			usedCache.Lock()
+			done := usedCache.loading["codex"]
+			usedCache.Unlock()
+			if done == nil {
+				break
+			}
+			<-done
+		}
+	}
+	readAgain(false)
+	readAgain(false)
+	if got := told(); len(got) != 0 {
+		t.Fatalf("told with no credits: %v", got)
+	}
+	readAgain(true)
+	if got := told(); !slices.Equal(got, []string{"codex/me@example.com"}) {
+		t.Fatalf("told %v", got)
+	}
+	readAgain(true)
+	if got := told(); len(got) != 0 {
+		t.Fatalf("told again: %v", got)
 	}
 }
