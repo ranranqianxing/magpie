@@ -241,8 +241,15 @@ func hubAbouts(ss []*Server) []gateway.HubServer {
 
 // hereOnly is whether s acts as this computer's user beyond what its
 // tools' arguments say (gateway.HubServer's HereOnly): Magpie Browser and
-// another magpie's router (keepsSession), and magpie's image server.
-func hereOnly(s *Server) bool { return keepsSession(s) || isSelf(s) || isMemory(s) }
+// another magpie's router (keepsSession), and magpie's image, memory and
+// sessions servers.
+func hereOnly(s *Server) bool { return keepsSession(s) || isSelf(s) || isMemory(s) || isSessions(s) }
+
+// isSessions is whether s is magpie's own sessions server (`magpie mcp
+// sessions`), which reads this computer's user's conversations.
+func isSessions(s *Server) bool {
+	return !s.Remote() && len(s.Args) >= 2 && s.Args[0] == "mcp" && s.Args[1] == "sessions"
+}
 
 // isMemory is whether s is magpie's own memory server (`magpie mcp
 // memory`), which holds what is known about this computer's user.
@@ -419,10 +426,12 @@ var hubPool = struct {
 // hubKey is the server as it is run: an edit, or a sign-in since, is
 // another to start.
 func hubKey(s *Server) string {
-	c := *s
-	c.Agents, c.DisabledTools = nil, nil
+	c := *s.live()
+	c.Agents, c.DisabledTools, c.Accounts, c.Account = nil, nil, nil, ""
 	b, _ := json.Marshal(c)
-	return fmt.Sprintf("%s|%v", b, s.Transport == "http" && mcpauth.SignedIn(s.Name, s.URL))
+	// the sign-in in use too: another account is another to start
+	in := s.Transport == "http" && mcpauth.SignedIn(s.Name, s.URL)
+	return fmt.Sprintf("%s|%v|%s", b, in, map[bool]string{true: mcpauth.InUse(s.Name)}[in])
 }
 
 func backendOf(s *Server) *backend {

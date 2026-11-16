@@ -151,7 +151,7 @@ function fixture(lang, theme, events, options = {}) {
       { id: "relay/me@example.com", name: "me@example.com", provider: "relay", providerName: "Relay", account: true, plan: "Pro" },
       { id: "relay/spare@example.com", name: "spare@example.com", provider: "relay", providerName: "Relay", account: true },
       { id: "openai/k-1a2b3c", name: "k-1a2b3c", provider: "openai", providerName: "OpenAI", key: true },
-    ], groups: accountGroups });
+    ], providers: options.emptyProvider ? [{ id: "later/*", name: "Later", provider: "later", providerName: "Later" }] : [], groups: accountGroups });
     // the MCP servers and tools a key may be held to: magpie's own, then
     // the Library's (wakaka on Discord)
     if (url.pathname === "/api/caller-keys/mcp") return json({ servers: [
@@ -159,6 +159,9 @@ function fixture(lang, theme, events, options = {}) {
       { name: "magpie-browser", title: "Magpie Browser", tools: ["browser"], own: true },
       { name: "github", tools: ["create_issue", "search_code"] },
     ] });
+    // the subscription accounts' windows a key's limit can follow (ljayic
+    // on X): options.accountWindows is the test's own list
+    if (url.pathname === "/api/caller-keys/account-windows") return json({ windows: options.accountWindows || [] });
     if (url.pathname.startsWith("/api/caller-keys/")) {
       const action = url.pathname.split("/").at(-1), body = req.postDataJSON();
       events.push({ action, body });
@@ -184,11 +187,15 @@ function fixture(lang, theme, events, options = {}) {
       }
       if (action === "remove-key") keys = keys.filter((v) => v !== k);
       if (action === "on-key" || action === "off-key") k.off = action === "off-key";
+      if (action === "admin-key") k.admin = body.admin || undefined;
       if (action === "limit-key") {
         // what a key has used is the fixture's; a new limit starts unused
         const usedOf = (l) => {
           const span = l.period === "hours" ? l.hours * 36e5 : (l.days || 1) * 864e5;
-          return { period: l.period, days: l.days, hours: l.hours, start: new Date().toISOString(), reset: new Date(Date.now() + span).toISOString(),
+          // an account's window resets when the window listed for it does
+          const w = l.period === "account" && (options.accountWindows || []).find((w) => w.account === l.account && w.window === l.accountWindow);
+          return { period: l.period, days: l.days, hours: l.hours, start: w ? w.start : new Date().toISOString(), reset: w ? w.reset : new Date(Date.now() + span).toISOString(),
+            ...(l.period === "account" ? { account: l.account, accountWindow: l.accountWindow } : {}),
             calls: 0, tokens: 0, cost: 0, tokenLimit: l.tokens, costLimit: l.cost, tokensLeft: l.tokens, costLeft: l.cost, spent: false,
             ...(l.models ? { models: l.models } : {}) };
         };
@@ -228,6 +235,8 @@ function fixture(lang, theme, events, options = {}) {
         if (!Number.isInteger(body.maxConcurrency) || body.maxConcurrency < 0 || body.maxConcurrency > 1000) return route.fulfill({ status: 400, json: { error: "Concurrency: a whole number from 0 to 1000" } });
         k.maxConcurrency = body.maxConcurrency || undefined;
       }
+      if (action === "tier-key") k.serviceTier = body.serviceTier || undefined;
+      if (action === "redact-key") k.redact = body.redact === "on" || body.redact === "off" ? body.redact : undefined;
       if (action === "access-key") k.readOnly = body.readOnly || undefined;
       // a key put at a place in the list, as access.Update keeps it;
       // options.refuseMove: the store can't be written

@@ -41,8 +41,32 @@ window.modelLimitsFill = function (at, m, p, changed) {
     at.append(box);
     const again = () => { if (document.activeElement !== i) i.value = shownOf(); i.placeholder = placeholder(); };
     return { i, own, again, saved: () => saved?.[id] || 0 };
-  }), modelSystemFill(at, m, changed)];
+  }), modelSystemFill(at, m, changed), ...modelSpeedFill(at, m, changed)];
 };
+
+// Its speed (kdajenks on X): the standard one, Codex's Fast, or Ultrafast
+// where an account offers it, staged as modelPrefs[id].tier. Fast is
+// "priority" on the wire; an agent's own fast pick still goes first.
+function modelSpeedFill(at, m, changed) {
+  if (!m.canFast) return [];
+  const id = m.id, prefs = draft.modelPrefs = draft.modelPrefs || {};
+  const own = () => (prefs[id]?.tier ?? m.tier) || "";
+  const items = [["", t("Standard speed")], ["priority", t("Fast")]];
+  if (m.canUltra || own() === "ultrafast") items.push(["ultrafast", t("Ultrafast")]);
+  const box = el("div", "mspeed");
+  box.title = t("Sent at this speed with every request for {id} from an agent with no fast pick of its own; where an account has no Ultrafast it goes fast", { id });
+  const draw = () => { box.replaceChildren(segs(items, own(), (v) => stage(v))); };
+  const stage = (v) => {
+    const x = prefs[id] = prefs[id] || {};
+    if (v === (m.tier || "")) delete x.tier; else x.tier = v;
+    changed();
+  };
+  draw();
+  at.append(box);
+  // the reset's call: empty is the standard speed
+  const i = { value: "", onchange: () => { stage(""); draw(); } };
+  return [{ i, own, again: () => draw(), saved: () => m.tier || 0 }];
+}
 
 function modelSystemFill(at, m, changed) {
   const id = m.id, prefs = draft.modelPrefs = draft.modelPrefs || {};
@@ -65,3 +89,36 @@ function modelSystemFill(at, m, changed) {
   at.append(box);
   return { i, own, again: () => { if (document.activeElement !== i) i.value = own() || ""; }, saved: () => m.system || 0 };
 }
+
+// The Same as box's picker (timfang4162 on X): a button beside it opens the
+// models of the models.dev catalog magpie has synced (/api/catalog/models) in
+// the app's menu, filtered by id, name and maker. A pick fills the box, which
+// stages it as a typed one does.
+let catalogModels = null;
+window.modelSamePick = (box, same) => {
+  const label = t("Pick from models.dev"), b = el("button", "text action mpick");
+  b.type = "button";
+  b.append(svg(CHEV, 12));
+  b.title = label;
+  b.setAttribute("aria-label", label);
+  b.setAttribute("aria-haspopup", "menu");
+  const wrap = el("div", "msame-wrap");
+  box.replaceWith(wrap);
+  wrap.append(box, b);
+  b.onclick = async (e) => {
+    e.stopPropagation();
+    if (!catalogModels) {
+      try {
+        const got = await api("catalog/models");
+        if (Array.isArray(got) && got.length) catalogModels = got;
+      } catch {}
+    }
+    if (!catalogModels) { status(t("models.dev's list could not be read"), "warn"); return; }
+    const opts = catalogModels.map((c) => ({
+      v: c.id, name: c.id, literalName: true,
+      note: [c.name, c.context ? tokenSize(c.context) : "", c.input || c.cost ? "$" + c.input + " / $" + c.cost : ""].filter(Boolean).join(" · "),
+      find: [c.name, c.maker].filter(Boolean).join(" "),
+    }));
+    openProtoMenu(b, opts, same.value.trim(), (v) => { same.value = v; same.onchange(); }, "Pick from models.dev", "mpick-menu", "left", false, "Filter…");
+  };
+};

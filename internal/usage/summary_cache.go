@@ -54,13 +54,13 @@ func ReadAhead() { SummarizeTopIn(Today, summaryCacheSessions, nil) }
 // gives every one, works it out again each time. Over a long history
 // (Vantiboo1ean, ~750k requests in ~84k sessions) that was every refresh of
 // the Usage page and the TUI, and the page was sent all 84k.
-func SummarizeTop(p Period, n int) Summary { return topSummary(p, Clock(), n) }
+func SummarizeTop(p Period, n int) Summary { return topSummary(p, localNow(), n) }
 
 // SummarizeTopIn is SummarizeTop with the period's days and the chart's
 // hours read in zone (Zone gives it), the reader's: the Usage page's.
 func SummarizeTopIn(p Period, n int, zone *time.Location) Summary {
 	if zone == nil {
-		zone = time.Local
+		zone = Zone("")
 	}
 	return topSummary(p, Clock().In(zone), n)
 }
@@ -133,7 +133,7 @@ func usagePriceCacheKey(now time.Time) string {
 	// one catalog for the providers and the group names read below (#5978)
 	defer provider.Hold()()
 	_, offset := now.Zone()
-	meta := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d", statKey(settings.Path()), statKey(provider.Path()), statKey(catalog.CachePath()), liveListKey("antigravity"), now.Format("2006-01-02"), now.Location(), offset)
+	meta := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d", statKey(settings.Path()), statKey(provider.Path()), catalog.CacheKey(), liveListKey("antigravity"), now.Format("2006-01-02"), now.Location(), offset)
 	// Sign-ins and plugin lists can change independently of providers.json.
 	// Their identity and price feeds affect both grouping and historical costs.
 	h := sha256.New()

@@ -172,7 +172,7 @@ function gatewayFixButton(g, older) {
 // gatewayFixSays is why a take-over or a restart didn't go, in the page's
 // language, naming the process it was
 function gatewayFixSays(o) {
-  const p = { port: o.port || "", pid: o.pid || "", path: o.path || "", v: o.version || "", error: o.error || "" };
+  const p = { port: o.port || "", pid: o.pid || "", path: o.path || "", v: o.version || "", error: o.error || "", name: o.name || "", alt: o.alt || "8443" };
   switch (o.reason) {
     case "not-magpie": return t("Port {port} is held by {path} (pid {pid}), which isn't magpie, so magpie leaves it alone. Quit it yourself, or move the gateway to another port in Settings.", p);
     // leslie_luo on Discord: an old magpie in OrbStack, its helper named
@@ -182,7 +182,13 @@ function gatewayFixSays(o) {
     case "denied": return t("magpie {v} (pid {pid}, {path}) runs as another user or as administrator, so this magpie can't quit it. Quit it there.", p);
     case "stuck": return t("magpie {v} (pid {pid}) didn't quit. End it in your system's process list (Activity Monitor, Task Manager).", p);
     case "respawned": return t("Something started magpie on port {port} again at once ({path}, pid {pid}): a login item or a service keeps it running (a LaunchAgent, a systemd unit, a scheduled task). Remove that, then try again.", p);
-    case "taken": return p.pid
+    // pluoki on X: Tailscale's serve on the gateway's port number, found
+    // only by trial and error; the program is named when it can be read
+    case "taken": return o.tailscale
+      ? t("Tailscale's serve or funnel has port {port}. Point it at magpie from another port: tailscale serve --https={alt} http://127.0.0.1:{port} (or move the gateway to another port in Settings).", p)
+      : p.name && !p.path
+      ? t("Port {port} is in use by {name} (pid {pid}): quit it, or move the gateway to another port in Settings.", p)
+      : p.pid
       ? t("Port {port} is in use by {path} (pid {pid}): quit it, or move the gateway to another port in Settings.", p)
       : t("Port {port} is in use by another program: quit it, or move the gateway to another port in Settings.", p);
     case "other": return t("magpie {v} serves the gateway, and it isn't older than this one: quit it there to serve the gateway here.", p);
@@ -285,13 +291,31 @@ function renderGateway() {
     who.append(name, el("div", "sub old", t("Agents' requests go through magpie {v} and are sent as it sends them, without this version's fixes. Quit it here and this one serves the gateway at once.", { v: g.version })));
   } else if (g.paused) {
     who.append(name, el("div", "sub", t("Paused, agents are disconnected and use their own settings")));
+  } else if (!g.running && state.gatewayHeld?.own) {
+    // magpie's own service (magpie daemon), starting after an update or a
+    // restart: it serves the gateway in a moment, nothing to quit or move
+    who.append(name, el("div", "sub", t("Starting the gateway…")));
+  } else if (!g.running && state.gatewayHeld) {
+    // the gateway couldn't listen: what has the port, as far as it is read
+    who.append(name, el("div", "sub old err", gatewayFixSays({ reason: "taken", ...state.gatewayHeld })));
   } else who.append(name, el("div", "sub", g.running
     ? [t(g.models === 1 ? "{n} model" : "{n} models", { n: g.models }), n ? t(n === 1 ? "{n} agent routed through it" : "{n} agents routed through it", { n }) : t("no agent routed through it yet"), t("five APIs, one URL")].join(" · ")
     : t("start it with magpie serve, or open magpie at login")));
   if (gatewayFix.err && gatewayFix.when === gatewayFixWhen(g)) who.append(el("div", "sub old err", gatewayFix.err));
   box.append(mark, who);
+  // DeepSeek's chat page, served by the gateway with its models, search
+  // and link reading (chatpage.go)
   const fix = gatewayFixButton(g, older);
-  if (fix) box.append(fix);
+  if (g.running && !older && !g.paused) {
+    const chat = el("button", "text action gw-chat", t("Chat page"));
+    const url = (web && g.publicURL || g.url) + "/deepseek-chat/";
+    chat.onclick = () => api("open", { url }).catch(statusErr);
+    // the two together, so a narrow card wraps them as one
+    const acts = el("span", "gw-acts");
+    acts.append(chat);
+    if (fix) acts.append(fix);
+    box.append(acts);
+  } else if (fix) box.append(fix);
 }
 
 // Share on local network, set on the page that hands out its keys (the
@@ -521,6 +545,27 @@ function envSnippet(vars) {
   return vars.map(([k, v]) => (snipWin() ? `$env:${k}=${psHeader(v)}` : `export ${k}=${shQuote(v)}`)).join("\n");
 }
 
+// The row's chips (modelInfo) with video and audio after the image one,
+// when its source listed them (pingqipai3 on X); a group's are any one of
+// its models', as its images are. Their tooltip lines follow the images'
+// one, the second of modelInfo's.
+const MEDIA_GLYPH = { video: "M2 4.5h8.5v7H2zM10.5 7l3.5-2v6l-3.5-2", audio: "M3 6.5v3M5.5 4.5v7M8 2.5v11M10.5 4.5v7M13 6.5v3" };
+function mediaInfo(m) {
+  const box = modelInfo(m);
+  const kinds = ["video", "audio"].filter((k) => m.inputs?.includes(k));
+  if (!kinds.length) return box;
+  const ctx = box.querySelector(".mi-ctx");
+  const lines = box.title.split("\n");
+  for (const k of kinds) {
+    const c = el("span", "badge mi-media mi-" + k);
+    c.append(svg(MEDIA_GLYPH[k], 11, 1.4));
+    box.insertBefore(c, ctx);
+  }
+  lines.splice(2, 0, ...kinds.map((k) => t(k === "video" ? (m.group ? "Accepts video (one of its models does)" : "Accepts video") : m.group ? "Accepts audio (one of its models does)" : "Accepts audio")));
+  box.title = lines.join("\n");
+  return box;
+}
+
 // every exposed model, as the ids agents use
 function gatewayModels() {
   // the routing groups first, as the agents' pickers list them
@@ -528,7 +573,7 @@ function gatewayModels() {
   // every model off the list
   const out = (providers.gateway.groups || []).filter((g) => g && typeof g.id === "string").map((g) => ({ id: g.id, name: g.name || g.id, icons: g.icons || [], group: true,
     provider: { name: [t("routing group"), (g.providers || []).join(", ")].filter(Boolean).join(" · ") },
-    efforts: g.efforts || [], images: !!g.images, context: g.context, output: g.output, members: g.members || [] }));
+    efforts: g.efforts || [], images: !!g.images, inputs: g.inputs || [], context: g.context, output: g.output, members: g.members || [] }));
   // a provider switched off is skipped: the gateway refuses its models, so
   // they are not ids an agent can use, and listing them here would show a
   // model the picker's own list, the Gateway count and the Connect example
@@ -538,7 +583,7 @@ function gatewayModels() {
   // levels aren't known (given) offers only those it was given; one sent
   // no reasoning field (reasonless) offers none
   const offered = (m) => m.reasonless ? [] : m.kept?.length || m.given ? m.kept || [] : m.efforts || [];
-  for (const p of providers.providers) { if (p.off) continue; for (const m of p.models) if (m.on) out.push({ id: `${p.id}/${m.id}`, name: m.name, provider: p, context: m.context, output: m.output, efforts: offered(m), images: !!m.images }); }
+  for (const p of providers.providers) { if (p.off) continue; for (const m of p.models) if (m.on) out.push({ id: `${p.id}/${m.id}`, name: m.name, provider: p, context: m.context, output: m.output, efforts: offered(m), images: !!m.images, inputs: m.inputs || [] }); }
   return out;
 }
 
@@ -714,7 +759,7 @@ function renderGatewayModels() {
     const name = el("div", "name", m.id);
     if (namedFree(m.id, m.name)) name.append(freeBadge(false));
     who.append(name, el("div", "sub", m.name && m.name !== m.id.split("/")[1] ? `${m.name} · ${m.provider.name}` : m.provider.name));
-    row.append(m.group ? stackIcon(m.icons) : icon(m.provider.icon || "generic"), who, modelInfo(m), copyBtn(m.id, t("Model id")));
+    row.append(m.group ? stackIcon(m.icons) : icon(m.provider.icon || "generic"), who, mediaInfo(m), copyBtn(m.id, t("Model id")));
     row.title = t("Use this model in the snippets");
     // a decision model is put in System One's snippets, any other in the
     // other APIs'; the API follows the model clicked

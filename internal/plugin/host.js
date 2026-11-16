@@ -2217,6 +2217,8 @@ async function info(id, key, strict, limit, quiet, signal) {
       ...(typeof m.decides === "boolean" ? { decides: m.decides } : was?.decides !== undefined ? { decides: was.decides } : {}),
       // and one that searches the web by itself, asked in plain words
       ...(typeof m.searches === "boolean" ? { searches: m.searches } : was?.searches !== undefined ? { searches: was.searches } : {}),
+      // and the other APIs its vendor serves it on, by their AI SDK packages
+      ...(Array.isArray(m.also) ? { also: m.also } : was?.also !== undefined ? { also: was.also } : {}),
     }
   }
   const server = auths().get(id)?.spec
@@ -2618,6 +2620,12 @@ function rowOf(id, a, keys, stored, p, own) {
     api: p.api ?? "",
     methods: methods(a.auth),
     single: a.auth.single === true,
+    // its accounts can be brought in from a file (auth.import), and which
+    // file that is, as the plugin says it
+    ...importOf(a.auth),
+    // the vendor CLI its sign-in and requests run through, which magpie
+    // installs with the plugin's own installer when it isn't there
+    ...cliOf(a.auth),
     icon: iconOf(a),
     usage: typeof a.auth.usage === "function",
     checkin: typeof a.auth.checkin === "function",
@@ -2691,6 +2699,10 @@ function rowOf(id, a, keys, stored, p, own) {
         // a model that searches the web by itself, asked in plain
         // words, which magpie may search with for other models
         searches: m.searches === true,
+        // the other APIs its vendor serves it on besides npm's, by their AI
+        // SDK packages (Open Design's amr-link serves every model on all
+        // three), where a client's request is relayed as it was sent
+        also: Array.isArray(m.also) ? m.also.filter((x) => typeof x === "string" && x !== "") : [],
       })),
   }
 }
@@ -2841,7 +2853,111 @@ async function callback({ session, code }, signal) {
   const r = await signingIn(signal, s.proxy, s.provider, s.key, () => (s.a.method === "code" ? s.a.callback(code ?? "", { signal }) : s.a.callback(undefined, { signal })))
   if (signal?.aborted) throw abortedSignIn()
   if (!r || r.type !== "success") return failed(r)
-  return { ok: true, ...(await save(s.provider, s.key, r, undefined)) }
+  const kept = keptAs(r)
+  if (!kept) return { ok: false, error: `${s.provider}'s sign-in gave nothing to keep` }
+  return { ok: true, ...(await save(s.provider, s.key, kept, undefined)) }
+}
+
+// keptAs is an OAuth callback's success r as save keeps it. save keeps an
+// OAuth sign-in only when "refresh" is in r, as OpenCode's CLI does; a
+// plugin whose sign-in has no refresh token and leaves the field out
+// (codearts' CodeArts Agent sign-in, plugins#998) was told "signed in"
+// with nothing kept. An access with no refresh is kept with an empty one,
+// and a success with nothing at all to keep is null, a failure, as
+// apiKey's is.
+function keptAs(r) {
+  if ("refresh" in r || "key" in r) return r
+  if (typeof r.access === "string" && r.access) return { ...r, refresh: "" }
+  return null
+}
+
+// ---- accounts from a file -----------------------------------------------------
+
+// A plugin may take accounts from a file the user picks (magpie's own
+// hook, which OpenCode ignores), as magpie's "Import accounts from a
+// file…" does for its built-ins:
+//   auth.import(texts, { signal }) → what each file's text holds, checked
+//     with the vendor as a sign-in is: an array of sign-in results
+//     ({ type: "success", … } as a callback or an api authorize gives one,
+//     or { type: "failed", error, accountId? }), or one of them.
+//   auth.importFrom: the file to pick, in a sentence (importFroms: the same
+//     in other languages, by language code).
+// Each success is kept as a sign-in is, as one more account or over the
+// account it already is. It runs through the provider's proxy, as a
+// sign-in does (#1663).
+const IMPORT_MOST = 100
+
+function importOf(auth) {
+  if (typeof auth?.import !== "function") return {}
+  const from = shown(auth.importFrom, 300)
+  const froms = inLanguages(auth.importFroms, 300)
+  return { importable: true, ...(from ? { importFrom: from } : {}), ...(froms ? { importFroms: froms } : {}) }
+}
+
+// ---- the vendor CLI a plugin runs through ------------------------------------
+
+// A plugin that runs its vendor's CLI may say how to install it (magpie's
+// own hook, which OpenCode ignores), so a machine without it, magpie in a
+// container above all, gets it from magpie's sign-in rather than a shell:
+//   auth.cli.name: the CLI, as the sign-in names it ("Installing {name}…").
+//   auth.cli.installed(): whether it is on this machine now.
+//   auth.cli.install({ signal }): installs it, resolving once it is there;
+//     magpie's sign-in starts this when installed() is false, then asks
+//     the method's authorize.
+//   auth.cli.manual: how a person installs it, told when install fails.
+function cliOf(auth) {
+  const c = auth?.cli
+  if (!c || typeof c !== "object" || typeof c.installed !== "function" || typeof c.install !== "function") return {}
+  const name = shown(c.name, 80)
+  if (!name) return {}
+  const manual = shown(c.manual, 300)
+  return { cli: { name, ...(manual ? { manual } : {}) } }
+}
+
+function cliHook(provider) {
+  const c = authOf(provider).cli
+  if (!cliOf({ cli: c }).cli) throw new Error(`${provider} names no CLI to install`)
+  return c
+}
+
+async function cliInstalled({ provider }) {
+  return { installed: (await cliHook(provider).installed()) === true }
+}
+
+// installCli runs the plugin's installer through the proxy the
+// subscription's requests take (#1663), ended when magpie gives it up
+async function installCli({ provider, proxy }, signal) {
+  const c = cliHook(provider)
+  const step = via.run(proxy ?? "", () => c.install({ signal }))
+  await (signal ? bounded(Promise.resolve(step), signal) : step)
+  if (signal?.aborted) throw new DOMException("the install was cancelled", "AbortError")
+  return null
+}
+
+async function importFiles({ provider, texts, proxy }, signal) {
+  const a = authOf(provider)
+  if (typeof a.import !== "function") throw new Error(`${provider} takes no accounts from a file`)
+  const files = (Array.isArray(texts) ? texts : []).filter((t) => typeof t === "string" && t.trim())
+  const got = await signingIn(signal, proxy ?? "", provider, freshKey(provider), () => a.import(files, { signal }))
+  if (signal?.aborted) throw abortedSignIn()
+  const list = (Array.isArray(got) ? got : got ? [got] : []).slice(0, IMPORT_MOST)
+  const results = []
+  for (const r of list) {
+    const user = typeof whoOf(r) === "string" ? whoOf(r).slice(0, 200) : ""
+    if (!r || r.type !== "success") {
+      results.push({ status: "failed", user, error: failed(r).error || `${provider} didn't take it` })
+      continue
+    }
+    const kept = keptAs(r)
+    if (!kept) {
+      results.push({ status: "failed", user, error: `${provider} gave nothing to keep` })
+      continue
+    }
+    const had = new Set(accountsOf(readAuth(), r.provider ?? provider))
+    const saved = await save(provider, signInKey(provider), kept)
+    results.push({ status: had.has(saved.account) ? "updated" : "added", user, ...saved })
+  }
+  return { results }
 }
 
 async function apiKey({ provider, method, inputs, key, account, proxy }, signal) {
@@ -3536,6 +3652,9 @@ const handlers = {
   tool: runTool,
   search: runSearch,
   apiKey,
+  importFiles,
+  cliInstalled,
+  installCli,
   load,
   usage,
   checkin,
@@ -3660,7 +3779,7 @@ const gatewayInflight = new Map() // RPC id -> AbortController
 // (host.go's cancellable): the user cancelled it, or it timed out. Its
 // answer is then nobody's, and it counts as done at once, whether the
 // plugin's wait ends or not (#5016).
-const signInSteps = new Set(["authorize", "callback", "apiKey"])
+const signInSteps = new Set(["authorize", "callback", "apiKey", "importFiles"])
 const signInInflight = new Map() // RPC id -> AbortController
 const rpcInflight = new Map() // an ordinary RPC's id -> its AbortController (#4678)
 const rl = readline.createInterface({ input: process.stdin, terminal: false })

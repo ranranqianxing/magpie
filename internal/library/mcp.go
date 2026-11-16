@@ -52,6 +52,12 @@ type Server struct {
 	// (GitHub's, 新v学员 on Discord). It is magpie's alone: the agents are
 	// given the server as before.
 	OAuth *OAuthApp `json:"oauth,omitempty"`
+	// Accounts are further sets of headers for the server (Elorynth on X:
+	// several keys, one in use), each laid over Headers, and Account is the
+	// one the agents are given ("" for Headers as they are). magpie's own
+	// OAuth sign-ins to the server have their accounts in mcpauth.
+	Accounts []Account `json:"accounts,omitempty"`
+	Account  string    `json:"account,omitempty"`
 	// StartupTimeout is the seconds an agent waits for the server to start
 	// and list its tools: Codex's startup_timeout_sec (#3168), the only
 	// agent given it. 0 leaves it to the agent (Codex's own is 30s).
@@ -85,6 +91,12 @@ type Server struct {
 	// Discord: with many of them, which is which). Only the library keeps
 	// it, and a sync carries it; no agent is given it (TestNoteNeverGiven).
 	Note string `json:"note,omitempty"`
+	// Shared is set when this computer starts the server its own way
+	// (#3836, #6426; jinpwng on X: one server on a Mac and in WSL, each
+	// with its own path): Command, Args and Env are then this computer's,
+	// and Shared is what a sync carries and brings for them. Never carried
+	// itself (mcp_here.go).
+	Shared *Start `json:"shared,omitempty"`
 
 	// about is the hub entry's description, for an agent that shows a
 	// server by one before it has connected (Pi, hubServerFor)
@@ -148,6 +160,16 @@ func (s *Server) check() error {
 	default:
 		return fmt.Errorf("%s: unknown transport %q", s.Name, s.Transport)
 	}
+	// only a synced command server has a start of its own here
+	if s.Transport != "stdio" || s.Local {
+		s.Shared = nil
+	} else if s.Shared != nil {
+		s.Shared.Command = strings.TrimSpace(s.Shared.Command)
+		if s.Shared.Command == "" {
+			return fmt.Errorf("%s: the synced command is empty", s.Name)
+		}
+		s.Shared.Command, s.Shared.Args = spacedProgram(s.Shared.Command, s.Shared.Args)
+	}
 	switch s.Hub {
 	case "", "shared":
 		s.Hub = ""
@@ -188,7 +210,7 @@ func (s *Server) check() error {
 			delete(s.Headers, k)
 		}
 	}
-	return nil
+	return s.checkAccounts()
 }
 
 // spacedProgram is a program by full path that has spaces in it, typed

@@ -8,14 +8,47 @@ Library → Instructions, and the Library's Memory tab.
 
 ## Source of truth
 
-`memory.json` in magpie's config folder ([internal/memory/memory.go](../../internal/memory/memory.go)).
+The `memory` folder in magpie's config folder, one Markdown file per memory
+([internal/memory/store.go](../../internal/memory/store.go)):
 
-- One writer at a time across magpies (`filelock`), written through a temp
-  file, the last good generation kept beside it (`lastgood`).
-- A file that can't be read is unknown, never empty: nothing is written
-  over it, searches fail, and `Digest` returns an error so the instructions
-  keep what the agent has (`TestUnreadableFileIsNeverWrittenOver`,
-  `TestCutShortFileReadFromItsBackup`).
+- `<id>.md` is the memory: its fields as YAML front matter, its text as the
+  body. The file is the memory; everything else is beside it.
+- `meta.json` holds what isn't one memory's: projects, the published
+  digest, dismissed texts, deletions, declined suggestions, when a search
+  last returned each memory and how often (so a search never rewrites a
+  memory's file, `TestUseDoesNotRewriteTheMemory`), and the hash of each
+  file as magpie last wrote it.
+- `index.json` is a cache of the parsed files by size and mtime: gone or
+  garbled, memory reads the same (`TestIndexIsOnlyACache`).
+- `journal.json` holds a change to more than one file (a merge, a sync)
+  before any is written; a change cut off halfway is finished by the next
+  read (`TestCutOffChangeIsFinished`). A journal that can't be read is an
+  error.
+
+Rules:
+
+- One writer at a time across magpies (`filelock`, `memory.lock`), each file
+  written through a temp file, and only the files that changed. The last
+  good meta.json is kept beside it (`lastgood`).
+- A file whose hash isn't the one magpie wrote was edited (or added) by
+  hand: it is the user's (origin user, `Edited`), so a tidy leaves it and an
+  agent's change synced from another computer never writes over it
+  (`TestHandEditIsTheUsers`). A file with no front matter is a fact that
+  holds everywhere, its name its id (`TestHandAddedFileIsAMemory`). A file
+  edited by hand while magpie changes or removes it is left as the user
+  wrote it (`TestHandEditDuringAChangeStays`,
+  `TestHandEditDuringARemoveStays`).
+- A memory file that can't be parsed is unknown: left out, never written
+  over nor removed, sync included, and read again once fixed
+  (`TestBrokenFileIsLeftAsItIs`). A meta.json that can't be read is
+  unknown, never empty: nothing is written, searches fail, and `Digest`
+  returns an error so the instructions keep what the agent has
+  (`TestUnreadableFileIsNeverWrittenOver`,
+  `TestCutShortMetaReadFromItsBackup`).
+- `memory.json`, where memory was kept before, is moved into the folder on
+  the first read, all of it under one journal, and kept as
+  `memory.json.migrated` (`TestMemoryJSONIsMovedIn`). One that can't be
+  read is an error, and nothing is written.
 
 A memory is one short text (`MaxText` runes) with:
 
@@ -28,6 +61,11 @@ A memory is one short text (`MaxText` runes) with:
 | `status` | active, candidate, archived, superseded | only active ones are searched by default and digested. Candidates wait under "To review". |
 | `pinned` | bool | first in lists and digests. |
 
+Times (`created`, `updated`) are RFC3339 in the zone the memory was saved
+in, with its offset. `memory_search` and the dream's notes show them in the
+reader's local zone (`memoryStamp`, `TestMemorySearchDatesInLocalTime`); a
+memory saved earlier, stored as UTC, reads the same way.
+
 `Save` keeps one memory per scope and text (`TestSaveKeepsOneOfTheSameText`)
 and refuses empty or over-long text, an unknown kind and a bad scope
 (`TestSaveRefusesWhatIsntAMemory`).
@@ -38,7 +76,7 @@ and refuses empty or over-long text, an unknown kind and a bad scope
 ### MCP server
 
 [internal/gateway/memory_mcp.go](../../internal/gateway/memory_mcp.go):
-`memory_search`, `memory_save`, `memory_forget`, Streamable HTTP at
+`memory_search`, `memory_save`, `memory_forget`, `memory_context`, Streamable HTTP at
 `MemoryMCPPath` (`/mcp/magpie/memory`), served like the search server
 (`serveMCP`) but to the agents on this computer alone, as the hub gives it
 (`HereOnly`): memory is what is known about this computer's user, and its
@@ -53,13 +91,40 @@ away (`TestMemoryMCPGuarded`).
   which relays stdio to the gateway with the folder the agent started it in
   (`X-Magpie-Cwd`) and the client name from `initialize`
   (`X-Magpie-Mcp-Client`).
+- `magpie tool memory_*` names its folder the same way, and reads an
+  answer sent as an event stream, answering a server's roots/list
+  (`TestToolMemoryThroughTheGateway`, #6049).
 - Behind the [MCP router](mcp-router.md) the hub passes the caller in the
   call's `_meta` instead (`HubRootsMeta`, `HubClientMeta`;
   `TestMemoryMCPHubMetaNamesTheProject`).
 - Without a folder the server can't name the project, nor the agent without
   a client name: such a save says so instead of guessing, and a save with
   no scope is kept for everyone (`TestMemoryMCPSaysWhatItCantKnow`).
+- A search or save may name another project (`project`: a folder,
+  absolute or under the caller's, or a key memory knows;
+  `memoryCaller.inProject`), so a migration run from one project keeps
+  memories for another. A project named goes with scope project (or a
+  search's all). Every answer names what it used: a memory's line says
+  `this project (<key>)` and `only for you (<agent>)`, and a search ends
+  `(looked in: …)`. `memory_context` says who the caller is taken for,
+  the project, and how each was found, as text and `structuredContent`
+  (`TestMemoryMCPProjectArgumentAndContext`).
 - A save through MCP is active at once, origin `agent`.
+
+### Other memory services
+
+EverMe and Nowledge Mem are not built in: both publish an MCP server, so the
+Library's market offers them as servers (`evermeServer`, `nowledgeServer` in
+[market.go](../../internal/library/market.go)), added in one step beside
+Magpie Memory and given to the agents like any server
+(`TestThirdPartyMemoryServers`). Their memories live in their own service;
+magpie's digest, Memory tab, distillation and search don't read or write them.
+EverMe runs `npx -y @everme/memory-mcp` with the agent id and `evt_` token
+its console or `evercli auth login` gives (`EVERME_API_BASE` defaults to the
+managed backend, editable for a self-hosted one). Nowledge Mem is its
+Streamable HTTP endpoint on `127.0.0.1:14242/mcp`; a Mem reached through
+Access Anywhere takes its address and an `Authorization: Bearer` key, edited
+after adding.
 
 ### Digest in the instructions
 
@@ -129,7 +194,7 @@ further (`State.Since`), unless a range is picked.
   and the row says how many (`State.Left`) (`TestBacklogReadAtOnce`,
   `TestStopEndsTheRun`). Before, every run read 10, and 400 took 40
   hours (RealZeroP27 on X).
-- State is `distill.json` beside `memory.json` (`memdistill.Path`):
+- State is `distill.json` beside the `memory` folder (`memdistill.Path`):
   the switch, the model, the reasoning level, the range, the
   conversations done, and the last run's time, counts, error and how
   many it left. A
@@ -173,7 +238,14 @@ further (`State.Since`), unless a range is picked.
   range reads at once; a bad level or range is a 400,
   `TestDistillRangeAndEffortRoutes`) and
   `POST /api/memory/distill/run`. The row polls every 2s while a run
-  goes and reloads the memories when it ends.
+  goes and reloads the memories when it ends. Search by meaning's row
+  polls the same way while the model downloads or memories wait to be
+  read. A poll that reads nothing new draws nothing; one that does
+  redraws its own row only (`redrawRow`), and the whole tab only when the
+  memories changed. A render keeps an editor that was open (`.lib-detail`
+  with the same `data-detail`) from playing its entrance again
+  (Nietzsche_Li on X: the open memory jittered every 2s;
+  `library-memory-steady.test.cjs`).
 
 ### Dreaming
 
@@ -200,6 +272,17 @@ off until switched on under Memory → Tidy up every night.
   by it. A stale memory is archived with the model's reason.
 - An inferred candidate left unreviewed for 30 days (`Unreviewed`) is
   archived as well, with no request needed.
+- Retention (`memory.Prune`, [prune.go](../../internal/memory/prune.go))
+  runs on every hourly tick of `Keep`, with distilling and tidying on or
+  off. A candidate unchanged for 30 days (`memory.Keep`) is archived; an
+  archived or superseded memory unchanged for 30 more is removed. A
+  removal is recorded in `removed`, so a sync from a computer that still
+  holds it doesn't bring it back, and a distilled one's text is dismissed
+  so it isn't proposed again. What the user wrote or pinned
+  (`memory.Fixed`) is never archived or removed by it
+  (`TestPruneKeepsTheUsersAndTheRecent`). Undo keeps a merged memory
+  whose member was removed since: it is all that is left of it
+  (`TestUntidyKeepsAMergeWhoseMemberWasPruned`).
 - A failed request changes nothing and is kept to show
   (`TestDreamFailureChangesNothing`).
 - What the last tidy did is kept in `distill.json` (`changes`). Undo puts
@@ -253,13 +336,81 @@ meaning, since it downloads a model (~135 MB).
   `{on}` give the row its state: the download's progress, the memories
   read, and why either failed.
 
+### Backups and sync
+
+Memory goes to another computer in a backup file (the scheduled backups
+too) and in sync (WebDAV, S3, GitHub), merged memory by memory, never one
+computer's memory over the other's.
+[sync.go](../../internal/memory/sync.go) owns it.
+
+- What goes (`memory.Bundle`, `Collect`): the memories in every state, the
+  projects, the dismissed distilled texts, the suggestions turned down and
+  the deletions. The digest published into the agents' instructions and the
+  vectors (memembed) are this computer's own and are made again after a
+  change. Memory that can't be read stops the backup or sync instead
+  of going as no memory (`TestCollectUnreadableIsAnError`,
+  `TestCollectStopsOnUnreadableMemory`).
+- Merging (`Combine`, the same either way round): of two copies of one
+  memory, the one changed later stays, unless that change wasn't the user's
+  (`Edited` is when the user last changed it) and the other copy is pinned
+  or the user's while it isn't: an agent's forget or a tidy on one computer
+  never undoes a pin made on another (`TestSyncMachineChangeNeverOverUsersOwn`).
+  `Used` and `Uses` are the most of both, and leave `Hash` alone, so a
+  search is no change to push (`TestSyncKeepsMostUses`).
+- Deleting: `Remove`, and Untidy's delete of a merged memory, note the id
+  in `removed` for 180 days (`keepRemoved`), so a computer that still has
+  it doesn't bring it back; a copy changed after the deletion stays
+  (`TestSyncDeletionStaysDeleted`, `TestSyncEditAfterDeletionKeepsIt`).
+- Switches: sync's **Memory** tick (`davsync.Config.Memory`, on unless
+  turned off, since a sync file is always sealed with a passphrase), and
+  Export's **With memory** and Import's **Bring in memory too**, both on.
+  A computer with the tick off sends none and takes none, and leaves the
+  server's copy as it was (`TestSyncMemory`, `TestBackupMergesMemory`).
+- After a sync or restore changes memory, `library.PublishMemory` writes the
+  digests again.
+
+### Promotion
+
+Memory suggests making more of what it holds
+([promote.go](../../internal/memory/promote.go)). The suggestions sit
+over the In use list, unsearched and not narrowed to a scope
+(`memSuggestions` in the library plugin's client.js), and come with
+`GET /api/memory` (`suggestions`).
+
+- To hold everywhere (`ToGlobal`): active project memories that say the
+  same in two or more projects. The same means the same text (`norm`), or
+  at least 60% of their words in common with six words or more on each
+  side (`sameWords`); two short texts sharing words are as often two
+  facts. A memory whose sources' folders (`Source.Dir`, by the projects'
+  roots) are in two projects counts for both. Taken (`Promote`,
+  `POST /api/memory/promote`), the one kept first (the user's own or
+  pinned, the most used, the latest) becomes global and the others are
+  superseded by it, their tags, sources and uses carried over; a global
+  memory with the same text already is the one kept. It is the user's
+  change, so a sync keeps it (`TestPromoteKeepsTheUsersOwn`,
+  `TestPromoteIntoTheGlobalOne`, `TestSuggestGlobalAcrossProjects`,
+  `TestSuggestGlobalBySourceFolder`).
+- To be a skill (`ToSkill`): an active procedure that searches returned
+  five times or more (`skillUses`). Taken (`library.MemorySkill`,
+  `POST /api/memory/skill`), it becomes a skill of the library's own: a
+  SKILL.md with the first line as its description, named from its first
+  words (from its id when it has fewer than two Latin words), given to the
+  agents ticked for instructions, or to every agent with skills when none
+  is. The memory is archived then, noted with the skill's name
+  (`MadeSkill`), so it isn't in the digest beside the skill
+  (`TestMemorySkill`, `TestSuggestSkillAndDecline`).
+- Turned down (`Decline`, `POST /api/memory/decline`): the key goes in
+  `declined` (the last 500), which goes with sync, so it isn't suggested
+  on another computer either. A global suggestion's key is its memories'
+  ids, so another project joining it is a new suggestion.
+
 ## Verification
 
 ```sh
-mote-run go test ./internal/memory ./internal/memdistill ./internal/memembed ./internal/library
+mote-run go test ./internal/memory ./internal/backup ./internal/davsync ./internal/memdistill ./internal/memembed ./internal/library
 mote-run sh -c 'MAGPIE_EMBED_DIR=$HOME/models/pml go test -run Embedder ./internal/pii/guard'
 mote-run go test -run 'Distill|Dream' ./internal/gui
 mote-run go test -tags nogui -run 'MemoryMCP|OwnMCP' ./internal/gateway
 mote-run go test ./internal/browsermcp ./internal/cli
-mote-run node --test internal/gui/tests/library-memory.test.cjs internal/gui/tests/library-memory-select.test.cjs
+mote-run node --test internal/gui/tests/library-memory.test.cjs internal/gui/tests/library-memory-select.test.cjs internal/gui/tests/library-memory-suggest.test.cjs
 ```

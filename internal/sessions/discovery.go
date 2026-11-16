@@ -5,9 +5,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yetone/magpie/internal/appdir"
 )
 
 // Directory membership changes with the directory's mtime; file contents don't.
@@ -40,17 +43,17 @@ const racyDirectory = 2 * time.Second
 // left the Sessions page, and its parses were let go with them, until a
 // later poll read the folder again and parsed them anew.
 func readDirectory(path string) []os.DirEntry {
-	st, err := os.Stat(path)
+	mod, size, dir, err := appdir.DirStat(path)
 	if err != nil {
 		return unreadDirectory(path, err)
 	}
-	if !st.IsDir() {
+	if !dir {
 		return nil
 	}
 	directoryCache.Lock()
 	old, ok := directoryCache.entries[path]
 	directoryCache.Unlock()
-	if ok && old.mod.Equal(st.ModTime()) && old.size == st.Size() && old.at.Sub(old.mod) > racyDirectory {
+	if ok && old.mod.Equal(mod) && old.size == size && old.at.Sub(old.mod) > racyDirectory {
 		return old.entries
 	}
 	at := time.Now()
@@ -61,13 +64,44 @@ func readDirectory(path string) []os.DirEntry {
 		}
 		return nil
 	}
+	entries = compactEntries(path, entries)
 	directoryCache.Lock()
 	if len(directoryCache.entries) >= 16384 {
 		directoryCache.entries = map[string]directoryEntry{}
 	}
-	directoryCache.entries[path] = directoryEntry{st.ModTime(), st.Size(), at, entries}
+	directoryCache.entries[path] = directoryEntry{mod, size, at, entries}
 	directoryCache.Unlock()
 	return entries
+}
+
+// keptEntry is a kept listing's entry. A listing is kept as long as its
+// folder doesn't change, ~16k of them across a long Claude Code history, so
+// they sit in one array its entries point into: os.ReadDir gives each its
+// own allocation, and the slice it returns room to grow (#2278).
+type keptEntry struct {
+	dir, name string
+	typ       fs.FileMode
+}
+
+func (e *keptEntry) Name() string               { return e.name }
+func (e *keptEntry) IsDir() bool                { return e.typ.IsDir() }
+func (e *keptEntry) Type() fs.FileMode          { return e.typ }
+func (e *keptEntry) Info() (fs.FileInfo, error) { return os.Lstat(filepath.Join(e.dir, e.name)) }
+func (e *keptEntry) String() string             { return fs.FormatDirEntry(e) }
+
+// compactEntries is entries, read from dir, held as keptEntry. Not on
+// Windows, whose entries carry what Info answers and keptEntry would stat for.
+func compactEntries(dir string, entries []os.DirEntry) []os.DirEntry {
+	if runtime.GOOS == "windows" {
+		return entries
+	}
+	all := make([]keptEntry, len(entries))
+	out := make([]os.DirEntry, len(entries))
+	for i, e := range entries {
+		all[i] = keptEntry{dir, e.Name(), e.Type()}
+		out[i] = &all[i]
+	}
+	return out
 }
 
 // unreadDirectory is what a folder lists as when reading it failed with

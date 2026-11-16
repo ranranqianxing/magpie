@@ -240,6 +240,7 @@ func TestRefusedValueWritesNothing(t *testing.T) {
 		"searcher":       `"nobody/nothing"`,
 		"usageAlert":     `101`,
 		"updateChannel":  `"nightly"`,
+		"updateSource":   `"cloudflare"`,
 	} {
 		cur := settings.Load()
 		body, err := Body(cur, key, json.RawMessage(value))
@@ -336,4 +337,52 @@ func TestReplyModelSaves(t *testing.T) {
 			t.Errorf("reset left replyModel %q", got)
 		}
 	})
+}
+
+// Put agents back when quitting: a save from a page that doesn't send
+// restoreOnQuit (the tray panel, or a page from before it) keeps it, and
+// one that sends it false turns it off.
+func TestRestoreOnQuitKeptUnlessSent(t *testing.T) {
+	cur := settings.Defaults()
+	cur.RestoreOnQuit = true
+	in, err := Merge([]byte(`{"theme":"dark"}`), cur, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !in.RestoreOnQuit {
+		t.Error("a save that didn't send restoreOnQuit turned it off")
+	}
+	in, err = Merge([]byte(`{"theme":"dark","restoreOnQuit":false}`), cur, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.RestoreOnQuit {
+		t.Error("restoreOnQuit sent false left it on")
+	}
+}
+
+// netube99 on X: Settings → Images refused minimax-cn/MiniMax-H3-Image with
+// "no model … to generate images" when the key serves no chat model.
+func TestImageGenAcceptsMiniMaxImageModel(t *testing.T) {
+	home(t)
+	for _, preset := range []string{"minimax-cn", "minimax"} {
+		p, err := provider.FromPreset(preset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.ID, p.Key, p.NoModels = preset, "key", true
+		if err := provider.Save(p); err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range []string{"MiniMax-H3-Image", "MiniMax-H3-Image-Highspeed", "image-01"} {
+			body, _ := json.Marshal(map[string]any{"imageGen": preset + "/" + m})
+			if _, err := Merge(body, settings.Settings{}, true); err != nil {
+				t.Errorf("%s/%s: %v", preset, m, err)
+			}
+		}
+	}
+	body, _ := json.Marshal(map[string]any{"imageGen": "minimax-cn/nothing"})
+	if _, err := Merge(body, settings.Settings{}, true); err == nil {
+		t.Error("a model it doesn't draw was taken")
+	}
 }

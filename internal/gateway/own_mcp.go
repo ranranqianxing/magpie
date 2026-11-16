@@ -51,6 +51,8 @@ func ownMCP() []OwnMCP {
 	}
 	// memory is always there: it needs no model
 	out = append(out, OwnMCP{memoryServerName, "Magpie Memory", MemoryMCPPath})
+	// and so are the sessions: it reads what Settings › Sessions allows
+	out = append(out, OwnMCP{sessionsServerName, "Magpie Sessions", SessionsMCPPath})
 	if gwtool.Served(gwtool.PluginTools) {
 		// a note that can't be read says nothing: the server is listed,
 		// and its tools/list tells
@@ -85,7 +87,9 @@ func OwnMCPTools(ctx context.Context) []OwnMCPServer {
 		case imageServerName:
 			s.Tools = []string{GenerateImageTool, GenerateVideoTool, GenerationResultTool}
 		case memoryServerName:
-			s.Tools = []string{memorySearchTool, memorySaveTool, memoryForgetTool}
+			s.Tools = []string{memorySearchTool, memorySaveTool, memoryForgetTool, memoryContextTool}
+		case sessionsServerName:
+			s.Tools = []string{sessionsSearchTool, sessionsReadTool}
 		case "magpie-tools":
 			ts, _ := servedTools(ctx)
 			for _, t := range ts {
@@ -131,7 +135,7 @@ func OwnUnready(name string) string {
 		if _, ok := drawer(); ok {
 			return ""
 		}
-		if settings.Load().ImageGen == "off" {
+		if settings.Shared().ImageGen == "off" {
 			return "Image generation is off in Settings → Models → Images: its tools say so until a model is picked there"
 		}
 		return "No model that draws images is set up yet: it draws once a provider with an image model is added, and says so until then"

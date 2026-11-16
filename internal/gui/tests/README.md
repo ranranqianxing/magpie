@@ -1047,7 +1047,7 @@ never NaN, which it said while the answer left `done` out. The click doesn't
 move the page. English and Chinese.
 
 `update-auto.test.cjs` checks Settings → Automatic updates (#472): on, every
-6 h, with nothing set; Check every saves 30 min, 1 h, 6 h or 24 h; Off is
+6 h, with nothing set; Update check interval saves 30 min, 1 h, 6 h or 24 h; Off is
 saved and kept through a reload, the interval staying in place, dimmed, for
 when it is on again; the version row, not asked yet, says automatic updates
 are off and its Check asks the backend. No click moves the page. English and
@@ -1650,6 +1650,12 @@ sessions/codex-provider with each id and Codex's provider, and Undo posts
 each back to the provider it had. No click moves the page, no left-border
 accent, every string in Chinese, Japanese and German. Chromium and WebKit,
 English and Chinese, API faked.
+
+`sessions-codex-provider-stuck.test.cjs` checks the refusal of a Codex
+session that can't move at all (a paginated rollout with no row in Codex's
+database, @xMopf7RF on X): the status says why, that it stays on its
+provider, and that Delete clears it into magpie's trash. All five
+languages, 900px and 420px, Chromium and WebKit, API faked.
 
 `sessions-toolbar.test.cjs` uses ten agents to check that fitting tabs stay
 visible at 1800px, while 900, 660 and 320px windows use a compact agent menu.

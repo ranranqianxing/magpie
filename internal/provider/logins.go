@@ -19,6 +19,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -291,7 +292,14 @@ func unreadBytes(path string) []byte {
 	return b
 }
 
-func writeLogins(ls []savedLogin) error {
+func writeLogins(ls []savedLogin) error { return writeLoginsTold(ls, true) }
+
+// writeLoginsTold writes the accounts, and with tell has every catalog
+// built anew (Changed). Without it the write moved only when accounts
+// were last seen, which nothing built from the accounts reads: told, an
+// idle magpie built every catalog again each seenEvery, ~42 MB for dsh's
+// round alone. A reader still finds the file's new time and size.
+func writeLoginsTold(ls []savedLogin, tell bool) error {
 	if settings.AccountDiscoveryOff() {
 		return errAccountDiscoveryOff
 	}
@@ -308,14 +316,29 @@ func writeLogins(ls []savedLogin) error {
 	if err != nil {
 		return err
 	}
-	defer Changed() // an account added, switched or gone: All builds anew
+	if tell {
+		defer Changed() // an account added, switched or gone: All builds anew
+	}
 	beforeLoginsWrite()
+	b = append(b, '\n')
+	if fileHolds(loginsPath(), b, 0o600) {
+		// the bytes are on the disk already (#6289): no new generation, no
+		// new mtime, and what filememo parsed stays
+		lastLoginsMu.Lock()
+		lastLogins, loginsKnown = slices.Clone(ls), true
+		lastLoginsMu.Unlock()
+		return nil
+	}
 	// the file there now is kept first: as its last good generation, or
 	// copied aside when it doesn't read, never written over unkept
 	if err := lastgood.Keep(loginsPath(), validLogins, 0o600); err != nil {
 		return err
 	}
-	if err := writePrivate(loginsPath(), append(b, '\n')); err != nil {
+	write := writePrivate
+	if !tell {
+		write = writePrivateQuiet
+	}
+	if err := write(loginsPath(), b); err != nil {
 		return err
 	}
 	lastLoginsMu.Lock()
@@ -352,7 +375,19 @@ func sortLogins(ls []savedLogin) {
 // an agent reading it at that moment sees either version, never half; the
 // new one is on the disk before it is renamed over the old (#1505).
 func writePrivate(path string, b []byte) error {
-	defer filememo.Forget()        // read again, where a request holds it
+	if fileHolds(path, b, 0o600) { // the file has these bytes (#6289): nothing moves
+		return nil
+	}
+	defer filememo.Forget() // read again, where a request holds it
+	return writePrivateQuiet(path, b)
+}
+
+// writePrivateQuiet is writePrivate with nothing read forgotten: a
+// request holding the file reads the old bytes for up to a second.
+func writePrivateQuiet(path string, b []byte) error {
+	if fileHolds(path, b, 0o600) {
+		return nil
+	}
 	path, err := edit.Target(path) // a symlink stays, its target written
 	if err != nil {
 		return err
@@ -361,6 +396,33 @@ func writePrivate(path string, b []byte) error {
 		return err
 	}
 	return steady.WriteFile(path, b, 0o600)
+}
+
+// fileHolds reports whether path is a file of exactly b, with the mode
+// the write would give it. A read that fails is "no": it is written.
+// writeChanged is steady.WriteFile for a file that is left alone, mtime
+// and all, when it already holds b (#6289).
+func writeChanged(path string, b []byte, perm os.FileMode) error {
+	if fileHolds(path, b, perm) {
+		return nil
+	}
+	return steady.WriteFile(path, b, perm)
+}
+
+func fileHolds(path string, b []byte, perm os.FileMode) bool {
+	path, err := edit.Target(path)
+	if err != nil {
+		return false
+	}
+	fi, err := os.Stat(path)
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() != int64(len(b)) {
+		return false
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != perm {
+		return false
+	}
+	old, err := os.ReadFile(path)
+	return err == nil && bytes.Equal(old, b)
 }
 
 func upsertLogin(ls []savedLogin, l savedLogin) []savedLogin {
@@ -1008,7 +1070,7 @@ func rememberLogins(force bool) {
 	// seconds above don't hold for: one that would only move Seen on, and
 	// that recently, writes nothing (#1674)
 	if changed && !onlySeenMoved(was, ls, now) {
-		_ = writeLogins(ls)
+		_ = writeLoginsTold(ls, !sameButSeen(was, ls))
 	}
 }
 
@@ -1019,6 +1081,20 @@ const seenEvery = 10 * time.Minute
 // onlySeenMoved says next is was with nothing changed but the times
 // accounts were last seen, each of them less than seenEvery before now.
 func onlySeenMoved(was, next []savedLogin, now time.Time) bool {
+	return seenApart(was, next, func(a, b time.Time) bool {
+		return !a.IsZero() && now.Sub(a) < seenEvery && !b.Before(a)
+	})
+}
+
+// sameButSeen says that next differs from was in when accounts were last
+// seen alone, however long ago.
+func sameButSeen(was, next []savedLogin) bool {
+	return seenApart(was, next, func(a, b time.Time) bool { return !a.IsZero() })
+}
+
+// seenApart says that next is was with Seen moved, each move one that
+// let allows.
+func seenApart(was, next []savedLogin, let func(was, next time.Time) bool) bool {
 	if len(was) != len(next) {
 		return false
 	}
@@ -1036,7 +1112,7 @@ func onlySeenMoved(was, next []savedLogin, now time.Time) bool {
 			return false
 		}
 		if !b[i].Seen.Equal(a[i].Seen) {
-			if a[i].Seen.IsZero() || now.Sub(a[i].Seen) >= seenEvery || b[i].Seen.Before(a[i].Seen) {
+			if !let(a[i].Seen, b[i].Seen) {
 				return false
 			}
 			b[i].Seen = a[i].Seen
@@ -1573,6 +1649,18 @@ func ForgetLogin(agent, user string) error {
 	}
 	if pp, ok := pluginOfAgent(agent); ok {
 		return forgetPluginLogin(pp, user)
+	}
+	if agent == "claude" {
+		// nor while a run is in the account's own directory: magpie's own
+		// (a /usage, a warm-up) ends first, and another magpie process's
+		// is refused past the wait (#4532's run marks) — the removal here
+		// would take the directory from under that run (#3254)
+		mu := claudeDirRun(user)
+		mu.Lock()
+		defer mu.Unlock()
+		if err := waitClaudeRuns(user); err != nil {
+			return err
+		}
 	}
 	switch agent {
 	case "copilot":

@@ -6,6 +6,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -45,6 +46,10 @@ func TestRemoteAddr(t *testing.T) {
 		{"http://nas.local:3430", "http://nas.local:3430/", "", ""},
 		{"http://server:3430", "http://server:3430/", "", ""},
 		{"https://example.com/magpie/", "https://example.com/magpie/", "", ""},
+		{"HTTP://192.168.1.20:3430/", "http://192.168.1.20:3430/", "", ""},
+		{"HTTPS://Magpie.example.com/?k=abc", "https://Magpie.example.com/", "abc", ""},
+		{"http://http://192.168.1.20:3430", "http://192.168.1.20:3430/", "", ""},
+		{"https://https://magpie.example.com", "https://magpie.example.com/", "", ""},
 		{"http://magpie.example.com:3430", "", "", "name on the internet"},
 		{"https://u:p@magpie.example.com", "", "", "user name"},
 		{"ftp://example.com", "", "", "http:// or https://"},
@@ -64,6 +69,21 @@ func TestRemoteAddr(t *testing.T) {
 	}
 }
 
+// An address saved with its scheme twice (eachg0 on X) reads as one.
+func TestRemoteReadsADoubledScheme(t *testing.T) {
+	onePortHome(t)
+	if err := os.MkdirAll(filepath.Dir(remoteFile()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(remoteFile(), []byte(`{"url":"http://http://192.168.1.20:3430/","key":"k"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := loadRemote()
+	if err != nil || c.URL != "http://192.168.1.20:3430/" {
+		t.Errorf("loadRemote = %+v, %v", c, err)
+	}
+}
+
 // xuanwo on X: the app opens a server's magpie, its routing and usage, in
 // a window. The key is checked against that magpie's own page before the
 // window opens, kept 0600 on this computer, never read back into the page,
@@ -73,7 +93,7 @@ func TestRemoteOpensTheOtherMagpie(t *testing.T) {
 	onePortHome(t)
 	const key = "0123456789abcdef-remote"
 	reached := 0
-	other := httptest.NewServer(webHandler("3430", key, webCookieAge, http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	other := httptest.NewServer(webHandler("3430", key, webCookieAge, nil, http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		reached++
 		rw.WriteHeader(http.StatusTeapot)
 	})))

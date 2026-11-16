@@ -24,6 +24,11 @@ var (
 	idleSettle = 10 * time.Second
 	waitMost   = time.Hour
 	waitTick   = time.Second
+	// restartDrain is how long a restart `magpie update` asked for waits
+	// for what is in flight; then it restarts anyway. Without a bound a
+	// long stream kept the old version running for good (ljlwlcz on X, on
+	// Windows, where nothing is handed over).
+	restartDrain = 10 * time.Minute
 )
 
 // A restart by itself (Settings' AutoRestart) also waits while the user
@@ -75,8 +80,8 @@ var gatewayBusy = func() gateway.Busy {
 	return gateway.Busy{}
 }
 
-// waitRecheck asks the feed again before the restart (updater.recheck),
-// asked when a click armed the wait.
+// waitRecheck is updater.recheck before the restart, asked when a click
+// armed the wait: the feed is asked only with nothing downloaded waiting.
 var waitRecheck = (*updater).recheck
 
 // idleAt is whether b leaves nothing for a restart at now to cut short.
@@ -93,6 +98,9 @@ func (u *updater) idle() bool { return idleAt(restartBusy(), time.Now()) }
 func (u *updater) waitIdle(restart func() bool, asked bool) {
 	u.mu.Lock()
 	u.whenIdle, u.gaveUp, u.waitAsked = restart, false, asked
+	if !u.waiting {
+		u.drainMost = 0
+	}
 	if u.waiting {
 		u.mu.Unlock()
 		return
@@ -158,6 +166,20 @@ func (u *updater) waitFor(gen int) {
 			u.told()
 			return
 		}
+		drained := u.drainMost > 0 && time.Since(u.waitFrom) >= u.drainMost
+		if drained {
+			// the bound `magpie update` was told: what is still in
+			// flight is cut now, as a restart does (the gateway's own
+			// shutdown lets a stream end its turn first)
+			restart := u.whenIdle
+			u.waiting, u.whenIdle = false, nil
+			u.mu.Unlock()
+			u.told()
+			if restart != nil {
+				restart()
+			}
+			return
+		}
 		u.mu.Unlock()
 		b := restartBusy()
 		if b.Requests != last.Requests || b.Tools != last.Tools {
@@ -181,7 +203,9 @@ func (u *updater) waitFor(gen int) {
 		switch st := u.json().State; {
 		case in:
 		case st == "ready":
-			// a newer version out since is downloaded first, and waited for
+			// the version downloaded and waiting is gone into as it is;
+			// with none (another magpie put it in), the feed is asked
+			// (recheck)
 			waitRecheck(u, asked)
 			if u.asking() || u.json().State != "ready" {
 				continue
@@ -233,10 +257,9 @@ func (u *updater) autoTick(s settings.Settings) {
 
 // restartAsked is the tray's Restart to update, restart doing it. With the
 // gateway busy it waits for it to be idle (#577), and a click while it
-// waits restarts at once. The feed is asked first, as the page's restart
-// asks it (coeo91 on Discord: the tray restarted into the version the
-// last check found): a newer version out since is downloaded, and the
-// restart waits for it.
+// waits restarts at once. It goes through recheck as the page's restart
+// does: the version downloaded and waiting is restarted into as it is,
+// and only with none is the feed asked first (coeo91 on Discord).
 func (u *updater) restartAsked(restart func() bool) {
 	if waiting, _ := u.waitingFor(); !waiting && !u.idle() {
 		u.waitIdle(restart, true)

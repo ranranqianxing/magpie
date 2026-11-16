@@ -233,7 +233,7 @@ magpie provider test openrouter</pre></div>
       <li><b>列表从哪来。</b>magpie 从 <code>https://openrouter.ai/api/v1/models</code> 拉取列表，里面有每个模型的上下文长度。模型名、推理档位和价格来自 models.dev 上的 <code>openrouter</code> 目录。</li>
       <li><b>工具能看到哪些模型。</b>OpenRouter 列出的模型有几百个。你没挑选时，magpie 给工具展示 OpenRouter 列表里的前 24 个（它按从新到旧排）。其余的可以在供应商的模型列表里勾选，也可以打开 <span class="ui">每系最新</span>，每个系列只留最新的一个。</li>
       <li><b>新模型。</b><code>auto-include</code> 规则会立刻加入匹配的模型，以后拉取列表时新出现的匹配模型也会自动加入；<code>refresh-every</code> 让 magpie 定期自己重新拉取列表。</li>
-      <li><b>图像模型。</b>OpenRouter 的 <code>/models</code> 只列文本模型，所以 magpie 从 <code>/api/v1/images/models</code> 读取 FLUX、Seedream、Riverflow、Recraft、GPT Image 等图像模型。在 <span class="ui">设置 → 模型 → 图像</span> 里选用。</li>
+      <li><b>图像模型。</b>OpenRouter 的 <code>/models</code> 只列文本模型，所以 magpie 从 <code>/api/v1/models?output_modalities=image</code> 读取 FLUX、Seedream、Riverflow、Recraft、GPT Image 等图像模型及其免费版本。在 <span class="ui">设置 → 模型 → 图像</span> 里选用。</li>
       <li><b>决策模型。</b>OpenRouter 的决策模型（<code>liquid/d1</code>、<code>cloudflare/clef</code>、<code>~typesafe/jev-latest</code>……）也会列出来，路由分组可以用同一个 Key 给每一轮做分类。</li>
     </ul>
     <div class="code"><span class="lang">终端</span><button class="copy" data-copy="ex-models">复制</button><pre id="ex-models">magpie provider models openrouter +anthropic/claude-opus-5.5   # 多展示一个
@@ -295,6 +295,10 @@ magpie group set opus-anywhere stays=session models+=openrouter/anthropic/claude
       <li><b>检查 Key。</b><code>magpie provider test openrouter</code> 会向每个接口发一个很小的请求，或者发给你指定的每个模型。加上 <code>--as codex</code> 或 <code>--as claude-code</code>，就按那个工具的方式发送。</li>
     </ul>
 
+    <p><a href="/docs/zh/vercel">Vercel AI Gateway 接入 Claude Code、Codex 等 Agent</a></p>
+
+    <p><a href="/docs/zh/relay">中转站 API 接入 Claude Code、Codex 等 Agent</a></p>
+
     <h2 id="faq"><a class="anchor" href="#faq">常见问题</a></h2>
     <h3>Claude Code 怎么用 OpenRouter？</h3>
     <p>在 magpie 里添加 OpenRouter 的 Key（供应商页，添加供应商，选 OpenRouter），然后在 Claude Code 那一行选一个模型，比如 <code>anthropic/claude-opus-5.5</code>，或者运行 <code>magpie claude openrouter/anthropic/claude-opus-5.5</code>。magpie 会写好 Claude Code 的 <code>settings.json</code>，请求原样转给 OpenRouter 的 Anthropic 接口。</p>
@@ -311,7 +315,7 @@ magpie group set opus-anywhere stays=session models+=openrouter/anthropic/claude
     <h3>为什么 magpie 从 /api/v1 拉取 OpenRouter 的模型列表？</h3>
     <p>在 Anthropic 地址上拉列表，OpenRouter 返回的是挂在 <code>anthropic/</code> 前缀下的目录，里面的 id 它并不提供服务。magpie 从 Chat Completions 地址 <code>https://openrouter.ai/api/v1</code> 拉列表；只填了 OpenRouter Anthropic 地址的供应商，会提示你补上这个 Chat 地址。</p>
 
-    <p><b>按供应商：</b><a href="/docs/zh/deepseek">DeepSeek</a> · <a href="/docs/zh/kimi">Kimi 与 Kimi Code</a> · <a href="/docs/zh/glm">GLM 编程套餐</a> · <a href="/docs/zh/qwen">通义千问</a> · <a href="/docs/zh/minimax">MiniMax</a> · <a href="/docs/zh/anthropic">Anthropic</a> · <a href="/docs/zh/openai">OpenAI</a> · <a href="/docs/zh/gemini">Gemini</a> · <a href="/docs/zh/grok">Grok</a> · <a href="/docs/zh/mistral">Mistral</a> · <a href="/docs/zh/copilot">GitHub Copilot</a> · <a href="/docs/zh/ollama">Ollama</a></p>
+    <p><b>按供应商：</b><a href="/docs/zh/deepseek">DeepSeek</a> · <a href="/docs/zh/kimi">Kimi 与 Kimi Code</a> · <a href="/docs/zh/glm">GLM 编程套餐</a> · <a href="/docs/zh/volcengine">火山方舟</a> · <a href="/docs/zh/tencent-cloud">腾讯云</a> · <a href="/docs/zh/baidu-qianfan">百度千帆</a> · <a href="/docs/zh/siliconflow">硅基流动</a> · <a href="/docs/zh/modelscope">魔搭</a> · <a href="/docs/zh/huaweicloud">华为云 MaaS</a> · <a href="/docs/zh/xiaomi-mimo">小米 MiMo</a> · <a href="/docs/zh/stepfun">阶跃星辰</a> · <a href="/docs/zh/longcat">LongCat</a> · <a href="/docs/zh/qwen">通义千问</a> · <a href="/docs/zh/minimax">MiniMax</a> · <a href="/docs/zh/anthropic">Anthropic</a> · <a href="/docs/zh/openai">OpenAI</a> · <a href="/docs/zh/gemini">Gemini</a> · <a href="/docs/zh/grok">Grok</a> · <a href="/docs/zh/mistral">Mistral</a> · <a href="/docs/zh/copilot">GitHub Copilot</a> · <a href="/docs/zh/ollama">Ollama</a></p>
     <p style="margin-top:48px">各个工具的指南：<a href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>、<a href="/docs/zh/codex-models">Codex 接入其他模型</a>、<a href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>、<a href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>。遇到问题可以在 <a href="https://discord.gg/vGSnD3ZKQF">Discord</a> 提问。</p>
   </article>
 </main>

@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -71,20 +73,20 @@ type trashedJSON struct {
 	Icon string `json:"icon"`
 }
 
-func agentLooks() map[string]*agent.Agent {
-	out := map[string]*agent.Agent{}
-	for _, a := range agent.Clients() {
+func agentLooks() map[string]agent.Look {
+	out := map[string]agent.Look{}
+	for _, a := range agent.Looks() {
 		out[a.ID] = a
 	}
 	return out
 }
 
-func trashJSON(looks map[string]*agent.Agent) []trashedJSON {
+func trashJSON(looks map[string]agent.Look) []trashedJSON {
 	out := []trashedJSON{}
 	for _, t := range sessions.Trash() {
 		j := trashedJSON{Trashed: t, Name: t.Agent, Icon: "generic"}
-		if a := looks[t.Agent]; a != nil {
-			j.Name, j.Icon = a.SharedName(), a.Icon
+		if a, ok := looks[t.Agent]; ok {
+			j.Name, j.Icon = a.Shared, a.Icon
 		}
 		j.Cwd = tilde(j.Cwd)
 		for i := range j.Items {
@@ -126,7 +128,7 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, err)
 			return
 		}
-		writeJSON(rw, map[string]bool{"recording": settings.Load().GatewayConversations})
+		writeJSON(rw, map[string]bool{"recording": settings.Shared().GatewayConversations})
 	})
 	// speeds: each session's output speed now (gateway.Speeds), for the
 	// page's curves while it is open. Not under /api/sessions, which
@@ -163,11 +165,14 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 			// asks first when nothing is decided (asked false)
 			Reads readsJSON `json:"reads"`
 		}{Reads: readsNow(), Agents: []manageAgentJSON{}, Sessions: []managedJSON{}, Terminal: runtime.GOOS == "darwin" && !isWeb(w),
-			Trash: trashJSON(looks), TrashDir: tilde(sessions.TrashDir()), Recording: settings.Load().GatewayConversations,
+			Trash: trashJSON(looks), TrashDir: tilde(sessions.TrashDir()), Recording: settings.Shared().GatewayConversations,
 			Recorded: sessions.HasGatewayConversations()}
 		out.Home, _ = os.UserHomeDir()
 		want := r.URL.Query().Get("agent")
 		gateway := listedGateway(usage.GatewaySessions(time.Time{}, nil))
+		// one that spent nothing, with no file of the agent's here either,
+		// has nothing to show (SpentNothing)
+		gateway = slices.DeleteFunc(gateway, usage.GatewaySession.SpentNothing)
 		// a gateway session its agent keeps too is counted once; only the
 		// agents with gateway sessions, and the one shown, are read (#2776)
 		of := map[string]bool{}
@@ -178,8 +183,8 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 			counts := map[string]*manageAgentJSON{}
 			for _, a := range agents {
 				j := manageAgentJSON{AgentCount: a, Name: a.Agent, Icon: "generic"}
-				if l := looks[a.Agent]; l != nil {
-					j.Name, j.Icon = l.SharedName(), l.Icon
+				if l, ok := looks[a.Agent]; ok {
+					j.Name, j.Icon = l.Shared, l.Icon
 				}
 				counts[a.Agent] = &j
 			}
@@ -190,8 +195,8 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 				j := counts[s.Agent]
 				if j == nil {
 					j = &manageAgentJSON{AgentCount: sessions.AgentCount{Agent: s.Agent}, Name: s.Agent, Icon: "generic"}
-					if l := looks[s.Agent]; l != nil {
-						j.Name, j.Icon = l.SharedName(), l.Icon
+					if l, ok := looks[s.Agent]; ok {
+						j.Name, j.Icon = l.Shared, l.Icon
 					}
 					counts[s.Agent] = j
 				}
@@ -219,6 +224,11 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 		out.Agent = view.Agent
 		if out.Agent != "" {
 			list := view.Sessions
+			if !sessions.Deletable(out.Agent) {
+				// the ones taken off the list (sessions.Forget), until used again
+				hidden := sessions.GatewayHidden()
+				list = slices.DeleteFunc(slices.Clone(list), func(m sessions.Managed) bool { return hidden(m.Agent, m.ID, m.Last) })
+			}
 			var modelEffort map[string][]sessions.ModelEffort
 			if out.Agent == "codex" {
 				modelEffort = usage.CodexModelEffort(usage.All)
@@ -260,6 +270,13 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 			sort.SliceStable(out.Sessions, func(i, j int) bool {
 				return out.Sessions[i].Last.After(out.Sessions[j].Last)
 			})
+			// the agent's tab counts the rows it lists: a Codex subagent
+			// thread whose parent is gone is no row (keptSubagents)
+			for i := range out.Agents {
+				if out.Agents[i].Agent == out.Agent {
+					out.Agents[i].Count = len(out.Sessions)
+				}
+			}
 		}
 		writeJSON(rw, out)
 	})
@@ -269,6 +286,19 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 	mux.HandleFunc("GET /api/sessions/search", func(rw http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		writeJSON(rw, searchSessions(r.Context(), q.Get("agent"), q.Get("q"), searchBudget))
+	})
+	// said is the sessions of every agent (or ?agent='s) whose
+	// conversation says ?q=, from the index of what was said in them
+	// (sessions.SearchSaid): the Sessions page's hits in other agents.
+	mux.HandleFunc("GET /api/sessions/said", func(rw http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		found, err := sessions.SearchSaid(r.Context(), sessions.NeedleOf(q.Get("q")), q.Get("agent"), min(max(limit, 1), 100))
+		if err != nil && !errors.Is(err, sessions.ErrNoWords) {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, saidJSONOf(found))
 	})
 	// delete moves the sessions named to magpie's trash, one by one; one
 	// still being written is left, and said so. One seen only through the
@@ -303,6 +333,10 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 			var err error
 			if g, ok := listed[id]; ok {
 				_, err = sessions.DeleteGateway(g.Agent, g.ID, g.ID, g.Last)
+			} else if sessions.Forgettable(in.Agent) {
+				// an uninstalled agent's rows of a database magpie only
+				// reads: they leave the list, its files are not touched
+				_, err = sessions.Forget(in.Agent, id)
 			} else if !sessions.Deletable(in.Agent) {
 				err = errors.New("magpie can't delete this agent's sessions")
 			} else {
@@ -331,10 +365,14 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, err)
 			return
 		}
+		// stuck: a session that can't move at all (sessions.StuckError),
+		// from the provider it stays on
 		type refused struct {
 			ID     string `json:"id"`
 			Error  string `json:"error"`
 			Active bool   `json:"active"`
+			Stuck  bool   `json:"stuck,omitempty"`
+			From   string `json:"from,omitempty"`
 		}
 		out := struct {
 			Moved   []sessions.CodexMove `json:"moved"`
@@ -343,7 +381,12 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 		for _, m := range in.Moves {
 			mv, err := sessions.MoveCodexProvider(m.ID, m.To)
 			if err != nil {
-				out.Refused = append(out.Refused, refused{ID: m.ID, Error: err.Error(), Active: errors.Is(err, sessions.ErrActive)})
+				r := refused{ID: m.ID, Error: err.Error(), Active: errors.Is(err, sessions.ErrActive)}
+				var stuck *sessions.StuckError
+				if errors.As(err, &stuck) {
+					r.Stuck, r.From = true, stuck.From
+				}
+				out.Refused = append(out.Refused, r)
 				continue
 			}
 			mv.Backup = tilde(mv.Backup)
@@ -543,6 +586,36 @@ func searchSessions(ctx context.Context, agentID, query string, budget time.Dura
 	sort.Slice(hits, func(i, j int) bool { return hits[i].i < hits[j].i })
 	for _, f := range hits {
 		out.Hits = append(out.Hits, searchHitJSON{ID: jobs[f.i].s.ID, Hit: f.hit})
+	}
+	return out
+}
+
+// saidJSON is what the page shows of a search over every agent
+// (sessions.SearchSaid): of each session, what its row says.
+type saidJSON struct {
+	Hits    []saidHitJSON `json:"hits"`
+	Indexed int           `json:"indexed"`
+	Total   int           `json:"total"`
+	Cut     bool          `json:"cut,omitempty"`
+	Listing bool          `json:"listing,omitempty"`
+}
+
+type saidHitJSON struct {
+	Agent      string       `json:"agent"`
+	ID         string       `json:"id"`
+	Title      string       `json:"title,omitempty"`
+	Cwd        string       `json:"cwd,omitempty"`
+	Last       time.Time    `json:"last"`
+	WSL        string       `json:"wsl,omitempty"`
+	Transcript bool         `json:"transcript"`
+	Hit        sessions.Hit `json:"hit"`
+}
+
+func saidJSONOf(f sessions.SaidFound) saidJSON {
+	out := saidJSON{Hits: make([]saidHitJSON, 0, len(f.Hits)), Indexed: f.Indexed, Total: f.Total, Cut: f.Cut, Listing: f.Listing}
+	for _, h := range f.Hits {
+		s := h.Session
+		out.Hits = append(out.Hits, saidHitJSON{Agent: s.Agent, ID: s.ID, Title: s.Title, Cwd: s.Cwd, Last: s.Last, WSL: s.WSL, Transcript: true, Hit: h.Hit})
 	}
 	return out
 }

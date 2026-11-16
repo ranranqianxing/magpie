@@ -11,7 +11,7 @@ func TestFromEntriesKeepsTheModelAndDropsTheHost(t *testing.T) {
 	e := provider.Entry{
 		ID: "oppo/deepseek-flash", Model: "deepseek-flash", Name: "deepseek flash",
 		Reasoning: true, Efforts: []string{"low", "high"}, Images: true, Context: 128000,
-		Provider: provider.Provider{
+		Provider: &provider.Provider{
 			ID: "oppo", Name: "Work", Key: "provider-secret",
 			Chat: "https://OPPO-CLOUD-LLM-PERSONAL-CN.oppoer.me/v1",
 		},

@@ -233,7 +233,7 @@ magpie provider test openrouter</pre></div>
       <li><b>Where it comes from.</b> magpie fetches the list from <code>https://openrouter.ai/api/v1/models</code>, which gives each model’s context length. Names, reasoning levels and prices come from the <code>openrouter</code> catalog on models.dev.</li>
       <li><b>Which models agents see.</b> OpenRouter lists hundreds. Unless you pick some, magpie shows agents the first 24 OpenRouter lists, newest first. Pick the rest in the provider’s model list, or turn on <span class="ui">Best in family</span> to keep only the newest of each family.</li>
       <li><b>New models.</b> <code>auto-include</code> rules expose matching models now and each one a later fetch lists for the first time, and <code>refresh-every</code> has magpie fetch the list again by itself.</li>
-      <li><b>Image models.</b> OpenRouter’s <code>/models</code> lists text models only, so magpie reads image models such as FLUX, Seedream, Riverflow, Recraft and GPT Image from <code>/api/v1/images/models</code>. Choose one in <span class="ui">Settings → Models → Images</span>.</li>
+      <li><b>Image models.</b> OpenRouter’s <code>/models</code> lists text models only, so magpie reads image models such as FLUX, Seedream, Riverflow, Recraft and GPT Image, and their free variants, from <code>/api/v1/models?output_modalities=image</code>. Choose one in <span class="ui">Settings → Models → Images</span>.</li>
       <li><b>Decision models.</b> OpenRouter’s decision models (<code>liquid/d1</code>, <code>cloudflare/clef</code>, <code>~typesafe/jev-latest</code>…) are listed too, so a routing group can classify turns with the same key.</li>
     </ul>
     <div class="code"><span class="lang">Terminal</span><button class="copy" data-copy="ex-models">Copy</button><pre id="ex-models">magpie provider models openrouter +anthropic/claude-opus-5.5   # expose one more
@@ -295,6 +295,10 @@ magpie group set opus-anywhere stays=session models+=openrouter/anthropic/claude
       <li><b>Checking a key.</b> <code>magpie provider test openrouter</code> sends a tiny request through each endpoint, or to each model you name. Add <code>--as codex</code> or <code>--as claude-code</code> to send it the way that agent would.</li>
     </ul>
 
+    <p><a href="/docs/vercel">Vercel AI Gateway in Claude Code, Codex and other agents</a></p>
+
+    <p><a href="/docs/relay">API relays in Claude Code, Codex and other agents</a></p>
+
     <h2 id="faq"><a class="anchor" href="#faq">FAQ</a></h2>
     <h3>How do I use OpenRouter in Claude Code?</h3>
     <p>Add your OpenRouter key in magpie (Providers, Add provider, OpenRouter), then pick a model such as <code>anthropic/claude-opus-5.5</code> on Claude Code’s row, or run <code>magpie claude openrouter/anthropic/claude-opus-5.5</code>. magpie writes Claude Code’s <code>settings.json</code> and passes its requests on to OpenRouter’s Anthropic endpoint as they are.</p>
@@ -311,7 +315,7 @@ magpie group set opus-anywhere stays=session models+=openrouter/anthropic/claude
     <h3>Why does magpie fetch OpenRouter’s model list from /api/v1?</h3>
     <p>Asked at the Anthropic base, OpenRouter answers with its catalog under <code>anthropic/</code> names it doesn’t serve. magpie fetches the list from the Chat Completions base, <code>https://openrouter.ai/api/v1</code>, and a provider given only OpenRouter’s Anthropic base is told to add that Chat base.</p>
 
-    <p><b>By provider:</b> <a href="/docs/deepseek">DeepSeek</a> · <a href="/docs/kimi">Kimi and Kimi Code</a> · <a href="/docs/glm">GLM Coding Plan</a> · <a href="/docs/qwen">Qwen</a> · <a href="/docs/minimax">MiniMax</a> · <a href="/docs/anthropic">Anthropic</a> · <a href="/docs/openai">OpenAI</a> · <a href="/docs/gemini">Gemini</a> · <a href="/docs/grok">Grok</a> · <a href="/docs/mistral">Mistral</a> · <a href="/docs/copilot">GitHub Copilot</a> · <a href="/docs/ollama">Ollama</a></p>
+    <p><b>By provider:</b> <a href="/docs/deepseek">DeepSeek</a> · <a href="/docs/kimi">Kimi and Kimi Code</a> · <a href="/docs/glm">GLM Coding Plan</a> · <a href="/docs/volcengine">Volcengine Ark</a> · <a href="/docs/tencent-cloud">Tencent Cloud</a> · <a href="/docs/baidu-qianfan">Baidu Qianfan</a> · <a href="/docs/siliconflow">SiliconFlow</a> · <a href="/docs/modelscope">ModelScope</a> · <a href="/docs/huaweicloud">Huawei Cloud MaaS</a> · <a href="/docs/xiaomi-mimo">Xiaomi MiMo</a> · <a href="/docs/stepfun">StepFun</a> · <a href="/docs/longcat">LongCat</a> · <a href="/docs/qwen">Qwen</a> · <a href="/docs/minimax">MiniMax</a> · <a href="/docs/anthropic">Anthropic</a> · <a href="/docs/openai">OpenAI</a> · <a href="/docs/gemini">Gemini</a> · <a href="/docs/grok">Grok</a> · <a href="/docs/mistral">Mistral</a> · <a href="/docs/copilot">GitHub Copilot</a> · <a href="/docs/ollama">Ollama</a></p>
     <p style="margin-top:48px">Every agent: <a href="/docs/claude-code-models">Models in Claude Code</a>, <a href="/docs/codex-models">Models in Codex</a>, <a href="/docs/gemini-cli-models">Models in Gemini CLI</a>, <a href="/docs/opencode-models">Models in OpenCode</a>. Ask on <a href="https://discord.gg/vGSnD3ZKQF">Discord</a> if you get stuck.</p>
   </article>
 </main>

@@ -140,7 +140,7 @@ func CachedCards(now time.Time) []SubscriptionQuota {
 	}
 	plans, balances = withKeyReadings(plans, ps, "plan"), withKeyReadings(balances, ps, "balance")
 	plans, subs = seatCards(plans, subs)
-	subs = withAccountNames(subs)
+	subs = WithImageLane(withAccountNames(subs), now)
 	out := []SubscriptionQuota{}
 	for _, g := range []struct {
 		kind string
@@ -154,7 +154,7 @@ func CachedCards(now time.Time) []SubscriptionQuota {
 			}
 		}
 	}
-	return append(out, passedOnCards()...)
+	return oneCardPerAccount(append(out, passedOnCards()...))
 }
 
 // passedOnCards are the cards of each Remote magpie this one uses, as
@@ -201,6 +201,9 @@ func ReadAllCards(ctx context.Context) {
 var remoteCardCache struct {
 	sync.Mutex
 	m map[string]remoteCardsRead
+	// gen counts the times the cards were forgotten (a test's
+	// ForgetRemoteCardsForTest): a read asked before isn't kept after
+	gen int
 }
 
 type remoteCardsRead struct {
@@ -223,6 +226,7 @@ func ForgetRemoteCardsForTest() {
 	c := &remoteCardCache
 	c.Lock()
 	c.m = nil
+	c.gen++
 	c.Unlock()
 	k := &remoteKeyCache
 	k.Lock()
@@ -266,7 +270,7 @@ func RemoteCards(ctx context.Context) []SubscriptionQuota {
 		}()
 	}
 	wg.Wait()
-	return slices.Concat(got...)
+	return oneCardPerAccount(slices.Concat(got...))
 }
 
 // remoteCards is p's cards, from what was kept here when it is recent and
@@ -308,9 +312,10 @@ func remoteCards(ctx context.Context, p Provider, fresh bool) []SubscriptionQuot
 // model listed that way is (catalog.Loops).
 func namedRemoteCards(p Provider, cards []SubscriptionQuota) []SubscriptionQuota {
 	name := remoteName(p)
+	wanted := remoteCardWanted(p)
 	out := make([]SubscriptionQuota, 0, len(cards))
 	for _, q := range cards {
-		if q.Provider == "" || catalog.Loops(q.Via) {
+		if q.Provider == "" || catalog.Loops(q.Via) || !wanted(q.Provider) {
 			continue
 		}
 		q.Provider = p.ID + "/" + q.Provider
@@ -390,11 +395,18 @@ func refreshRemote(ctx context.Context, p Provider, card, user string) {
 // that comes back after one asked later is not kept over it, so a slow
 // answer from before the key was held can't bring its cards back.
 func keepRemoteCards(id string, asked time.Time, cards []SubscriptionQuota, err error) remoteCardsRead {
+	return keepRemoteCardsOf(id, -1, asked, cards, err)
+}
+
+// keepRemoteCardsOf is keepRemoteCards for a read asked while the cards
+// were of generation gen (remoteCardCache.gen; -1, whichever): one asked
+// before they were forgotten isn't kept.
+func keepRemoteCardsOf(id string, gen int, asked time.Time, cards []SubscriptionQuota, err error) remoteCardsRead {
 	c := &remoteCardCache
 	c.Lock()
 	defer c.Unlock()
 	r := c.m[id]
-	if asked.Before(r.at) {
+	if asked.Before(r.at) || gen >= 0 && gen != c.gen {
 		return r
 	}
 	r.at = asked
@@ -404,7 +416,9 @@ func keepRemoteCards(id string, asked time.Time, cards []SubscriptionQuota, err 
 	case err != nil:
 		r.err = err.Error()
 	default:
-		r.cards, r.err, r.held = cards, "", false
+		// a card that came back round isn't kept, nor told again; what
+		// the remote told for routing is laid on the windows (#6708)
+		r.cards, r.err, r.held = withRouting(withoutLoops(cards)), "", false
 	}
 	if c.m == nil {
 		c.m = map[string]remoteCardsRead{}
@@ -509,6 +523,12 @@ func remoteJSON(ctx context.Context, p Provider, method, path string, wait time.
 // gives back the body of a 2xx answer; any other is an error that says
 // what to do about it.
 func remoteBody(ctx context.Context, p Provider, method, path string, wait time.Duration) ([]byte, error) {
+	return remoteBodyAs(ctx, p, method, path, wait, 8<<20, errRemoteNoShare)
+}
+
+// remoteBodyAs is remoteBody for an answer of up to max bytes, and with
+// noShare as the word for a remote that doesn't have the path.
+func remoteBodyAs(ctx context.Context, p Provider, method, path string, wait time.Duration, max int64, noShare string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, p.Anthropic+path, nil)
@@ -522,7 +542,7 @@ func remoteBody(ctx context.Context, p Provider, method, path string, wait time.
 		return nil, fmt.Errorf("%s %s: %w", errRemoteUnreachable, remoteName(p), err)
 	}
 	defer res.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+	b, err := io.ReadAll(io.LimitReader(res.Body, max))
 	if err != nil && ctx.Err() != nil {
 		return nil, fmt.Errorf("%s %s: %w", errRemoteUnreachable, remoteName(p), ctx.Err())
 	}
@@ -534,7 +554,7 @@ func remoteBody(ctx context.Context, p Provider, method, path string, wait time.
 	}
 	switch {
 	case res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusMethodNotAllowed:
-		return nil, fmt.Errorf("%s", errRemoteNoShare)
+		return nil, fmt.Errorf("%s", noShare)
 	case res.StatusCode == http.StatusForbidden:
 		json.Unmarshal(b, &e)
 		switch e.Error.Code {

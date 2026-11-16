@@ -317,6 +317,8 @@ magpie claude google-vertex/gemini-3.1-pro-preview</pre></div>
       <li><b>Checking a key.</b> <code>magpie provider test google</code> sends a tiny request through each endpoint, or to each model you name. Add <code>--as codex</code> or <code>--as claude-code</code> to send it the way that agent would.</li>
     </ul>
 
+    <p>More on Vertex AI: <a href="/docs/vertex">Google Vertex AI in Claude Code, Codex and other agents</a>.</p>
+
     <h2 id="faq"><a class="anchor" href="#faq">FAQ</a></h2>
     <h3>How do I use Gemini in Claude Code?</h3>
     <p>Add a Gemini API key in magpie (Providers, Add provider, Google Gemini), then pick a model such as <code>gemini-3.1-pro-preview</code> on Claude Code’s row, or run <code>magpie claude google/gemini-3.1-pro-preview</code>. magpie writes Claude Code’s <code>settings.json</code> and translates each Messages request to Gemini’s Chat Completions, tool calls and streaming included.</p>
@@ -333,8 +335,8 @@ magpie claude google-vertex/gemini-3.1-pro-preview</pre></div>
     <h3>Can I use my Gemini Code Assist or Antigravity sign-in instead?</h3>
     <p>Yes. Both are subscriptions: <code>magpie accounts add gemini</code> or <code>magpie accounts add antigravity</code>, then pick a <code>gemini/…</code> or <code>antigravity/…</code> model. Code Assist needs a Standard or Enterprise account with a Google Cloud project of its own.</p>
 
-    <p><b>By provider:</b> <a href="/docs/deepseek">DeepSeek</a> · <a href="/docs/kimi">Kimi and Kimi Code</a> · <a href="/docs/glm">GLM Coding Plan</a> · <a href="/docs/qwen">Qwen</a> · <a href="/docs/minimax">MiniMax</a> · <a href="/docs/anthropic">Anthropic</a> · <a href="/docs/openai">OpenAI</a> · <a href="/docs/grok">Grok</a> · <a href="/docs/mistral">Mistral</a> · <a href="/docs/openrouter">OpenRouter</a> · <a href="/docs/copilot">GitHub Copilot</a> · <a href="/docs/ollama">Ollama</a></p>
-    <p style="margin-top:48px">Every agent: <a href="/docs/claude-code-models">Models in Claude Code</a>, <a href="/docs/codex-models">Models in Codex</a>, <a href="/docs/gemini-cli-models">Models in Gemini CLI</a>, <a href="/docs/opencode-models">Models in OpenCode</a>. Ask on <a href="https://discord.gg/vGSnD3ZKQF">Discord</a> if you get stuck.</p>
+    <p><b>By provider:</b> <a href="/docs/deepseek">DeepSeek</a> · <a href="/docs/kimi">Kimi and Kimi Code</a> · <a href="/docs/glm">GLM Coding Plan</a> · <a href="/docs/volcengine">Volcengine Ark</a> · <a href="/docs/tencent-cloud">Tencent Cloud</a> · <a href="/docs/baidu-qianfan">Baidu Qianfan</a> · <a href="/docs/siliconflow">SiliconFlow</a> · <a href="/docs/modelscope">ModelScope</a> · <a href="/docs/huaweicloud">Huawei Cloud MaaS</a> · <a href="/docs/xiaomi-mimo">Xiaomi MiMo</a> · <a href="/docs/stepfun">StepFun</a> · <a href="/docs/longcat">LongCat</a> · <a href="/docs/qwen">Qwen</a> · <a href="/docs/minimax">MiniMax</a> · <a href="/docs/anthropic">Anthropic</a> · <a href="/docs/openai">OpenAI</a> · <a href="/docs/grok">Grok</a> · <a href="/docs/mistral">Mistral</a> · <a href="/docs/openrouter">OpenRouter</a> · <a href="/docs/copilot">GitHub Copilot</a> · <a href="/docs/ollama">Ollama</a></p>
+    <p style="margin-top:48px">Every agent: <a href="/docs/claude-code-models">Models in Claude Code</a>, <a href="/docs/codex-models">Models in Codex</a>, <a href="/docs/gemini-cli-models">Models in Gemini CLI</a>, <a href="/docs/opencode-models">Models in OpenCode</a>. To run Google’s Antigravity app on other models, see <a href="/docs/antigravity">Antigravity on any model</a>. Ask on <a href="https://discord.gg/vGSnD3ZKQF">Discord</a> if you get stuck.</p>
   </article>
 </main>
 

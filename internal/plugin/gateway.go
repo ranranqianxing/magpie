@@ -90,6 +90,11 @@ type GatewayContext struct {
 	Session  string `json:"session"`
 	Cwd      string `json:"cwd"`
 	Query    string `json:"query"`
+	// Kind is "subagent" for a request an agent's subagent made, as the
+	// client says it (Claude Code's x-claude-code-agent-id, Codex's
+	// x-openai-subagent), and "" for any other: the main conversation,
+	// and a client that doesn't say. Per request, never per session.
+	Kind string `json:"kind"`
 }
 
 // GatewayState is aggregate diagnostics for this host's lifetime. Outcomes
@@ -242,14 +247,8 @@ func GatewayBegin(ctx context.Context, body []byte, info GatewayContext) *Gatewa
 	checkList()
 	// Provider discovery may already be starting the shared host. Wait within
 	// the same hook budget rather than skipping recall on the first request.
-	wait := time.NewTicker(10 * time.Millisecond)
-	defer wait.Stop()
-	for !hostMu.TryLock() {
-		select {
-		case <-start.Done():
-			return nil
-		case <-wait.C:
-		}
+	if hostMu.LockCtx(start) != nil {
+		return nil
 	}
 	if start.Err() != nil {
 		hostMu.Unlock()
@@ -350,14 +349,8 @@ func GatewaySignIn(ctx context.Context, ev SignInEvent) {
 		start, cancelStart := context.WithTimeout(ctx, gatewayStart)
 		defer cancelStart()
 		checkList()
-		wait := time.NewTicker(10 * time.Millisecond)
-		defer wait.Stop()
-		for !hostMu.TryLock() {
-			select {
-			case <-start.Done():
-				return
-			case <-wait.C:
-			}
+		if hostMu.LockCtx(start) != nil {
+			return
 		}
 		h, err := getLocked(start)
 		hostMu.Unlock()

@@ -28,7 +28,9 @@ const groupUsage = `usage:
                                           models (the whole list, in order, patterns too),
                                           models+=<m>[,m2…] (append), models-=<m>[,m2…] (drop), routing, stays,
                                           context (how long a request agents are told it takes: 272k; smallest
-                                          is its smallest model's; empty is its largest model's), levels (the reasoning levels agents are offered:
+                                          is its smallest model's; empty is its largest model's),
+                                          compact (where Codex and Claude Code compact a conversation on it: 200k;
+                                          empty leaves it to its models' and Long conversations), levels (the reasoning levels agents are offered:
                                           levels=none,low,medium,high,xhigh,max; empty is those every model has —
                                           a model without the one asked is sent its nearest),
                                           family (a tag: magpie visible shows agents families, not each group),
@@ -41,6 +43,8 @@ const groupUsage = `usage:
                                           counting; empty is the 0.4 groups have always asked),
                                           pick=<model> (routing=manual, every request to that one of its models),
                                           fast=<m1>[,m2…] (the models sent in their vendor's fast mode; empty for none),
+                                          ultra=<m1>[,m2…] (those of them sent in the faster Ultrafast mode of a ChatGPT
+                                          account that offers it, priority otherwise; each is made fast too; empty for none),
                                           weight=<m1>=<n>[,m2=<n>…] (each model's share under routing=weight,
                                           1 to 1000; a model not named keeps its own, 1 by default; empty for all 1),
                                           listed=no (its models leave the lists agents see, offered through the
@@ -100,7 +104,8 @@ const groupUsage = `usage:
            order   the first model until it can't answer, then the next
            drain   one account or key until it is used up, then the next, and stays there: an
                    earlier one that renews meanwhile doesn't take the requests back
-           rotate  each conversation's next turn goes to the next member's account or key
+           rotate  each message you send goes to the next member's account or key, its tool calls
+                   staying with it; with stays=session a whole conversation stays on one
            usage   the account or key with the most of its allowance left first
            pace    the account with the most of its week left per hour until it renews first, so less
                    of a week is lost at its reset
@@ -446,7 +451,7 @@ func applyGroupPairs(g *provider.Group, pairs []string, resolve func(string) (st
 			// the whole list, patterns too: what the old ones matched goes
 			g.Members, err = members(v)
 			g.Match, g.Matched = patterns, nil
-			g.Fast = nil // the list as typed: :fast on those sent fast
+			g.Fast, g.Ultra = nil, nil // the list as typed: :fast on those sent fast
 		case "models+", "members+", "model+":
 			var add []string
 			if add, err = members(v); err == nil {
@@ -515,6 +520,15 @@ func applyGroupPairs(g *provider.Group, pairs []string, resolve func(string) (st
 			default:
 				g.Context, err = parseTokens(v)
 			}
+		case "compact", "compact-at":
+			// where Codex and Claude Code compact a conversation on the
+			// group; empty or 0 leaves it to its members' and Settings'
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "", "default", "off":
+				g.Compact = 0
+			default:
+				g.Compact, err = parseTokens(v)
+			}
 		case "levels", "level":
 			// the reasoning levels agents are offered; empty is those every
 			// member has again
@@ -573,6 +587,18 @@ func applyGroupPairs(g *provider.Group, pairs []string, resolve func(string) (st
 					return perr
 				}
 				g.Fast = append(g.Fast, id)
+			}
+		case "ultra":
+			// the fast members sent in the faster mode: each named is fast
+			// too, the rest are not ultra
+			g.Ultra = nil
+			for _, m := range splitIDs(v, inGroup(g.Members)) {
+				m, _ = provider.MemberFast(m)
+				id, perr := pickMember(g.Members, m)
+				if perr != nil {
+					return perr
+				}
+				g.SetMemberTier(id, "ultrafast")
 			}
 		case "weight", "weights":
 			// each member's share when the group routes by weight (#1910):
@@ -1231,7 +1257,9 @@ func showGroup(g provider.Group) error {
 			line = green.Render(fmt.Sprintf("%d %s ●", i+1, typedMember(g, id)))
 		}
 		if l, ok := memberLabel(id, names); ok {
-			if g.IsFast(id) {
+			if g.IsUltra(id) {
+				l += " · ultrafast"
+			} else if g.IsFast(id) {
 				l += " · fast"
 			}
 			if g.Routing == provider.Weighted {

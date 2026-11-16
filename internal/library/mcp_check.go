@@ -551,11 +551,11 @@ func startServer(ctx context.Context, s *Server, distro, dir string) (tree *proc
 	fail := func(h ServerHealth) (*proc.Tree, io.WriteCloser, io.ReadCloser, *tail, func(), *ServerHealth) {
 		return nil, nil, nil, nil, nil, &h
 	}
-	env, unset := expandAll(s.Env)
+	command, args, own := launchCmd(s, distro)
+	env, unset := expandAll(own)
 	if len(unset) > 0 {
 		return fail(failed("novar", strings.Join(unset, ", ")))
 	}
-	command, args := launchCmd(s, distro)
 	var cmd *exec.Cmd
 	var t wslrun.Tool
 	stop = func() {}
@@ -805,6 +805,7 @@ func exitHealth(err error, errs *tail) ServerHealth {
 // remoteHeaders are the server's own headers, with magpie's token when it
 // is signed in to it: the agents reach it with that too.
 func remoteHeaders(ctx context.Context, s *Server) (http.Header, *ServerHealth) {
+	s = s.live()
 	h := http.Header{}
 	headers, unset := expandAll(s.Headers)
 	if len(unset) > 0 {

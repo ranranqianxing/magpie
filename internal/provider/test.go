@@ -38,6 +38,11 @@ type Result struct {
 	// otherAPI: the vendor said the model isn't served on the API asked
 	// (catalog.WrongEndpoint), so another may be asked instead
 	otherAPI bool
+	// Queued is the vendor's queue message when a plugin's model was
+	// queued instead of answered (Qoder's "queued the request for ...").
+	// The model is served, so the test is OK: it waits where an agent's
+	// turn waits it out.
+	Queued string `json:"queued,omitempty"`
 	// V1 is the base the request was answered at once the /v1 it was
 	// typed without was added (missingV1): the editor's URL takes it
 	V1 string `json:"v1,omitempty"`
@@ -258,7 +263,7 @@ func tinyBody(q Provider, proto Protocol, model string) (url, body string) {
 			// Factory's generate route. droid sends no stream field.
 			return q.Base(Gemini) + "/generate", fmt.Sprintf(`{"model":%q,"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`, model)
 		}
-		return q.Gemini + GeminiPath(model, false), `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"maxOutputTokens":16}}`
+		return q.Base(Gemini) + GeminiPath(model, false), `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"maxOutputTokens":16}}`
 	}
 	return "", ""
 }
@@ -420,9 +425,24 @@ func (p Provider) testOne(ctx context.Context, model string) Result {
 	// (AccountsFor; #4992, scutken: a newapi pool's grok-4.7, served by
 	// its third account alone, was asked of the first and failed 503 "no
 	// available channel" while real requests were answered)
-	acct, ok := p.accountFor(model)
-	if !ok {
-		return Result{Model: model, Error: "every account that's on is set not to serve this model"}
+	var acct Provider
+	if ref := testOnRef(ctx); ref != "" && p.Account != nil {
+		// the account the user picked to test (TestOn)
+		var found bool
+		if acct, found = p.accountNamed(ref); !found {
+			return Result{Model: model, Error: fmt.Sprintf("no account %q that's on", ref)}
+		}
+	} else if ref != "" {
+		var found bool
+		if p, found = p.keyNamed(ref); !found {
+			return Result{Model: model, Error: "no such key that's on"}
+		}
+		acct = p
+	} else {
+		var ok bool
+		if acct, ok = p.accountFor(model); !ok {
+			return Result{Model: model, Error: "every account that's on is set not to serve this model"}
+		}
 	}
 	ctx, p = p.loggedAs(ctx, acct), acct
 	if p.isClaudeAccount() {
@@ -784,6 +804,14 @@ func (p Provider) ownRequests(ctx context.Context, kind string) context.Context 
 // write the status alone, so a failed test's row said nothing of why
 // (ysm119 on Discord: "no answer", and no error to find anywhere).
 func probe(ctx context.Context, p Provider, proto Protocol, url string, body []byte, model string, wait time.Duration) Result {
+	r := probeRetried(ctx, p, proto, url, body, model, wait)
+	if r.Account == "" {
+		r.Account = p.testedAccount()
+	}
+	return r
+}
+
+func probeRetried(ctx context.Context, p Provider, proto Protocol, url string, body []byte, model string, wait time.Duration) Result {
 	r := probeAt(ctx, p, proto, url, body, model, wait)
 	if r.Status != http.StatusNotFound {
 		return r
@@ -811,6 +839,14 @@ func probeAt(ctx context.Context, p Provider, proto Protocol, url string, body [
 		// one that reads max_tokens alone) is asked once more with it, as
 		// the gateway asks it (forward)
 		if b, ok := WithTokenField(body, TokenFieldWanted([]byte(r.Error))); ok {
+			return probeOnce(ctx, p, proto, url, b, model, wait)
+		}
+	}
+	if (r.Status == http.StatusBadRequest || r.Status == http.StatusUnprocessableEntity) && StreamRequired([]byte(r.Error)) {
+		// a backend that only streams (a claude-relay-service's
+		// Responses, Cyrus_4433 on X: "Stream must be set to true") is
+		// asked once more streamed, as the gateway asks it
+		if b, ok := WithStream(body); ok {
 			return probeOnce(ctx, p, proto, url, b, model, wait)
 		}
 	}
@@ -1000,6 +1036,14 @@ func probeOnce(ctx context.Context, p Provider, proto Protocol, url string, body
 	}
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 	r.Error = APIError(b, res.Status)
+	if p.IsPlugin() && res.StatusCode == http.StatusServiceUnavailable && res.Header.Get("Retry-After") != "" && strings.Contains(strings.ToLower(r.Error), "queued") {
+		// asked not to wait (FallbackHeader), a plugin says its vendor's
+		// queue at once. A model in a queue is served, and an agent's
+		// turn waits it out: not a failed test (Mr7Faith on X: Qoder's
+		// models were red all day while queued)
+		r.OK, r.Queued, r.Error = true, r.Error, ""
+		return r
+	}
 	r.otherAPI = catalog.WrongEndpoint(res.StatusCode, b)
 	return r
 }
@@ -1122,6 +1166,9 @@ func APIError(b []byte, fallback string) string {
 	}
 	if cmdGoNoAPI.Match(b) {
 		return apiError(b, fallback) + " — " + CommandCodeGoHint
+	}
+	if harnessOnly.Match(b) && !bytes.Contains(b, []byte(HarnessOnlyHint)) {
+		return apiError(b, fallback) + " — " + HarnessOnlyHint
 	}
 	return apiError(b, fallback)
 }
@@ -1294,9 +1341,12 @@ func apiError(b []byte, fallback string) string {
 		}
 		var e struct {
 			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    any    `json:"code"`
+			Param   string `json:"param"`
 		}
 		if json.Unmarshal(v.Error, &e) == nil && e.Message != "" {
-			return e.Message
+			return withErrorFields(e.Message, e.Type, e.Code, e.Param)
 		}
 		var s string
 		if json.Unmarshal(v.Error, &s) == nil && s != "" {
@@ -1325,7 +1375,7 @@ func apiError(b []byte, fallback string) string {
 	// a body in no shape known is shown as it is, cut short, so what the
 	// vendor said isn't lost; other markup (an XML error, a page's
 	// fragment) by its words, its tags taken out
-	s := strings.Join(strings.Fields(string(b)), " ")
+	s := strings.Join(strings.Fields(QuotedReply(b)), " ")
 	if strings.HasPrefix(s, "<") {
 		if s = MarkupText(b); s == "" {
 			return fallback
@@ -1365,6 +1415,30 @@ func PageTitle(b []byte) string {
 
 // tagRe is a markup tag, taken out of a title that holds one.
 var tagRe = lazyre.New(`<[^>]*>`)
+
+// withErrorFields is a vendor's message with the error's own type, code
+// and param after it when the message is only an HTTP status's text
+// ("Bad Request"), which says nothing of what the vendor refused; any
+// other message says it already.
+func withErrorFields(msg, typ string, code any, param string) string {
+	if !statusLine(strings.TrimSpace(msg)) {
+		return msg
+	}
+	var f []string
+	c := ""
+	if code != nil {
+		c = fmt.Sprint(code)
+	}
+	for _, x := range []string{typ, c, param} {
+		if x != "" && !slices.Contains(f, x) {
+			f = append(f, x)
+		}
+	}
+	if len(f) == 0 {
+		return msg
+	}
+	return msg + " (" + strings.Join(f, ", ") + ")"
+}
 
 // statusLine says a fallback is an HTTP error's status ("403 Forbidden",
 // or its text alone, "Forbidden"), what an error body was answered with,

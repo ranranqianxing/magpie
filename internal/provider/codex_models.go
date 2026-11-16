@@ -837,9 +837,10 @@ func CodexNativePicked() (map[string]bool, bool) {
 func CodexNativeWindow(restore bool) func(slug string) (n, most int, ok bool) {
 	p, _ := find(All(), "codex")
 	live, _, _ := catalog.Live("codex")
+	capped := settings.Shared()
 	return func(slug string) (int, int, bool) {
 		if n := p.ContextOf(slug); n > 0 {
-			return n, 0, true
+			return capped.CappedOwn(n), 0, true
 		}
 		if !restore {
 			return 0, 0, false
@@ -849,7 +850,7 @@ func CodexNativeWindow(restore bool) func(slug string) (n, most int, ok bool) {
 				// a list without the max (saved before magpie kept
 				// it) leaves the cache's own; Window still raises it to
 				// the window when it's below
-				return m.Context, m.MaxContext, true
+				return capped.Capped(m.Context), capped.Capped(m.MaxContext), true
 			}
 		}
 		return 0, 0, false
@@ -867,8 +868,9 @@ func CodexNativeWindow(restore bool) func(slug string) (n, most int, ok bool) {
 // Codex Plus account.
 func CodexWindow(user, slug string) int {
 	p, _ := find(All(), "codex")
+	capped := settings.Shared()
 	if n := p.ContextOf(slug); n > 0 {
-		return n
+		return capped.CappedOwn(n)
 	}
 	var lists [][]catalog.Model
 	if user != "" {
@@ -883,7 +885,7 @@ func CodexWindow(user, slug string) int {
 	for _, ms := range lists {
 		for _, m := range ms {
 			if n := catalog.Window(m.Context); m.ID == slug && n > 0 {
-				return n
+				return capped.Capped(n)
 			}
 		}
 	}
@@ -896,6 +898,13 @@ func CodexWindow(user, slug string) int {
 func codexWindowsTag() []catalog.Model {
 	p, _ := find(All(), "codex")
 	var out []catalog.Model
+	if n := settings.Shared().ContextCap; n > 0 {
+		id := "~cap"
+		if settings.Shared().ContextCapAll {
+			id = "~capall"
+		}
+		out = append(out, catalog.Model{ID: id, Context: n})
+	}
 	for _, k := range slices.Sorted(maps.Keys(p.Contexts)) {
 		out = append(out, catalog.Model{ID: "=" + k, Context: p.Contexts[k]})
 	}
@@ -1044,7 +1053,7 @@ func CodexTiers(m *catalog.Model, e Entry, members func(id string) []Member) {
 	}
 	// so is a model of its own that has one, which no tier above names
 	// (an Anthropic key's Opus, an OpenAI key's GPT, a Cursor account's)
-	if len(m.Tiers) == 0 && CanFast(e.Provider, e.Model) {
+	if len(m.Tiers) == 0 && CanFast(*e.Provider, e.Model) {
 		m.Tiers = []string{codexFastTier}
 	}
 }
@@ -1056,7 +1065,7 @@ func CodexTiers(m *catalog.Model, e Entry, members func(id string) []Member) {
 // none.
 func CodexSeals(m *catalog.Model, e Entry, members func(id string) []Member) {
 	if e.Group == "" {
-		m.Seals = maySeal(e.Provider)
+		m.Seals = maySeal(*e.Provider)
 		return
 	}
 	for _, mb := range members(e.ID) {

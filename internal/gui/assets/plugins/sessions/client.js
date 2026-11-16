@@ -29,6 +29,13 @@ magpie.plugin("sessions", (ctx) => {
   let found = null;       // { agent, needle, hits: Map(id -> hit), busy, cut, unread, searched, total, error }
   let searchCtl = null;
   let searchT = 0;
+  // elsewhere is the same words in every other agent's sessions, from
+  // magpie's index of what was said (cryingLiu on X): { needle, hits,
+  // indexed, total, busy }, read again while the index is still being made
+  let elsewhere = null;
+  let elseCtl = null;
+  let elseT = 0;
+  const ELSE_MORE = 20;
   const SEARCH_WAIT = 300;
   const needleOf = (q) => q.trim().split(/\s+/).filter(Boolean).join(" ").toLowerCase();
   let trashOn = false;
@@ -42,7 +49,7 @@ magpie.plugin("sessions", (ctx) => {
   const folderBoxes = new Map(); // each folder's box as drawn, by cwd
   let openedFor = "";         // the agent the folders were first unfolded for
   let detail = "";            // the session opened to its details
-  const talkOpen = new Set(); // sessions whose conversation is shown, by agent/id
+  const talkOpen = new Set(); // conversations whose sheet was opened, by agent/id
   const talks = new Map();    // what was said in them, as read, by agent/id
   // A session's subagents sit under it, folded (#2261): the conversations
   // its agent started inside it (Claude Code, Qoder, OpenCode, Kimi Code:
@@ -66,6 +73,12 @@ magpie.plugin("sessions", (ctx) => {
   let speeds = new Map();
   let speedT = 0;
   let speedBusy = false;
+  // speedSkips: ticks left before the next ask while no session has a
+  // speed: nothing heard in curveForget, so a new one's curve, kept by
+  // the gateway, shows within speedRestTicks seconds, and a resting page
+  // asks a fifth as often
+  let speedSkips = 0;
+  const speedRestTicks = 5;
   let speedPop = null;    // { anchor, draw } of the popover open
   let focus = null;           // { agent, id, until }: a session to bring into sight once drawn
   let recordingBusy = false;
@@ -106,8 +119,13 @@ magpie.plugin("sessions", (ctx) => {
   const DRAFTS = "\x00drafts";
   const zcodeDraft = (s) => {
     const home = (data?.home || "").replace(/\\/g, "/").replace(/\/+$/, "");
-    if (!home || s.agent !== "zcode" || !s.cwd) return false;
+    if (!s.cwd) return false;
     const c = s.cwd.replace(/\\/g, "/");
+    // Codex Desktop makes ~/Documents/Codex/<date>/<name> for every chat
+    // started without a project (its outputs/ and work/), and Codex also
+    // runs in temp folders and worktrees
+    if (s.agent === "codex") return /\/Documents\/Codex\/\d{4}-\d{2}-\d{2}\//i.test(c) || scratch(s.cwd);
+    if (!home || s.agent !== "zcode") return false;
     return c === home + "/.zcode/workspace" || c.startsWith(home + "/.zcode/workspace/");
   };
   const groupOf = (s) => zcodeDraft(s) ? DRAFTS : s.cwd || (s.gateway ? GW : "");
@@ -239,8 +257,10 @@ magpie.plugin("sessions", (ctx) => {
       searchCtl?.abort();
       searchCtl = null;
       found = null;
+      elseSoon("");
       return;
     }
+    elseSoon(needle);
     if (found && found.agent === data.agent && found.needle === needle && !found.busy && !found.error) return;
     searchCtl?.abort();
     searchCtl = null;
@@ -260,6 +280,77 @@ magpie.plugin("sessions", (ctx) => {
     }, SEARCH_WAIT);
   }
 
+  // elseSoon searches every agent's sessions for needle (none in gateway
+  // mode, where no agent's files here are read), once typing pauses, and
+  // again a few seconds on while magpie's index has sessions to read yet
+  function elseSoon(needle, again = 0) {
+    clearTimeout(elseT);
+    if (!needle || data?.reads?.gateway) {
+      elseCtl?.abort();
+      elseCtl = null;
+      elsewhere = null;
+      return;
+    }
+    if (!again && elsewhere?.needle === needle && !elsewhere.error) return;
+    elseCtl?.abort();
+    elseCtl = null;
+    const mine = elsewhere = again ? elsewhere : { needle, hits: [], busy: true };
+    elseT = setTimeout(async () => {
+      const ctl = elseCtl = new AbortController();
+      try {
+        const r = await api(`sessions/said?q=${encodeURIComponent(needle)}&limit=${ELSE_MORE + 10}`, undefined, undefined, ctl.signal);
+        if (elsewhere !== mine) return;
+        elsewhere = { needle, busy: false, hits: r?.hits || [], indexed: r?.indexed || 0, total: r?.total || 0, listing: !!r?.listing };
+        if ((elsewhere.listing || elsewhere.indexed < elsewhere.total) && again < 40) {
+          const now = elsewhere;
+          elseT = setTimeout(() => { if (elsewhere === now) { elsewhere = { ...now }; elseSoon(needle, again + 1); } }, 3000);
+        }
+      } catch (e) {
+        if (ctl.signal.aborted || elsewhere !== mine) return;
+        elsewhere = { needle, busy: false, hits: [], error: e.message };
+      }
+      if (elseCtl === ctl) elseCtl = null;
+      if (view === "sessions" && !trashOn) redrawList();
+    }, again ? 0 : SEARCH_WAIT);
+  }
+  // the hits elsewhere shown with the agent shown: those of other agents
+  const elseHits = () => elsewhere && elsewhere.needle === needleOf(query) && data ? elsewhere.hits.filter((h) => h.agent !== data.agent).slice(0, ELSE_MORE) : [];
+
+  // elseBox is the sessions of other agents that said what was searched
+  // for; a click shows the conversation at the words
+  function elseBox() {
+    const f = elsewhere && elsewhere.needle === needleOf(query) ? elsewhere : null;
+    const hits = elseHits();
+    const still = f && !f.busy && (f.listing || f.indexed < f.total);
+    if (!f || (!hits.length && !still)) return null;
+    const box = el("div", "list sm-else");
+    const h = el("div", "row sm-else-head");
+    h.append(el("span", "name", t("Other agents")));
+    if (still) h.append(el("span", "note", f.listing ? t("Indexing sessions…") : t("Indexing {n} of {total} sessions…", { n: f.indexed, total: f.total })));
+    box.append(h);
+    for (const x of hits) {
+      const r = el("button", "row sess sm-else-row");
+      r.type = "button";
+      r.dataset.agent = x.agent;
+      r.dataset.id = x.id;
+      r.setAttribute("aria-haspopup", "dialog");
+      const a = agentOf(x.agent);
+      const who = el("span", "who");
+      const s = { agent: x.agent, id: x.id, title: x.title || x.id };
+      who.append(el("span", "name", x.title || t("(no prompt)")),
+        el("span", "sub", [a.name, x.last ? ago(x.last) : "", x.wsl ? "WSL " + x.wsl : "", x.cwd || ""].filter(Boolean).join(" · ")),
+        hitLine(x.hit));
+      r.append(icon(a.icon), who);
+      r.onclick = (e) => {
+        e.stopPropagation();
+        if (window.getSelection()?.toString()) return;
+        talkSheet(s, null, f.needle);
+      };
+      box.append(r);
+    }
+    return box;
+  }
+
   // what the search is doing, above the list, when it says more than the
   // rows do
   function searchNote() {
@@ -276,11 +367,21 @@ magpie.plugin("sessions", (ctx) => {
     return p;
   }
 
-  // the words round where a session said what was searched for
-  function hitLine(h) {
-    const d = el("div", "sub sm-hit");
+  // the words round where a session said what was searched for; given
+  // its session, a click shows the conversation there
+  function hitLine(h, s) {
+    const d = el(s ? "button" : "div", "sub sm-hit");
     d.append(h.before || "", el("mark", "", h.match), h.after || "");
     d.title = (h.before || "") + h.match + (h.after || "");
+    if (s) {
+      d.type = "button";
+      d.setAttribute("aria-haspopup", "dialog");
+      d.onclick = (e) => {
+        e.stopPropagation();
+        if (window.getSelection()?.toString()) return;
+        talkSheet(s, null, needleOf(query));
+      };
+    }
     return d;
   }
 
@@ -384,7 +485,7 @@ magpie.plugin("sessions", (ctx) => {
         if (!await confirmAction(t("Stop recording and clear saved conversations"), t("Delete all locally recorded gateway conversation content? Usage totals and native session files are kept."), t("Delete"))) return;
         recordingBusy = true;
         clear.disabled = true;
-        try { await api("sessions/recording", { clear: true }); talks.clear(); await load(); }
+        try { await api("sessions/recording", { clear: true }); talks.clear(); await load(); for (const b of document.querySelectorAll(".sess-sheet .sess-talk")) b.again?.(); }
         catch (err) { status(err.message, "err"); }
         finally { recordingBusy = false; draw(); }
       };
@@ -584,6 +685,13 @@ magpie.plugin("sessions", (ctx) => {
         ? "These {agent} sessions were seen only through magpie's gateway: {agent}'s own files of them aren't on this computer (it may run on another one, in a container or with another config folder), so they can't be resumed here. Delete takes one off this list and moves any conversation magpie recorded of it to its trash; Usage keeps what it spent."
         : "Sessions under \"Seen through the gateway\" have no {agent} files on this computer, so they can't be resumed here. Delete takes one off this list and moves any conversation magpie recorded of it to its trash; Usage keeps what it spent.", { agent: a.name })));
     }
+    // output speed is measured as the reply streams through the gateway; a
+    // session file has no per-token times, so with none of the rows measured
+    // the page says where the speed is and where the files' own figures are
+    // (simonzyzy on X: sessions with no provider set up)
+    if (!data.reads?.gateway && data.sessions.length && !data.sessions.some((s) => speedOf(s))) {
+      box.append(el("p", "usage-note sm-note sm-speed-note", t("Live output speed is measured on requests that go through magpie's gateway. For agents that don't, each call's tokens and time are in Usage › Requests, read from their session files.")));
+    }
     const prov = providerBar();
     if (prov) box.append(prov);
     box.append(selectBar(), el("div", "sm-tree"));
@@ -600,7 +708,10 @@ magpie.plugin("sessions", (ctx) => {
 
   function providerBar() {
     if (data.agent !== "codex") return null;
-    const hidden = data.sessions.filter(otherProvider);
+    // Codex's own threads only: its review and title threads (role
+    // subagent) never show in its history, so they are no conversations
+    // to move
+    const hidden = data.sessions.filter((s) => otherProvider(s) && s.role !== "subagent");
     const undo = lastMove?.agent === data.agent && lastMove.moved.length ? lastMove : null;
     if (!hidden.length && !undo) return null;
     const bar = el("div", "row sm-provider");
@@ -648,7 +759,10 @@ magpie.plugin("sessions", (ctx) => {
     if (out.refused.length) {
       const first = out.refused[0], s = data.sessions.find((x) => x.id === first.id);
       const active = out.refused.filter((r) => r.active);
+      // one that can't move at all says why, and what can be done instead
+      const stuck = out.refused.find((r) => r.stuck), ss = stuck && data.sessions.find((x) => x.id === stuck.id);
       status(active.length ? t(active.length === 1 ? "{title} is still being written to; close it in {agent} and try again in a minute" : "{n} sessions are still being written to; close them in {agent} and try again in a minute", { title: s?.title || first.id, n: active.length, agent: "Codex" })
+        : stuck ? t("{title} can't be moved: Codex keeps its history by byte and has no record of it in its database to move it by. It stays on {from}, unchanged, and Codex lists it when it uses {from} again. To clear it from here, delete it: it goes to magpie's trash and can be restored.", { title: ss?.title || stuck.id, from: stuck.from })
         : (s?.title || first.id) + ": " + first.error, "err");
     }
     return out;
@@ -791,8 +905,10 @@ magpie.plugin("sessions", (ctx) => {
     folderBoxes.clear();
     const note = searchNote();
     if (note) tree.append(note);
+    const others = elseBox();
     if (!list.length) {
       if (!search()?.busy) tree.append(el("div", "empty-state", query ? t("No session matches.") : t("No sessions yet")));
+      if (others) tree.append(others);
       return;
     }
     const q = query.trim();
@@ -810,6 +926,7 @@ magpie.plugin("sessions", (ctx) => {
       tree.append(box);
     }
     if (rest.length) tree.append(othersBox(rest, q));
+    if (others) tree.append(others);
     toFocus();
   }
 
@@ -966,7 +1083,7 @@ magpie.plugin("sessions", (ctx) => {
         openRowMenu(more, acts);
       };
       r.append(more);
-      r.oncontextmenu = (e) => { e.preventDefault(); openRowMenu(more, acts); };
+      r.oncontextmenu = (e) => { e.preventDefault(); openRowMenu(more, acts, { x: e.clientX, y: e.clientY }); };
     } else r.append(folderSlot());
 
     r.title = path;
@@ -1066,7 +1183,7 @@ magpie.plugin("sessions", (ctx) => {
     // nothing of it otherwise (the group of them is one)
     if (zcodeDraft(s)) r.title = s.cwd;
     const hit = hitOf(s);
-    if (hit) who.append(hitLine(hit));
+    if (hit) who.append(hitLine(hit, s.transcript ? s : null));
     // what it spent, as the Usage page's list shows it
     r.append(who, ...sessSpent(s));
     r.append(speedCell(s));
@@ -1215,7 +1332,6 @@ magpie.plugin("sessions", (ctx) => {
   // subRow is one subagent of s: what it was asked, the agent it ran as,
   // and a click shows what was said in it
   function subRow(s, sa, d) {
-    const k = s.agent + "/" + s.id + "/" + sa.id;
     const wrap = el("div", "sm-sub");
     wrap.style.setProperty("--sub-in", String(d));
     const r = el("button", "row sm-sub-row");
@@ -1225,23 +1341,13 @@ magpie.plugin("sessions", (ctx) => {
     who.append(el("span", "name", sa.title || sa.kind || sa.id),
       el("span", "sub", [sa.title ? sa.kind : "", sa.last || sa.start ? ago(sa.last || sa.start) : "", sa.id.slice(0, 8)].filter(Boolean).join(" · ")));
     r.append(who);
-    const box = el("div", "sess-talk");
-    box.dataset.talk = k;
-    const show = () => {
-      const on = talkOpen.has(k);
-      r.setAttribute("aria-expanded", String(on));
-      wrap.classList.toggle("open", on);
-      box.hidden = !on;
-      if (on) drawTalk(box, s, sa.id);
-    };
+    r.setAttribute("aria-haspopup", "dialog");
     r.onclick = (e) => {
       e.stopPropagation();
       if (window.getSelection()?.toString()) return;
-      if (talkOpen.has(k)) talkOpen.delete(k); else talkOpen.add(k);
-      show();
+      talkSheet(s, sa);
     };
-    wrap.append(r, box);
-    show();
+    wrap.append(r);
     return wrap;
   }
 
@@ -1272,26 +1378,11 @@ magpie.plugin("sessions", (ctx) => {
     sessUsageDetail(d, s, line);
     if (s.path) line(t("File"), s.path + (s.files > 1 ? " " + t("+{n} more", { n: s.files - 1 }) : ""));
     if (s.transcript) {
-      const box = el("div", "sess-talk");
-      box.dataset.talk = s.agent + "/" + s.id;
-      const b = el("button", "text sess-talk-btn");
+      const b = el("button", "text sess-talk-btn", t("Show conversation"));
       b.type = "button";
-      const show = () => {
-        const on = talkOpen.has(s.agent + "/" + s.id);
-        b.textContent = t(on ? "Hide conversation" : "Show conversation");
-        b.setAttribute("aria-expanded", String(on));
-        box.hidden = !on;
-        if (on) drawTalk(box, s);
-      };
-      b.onclick = (e) => {
-        e.stopPropagation();
-        const k = s.agent + "/" + s.id;
-        if (talkOpen.has(k)) talkOpen.delete(k); else talkOpen.add(k);
-        show();
-      };
+      b.setAttribute("aria-haspopup", "dialog");
+      b.onclick = (e) => { e.stopPropagation(); talkSheet(s); };
       line(t("Conversation"), b, exportBtn(s));
-      d.append(box);
-      show();
     }
     return d;
   }
@@ -1383,8 +1474,8 @@ magpie.plugin("sessions", (ctx) => {
 
   // drawTalk fills box with what was said in a session, read from the
   // agent's own file when it is first shown (only read, never written)
-  function drawTalk(box, s, sub = "") {
-    const k = s.agent + "/" + s.id + (sub ? "/" + sub : "");
+  function drawTalk(box, s, sub = "", find = "") {
+    const k = s.agent + "/" + s.id + (sub ? "/" + sub : "") + (find ? "?" + find : "");
     const got = talks.get(k);
     if (!got) {
       box.replaceChildren(el("p", "cx-none", t("Reading…")));
@@ -1395,11 +1486,11 @@ magpie.plugin("sessions", (ctx) => {
         if (talks.get(k) !== pending) return;
         talks.set(k, value);
         if (!talkOpen.has(k)) return;
-        for (const currentBox of page.querySelectorAll(".sess-talk")) {
-          if (currentBox.dataset.talk === k) drawTalk(currentBox, s, sub);
+        for (const currentBox of document.querySelectorAll(".sess-talk")) {
+          if (currentBox.dataset.talk === k) drawTalk(currentBox, s, sub, find);
         }
       };
-      api("sessions/transcript?agent=" + encodeURIComponent(s.agent) + "&id=" + encodeURIComponent(s.id) + (sub ? "&sub=" + encodeURIComponent(sub) : ""))
+      api("sessions/transcript?agent=" + encodeURIComponent(s.agent) + "&id=" + encodeURIComponent(s.id) + (sub ? "&sub=" + encodeURIComponent(sub) : "") + (find ? "&find=" + encodeURIComponent(find) : ""))
         .then((tr) => finish({ tr }), (err) => finish({ err: err.message }));
       return;
     }
@@ -1407,11 +1498,13 @@ magpie.plugin("sessions", (ctx) => {
     if (got.err) { box.replaceChildren(el("p", "cx-none", got.err)); talks.delete(k); return; }
     const parts = got.tr?.parts || [];
     const out = [];
+    // read from where the words were said, the start left out
+    if (got.tr?.from > 0) out.push(el("p", "cx-none sess-from", t(got.tr.from === 1 ? "{n} earlier message not shown" : "{n} earlier messages not shown", { n: got.tr.from })));
     if (!parts.length) out.push(el("p", "cx-none", t(got.tr?.source === "gateway" ? "No saved gateway content for this session" : "Nothing was said here")));
     // each reply names its model once, at its first part, and again
     // only where the model changes inside it (#2253): the model its own
     // line in the agent's file names, so none where the file names none
-    let said = "", fresh = true;
+    let said = "", fresh = true, foundOne = false;
     for (const p of parts) {
       let model = "";
       if (p.role === "assistant") {
@@ -1419,11 +1512,110 @@ magpie.plugin("sessions", (ctx) => {
         said = p.model || "";
         fresh = false;
       } else if (p.role === "user") fresh = true;
-      out.push(ledSaid(p, model));
+      const said1 = ledSaid(p, model);
+      if (p.role === "user" && (!p.kind || p.kind === "text")) said1.dataset.turn = "1";
+      if (find && !foundOne && (!p.kind || p.kind === "text" || p.kind === "context") && needleOf(p.text || "").includes(find)) { said1.classList.add("sess-found"); foundOne = true; }
+      out.push(said1);
     }
     if (got.tr?.cut) out.push(el("p", "cx-none", t("There was more than is shown here")));
     out.push(el("p", "cx-src", t(got.tr?.source === "gateway" ? "Recorded gateway traffic only; earlier, expired or uncaptured content may be missing" : "Read from the agent's session file; magpie keeps no copy")));
     box.replaceChildren(...out);
+    box.dispatchEvent(new Event("talkdrawn"));
+  }
+
+  // talkSheet shows a session's conversation (or a subagent's, sa) in a
+  // sheet of its own, long as it may be, with the turns to jump between and
+  // the top and bottom in its head (Wing8Aqua on X: the inline list was too
+  // long to get around). A turn is what the user said; the sheet scrolls
+  // to it, with no animation, as a key pressed many times would.
+  const NAV = { top: "M4 3.5h8M8 13V6.5M5 9 8 6l3 3", prev: "M4.5 10 8 6.5l3.5 3.5", next: "M4.5 6 8 9.5 11.5 6", bottom: "M4 12.5h8M8 3v6.5M5 7 8 10l3-3" };
+  function talkSheet(s, sa, find = "") {
+    const k = s.agent + "/" + s.id + (sa ? "/" + sa.id : "") + (find ? "?" + find : "");
+    talkOpen.add(k);
+    if (globalThis.CSS?.highlights) CSS.highlights.delete("sess-found");
+    const ed = el("div", "editor sess-sheet wide");
+    const head = el("div", "ehead");
+    const nav = (name, label) => {
+      const b = el("button", "sess-nav");
+      b.type = "button";
+      b.dataset.nav = name;
+      b.title = label;
+      b.setAttribute("aria-label", label);
+      b.append(svg(NAV[name], 14, 1.6));
+      return b;
+    };
+    const top = nav("top", t("Top")), prev = nav("prev", t("Previous turn")), next = nav("next", t("Next turn")), bottom = nav("bottom", t("Bottom"));
+    const count = el("span", "sess-turns");
+    head.append(icon(agentOf(s.agent).icon), el("b", "", (sa ? sa.title || sa.kind || sa.id : s.title || s.id)), el("span", "grow"), count, top, prev, next, bottom);
+    const box = el("div", "sess-talk");
+    box.dataset.talk = k;
+    const bar = el("div", "bar");
+    const close = el("button", "text primary", t("Close"));
+    close.type = "button";
+    close.onclick = (e) => { e.stopPropagation(); closeConfirmAsk(); };
+    bar.append(el("span", "grow"), close);
+    ed.append(head, box, bar);
+    confirmAsk = ed;
+    openModal(ed);
+    $("#modal").classList.add("lib");
+    const body = ed.querySelector(":scope > .ebody");
+    const turns = () => [...box.querySelectorAll("[data-turn]")];
+    const at = (n) => n.getBoundingClientRect().top - body.getBoundingClientRect().top + body.scrollTop;
+    const SLACK = 8;
+    const sync = () => {
+      const ts = turns(), y = body.scrollTop;
+      const tops = ts.map(at);
+      const atEnd = y + body.clientHeight >= body.scrollHeight - 1;
+      const here = ts.length ? (atEnd ? ts.length : Math.max(1, tops.filter((x) => x <= y + SLACK).length)) : 0;
+      count.hidden = !ts.length;
+      count.textContent = here + " / " + ts.length;
+      prev.disabled = !tops.some((x) => x < y - SLACK);
+      next.disabled = here >= ts.length;
+      top.disabled = y <= 0;
+      bottom.disabled = atEnd;
+    };
+    const go = (y) => { body.scrollTo({ top: y, behavior: "instant" }); sync(); };
+    top.onclick = () => go(0);
+    bottom.onclick = () => go(body.scrollHeight);
+    prev.onclick = () => { const y = body.scrollTop - SLACK, c = turns().map(at).filter((x) => x < y); if (c.length) go(c[c.length - 1]); };
+    next.onclick = () => { const tops = turns().map(at), y = body.scrollTop + SLACK, c = tops[Math.max(1, tops.filter((x) => x <= y).length)]; if (c !== undefined) go(c); };
+    let queued = 0;
+    body.addEventListener("scroll", () => { if (!queued) queued = requestAnimationFrame(() => { queued = 0; sync(); }); });
+    box.addEventListener("talkdrawn", sync);
+    // opened at a search's words: the sheet starts at the message that
+    // said them, once, as it is first drawn
+    let toFound = !!find;
+    box.addEventListener("talkdrawn", () => {
+      const at1 = toFound && box.querySelector(".sess-found");
+      if (!at1) return;
+      toFound = false;
+      markFound(at1, find);
+      go(Math.max(0, at(at1) - SLACK));
+    });
+    box.again = () => drawTalk(box, s, sa ? sa.id : "", find);
+    box.again();
+    sync();
+    body.focus({ preventScroll: true });
+  }
+
+  // markFound marks the words searched for in the message n where the
+  // browser can (CSS Custom Highlight API), never changing what is drawn
+  function markFound(n, find) {
+    if (typeof Highlight === "undefined" || !CSS.highlights) return;
+    const words = find.split(" ").filter(Boolean);
+    const ranges = [];
+    const walk = document.createTreeWalker(n, NodeFilter.SHOW_TEXT);
+    for (let tn = walk.nextNode(); tn && ranges.length < 50; tn = walk.nextNode()) {
+      const low = tn.data.toLowerCase();
+      for (const w of words) {
+        for (let i = low.indexOf(w); i >= 0 && ranges.length < 50; i = low.indexOf(w, i + w.length)) {
+          const r = new Range();
+          try { r.setStart(tn, i); r.setEnd(tn, i + w.length); } catch { continue; }
+          ranges.push(r);
+        }
+      }
+    }
+    if (ranges.length) CSS.highlights.set("sess-found", new Highlight(...ranges));
   }
 
   function askRelocate(from, wsl) {
@@ -1513,7 +1705,8 @@ magpie.plugin("sessions", (ctx) => {
     if (list.length > 5) names.append(el("li", "more", t("+{n} more", { n: list.length - 5 })));
     ed.append(names);
     // a gateway session has no files of its agent's here: say what goes
-    if (list.some((s) => !s.gateway)) ed.append(el("p", "lib-confirm", t("Their files are moved to magpie's trash ({dir}), not erased: Trash puts them back. A session written to in the last minute is left alone, as {agent} may still be running it.", { dir: data.trashDir, agent: a.name })));
+    if (list.some((s) => !s.gateway && !s.forget)) ed.append(el("p", "lib-confirm", t("Their files are moved to magpie's trash ({dir}), not erased: Trash puts them back. A session written to in the last minute is left alone, as {agent} may still be running it.", { dir: data.trashDir, agent: a.name })));
+    if (list.some((s) => s.forget)) ed.append(el("p", "lib-confirm", t("{agent} isn't installed here. These sessions leave this list; its own files are not touched, and Trash puts them back.", { agent: a.name })));
     if (list.some((s) => s.gateway)) ed.append(el("p", "lib-confirm sm-gw-confirm", t("A session seen only through the gateway leaves this list, and any conversation magpie recorded of it is moved to magpie's trash ({dir}): Trash puts it back. {agent}'s own files elsewhere are not touched, and Usage keeps what it spent. One with a request in the last minute is left alone.", { dir: data.trashDir, agent: a.name })));
     const bar = el("div", "bar");
     const go = el("button", "text primary danger-fill", t("Delete"));
@@ -1626,8 +1819,8 @@ magpie.plugin("sessions", (ctx) => {
         r.append(icon(x.icon));
         const who = el("div", "who");
         who.append(el("div", "name", x.title || x.id));
-        who.append(el("div", "sub", [x.name, x.gateway ? t("Seen through the gateway") : x.cwd ? baseName(x.cwd) : "", t("deleted {when}", { when: ago(x.deleted) }),
-          x.gateway ? (x.size ? t("{size} recorded", { size: fmtBytes(x.size) }) : "") : fmtBytes(x.size)].filter(Boolean).join(" · ")));
+        who.append(el("div", "sub", [x.name, x.forgot ? t("Taken off the list") : x.gateway ? t("Seen through the gateway") : x.cwd ? baseName(x.cwd) : "", t("deleted {when}", { when: ago(x.deleted) }),
+          x.forgot ? "" : x.gateway ? (x.size ? t("{size} recorded", { size: fmtBytes(x.size) }) : "") : fmtBytes(x.size)].filter(Boolean).join(" · ")));
         who.title = (x.items || []).map((i) => i.from).join("\n");
         r.append(who);
         const b = el("button", "sess-resume sm-restore");
@@ -1797,16 +1990,19 @@ magpie.plugin("sessions", (ctx) => {
   async function speedTick() {
     if (!speedsShown()) { clearInterval(speedT); speedT = 0; return; }
     if (speedBusy) return;
+    if (speedSkips > 0) { speedSkips--; return; }
     speedBusy = true;
     try {
       const list = await api("speeds");
       speeds = new Map((Array.isArray(list) ? list : []).map((sp) => [sp.agent + "|" + sp.session, sp]));
     } catch { return; } finally { speedBusy = false; }
+    if (!speeds.size) speedSkips = speedRestTicks - 1;
     page?.querySelectorAll(".sm-speed").forEach(fillSpeed);
     speedPop?.draw();
   }
   function speedsOn() {
     if (speedT || !speedsShown()) return;
+    speedSkips = 0;
     speedT = setInterval(speedTick, 1000);
     speedTick();
   }

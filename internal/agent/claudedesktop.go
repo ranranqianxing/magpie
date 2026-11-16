@@ -120,15 +120,12 @@ func desktopUsualSets(goos, home string, getenv func(string) string) []desktopPa
 // DesktopConfigs3p are the claude_desktop_config.json files Claude Desktop
 // reads in its 3p mode: there its whole userData is Claude-3p, its MCP
 // servers too (%LOCALAPPDATA%\Claude-3p on Windows, and the MSIX package's;
-// Claude-3p beside Claude elsewhere), and the isolated Desktop's
-// Claude-Magpie-3p on a Mac, whose only file it is (the library gives it
-// the servers where that folder is).
+// Claude-3p beside Claude elsewhere). The isolated Desktop's
+// Claude-Magpie-3p is not one of them: the library gives it servers of
+// its own (DesktopTwinApp).
 func DesktopConfigs3p(home string) []string {
 	var out []string
 	for _, p := range desktopUsualSets(desktopdir.OS, home, os.Getenv) {
-		out = append(out, p.config3p)
-	}
-	if p, ok := desktopIsolatedSet(desktopdir.OS, home, os.Getenv); ok {
 		out = append(out, p.config3p)
 	}
 	return out
@@ -190,6 +187,7 @@ func claudeDesktop(home string) *Agent {
 			}
 			return ""
 		},
+		Gateway: desktopGateway,
 		Fields: append([]Field{{
 			Key: "provider", Label: "provider",
 			Get: func() string {
@@ -198,39 +196,12 @@ func claudeDesktop(home string) *Agent {
 				}
 				return ""
 			},
-			Set: func(v string) error {
-				on := desktopOn
-				if v == "" {
-					on = desktopOff
-				}
-				desktopAdoptStash(ps)
-				src := desktopLocaleFrom(ps)
-				for _, p := range ps {
-					if src != "" {
-						p.app = src
-					}
-					if err := on(p); err != nil {
-						return err
-					}
-				}
-				// its Code tab is Claude Code, told what Desktop's ids for
-				// magpie's models can do while that one runs on magpie
-				_ = claude(home).Sync()
-				// and a running distro's, which a Code tab session with
-				// WSL as its host runs on (a stopped one is written on
-				// the round after it starts)
-				for _, a := range wslAgents() {
-					if strings.HasPrefix(a.ID, "claude@wsl:") && a.Sync != nil {
-						_ = a.Sync()
-					}
-				}
-				return nil
-			},
+			Set: func(v string) error { return desktopApply(home, ps, v) },
 			Options: func(map[string]string) []Option {
 				return []Option{{Value: magpieID, Label: "magpie", Icon: "magpie",
 					Note: "Desktop's third-party gateway: Code and Cowork on magpie's models, no Anthropic sign-in (restart Desktop)"}}
 			},
-		}}, append(desktopTierFields(home, ps), desktopSubagentField(ps), desktopSubagentEffortField(ps))...),
+		}, desktopGatewayField(ps, func() error { return desktopApply(home, ps, magpieID) })}, append(desktopTierFields(home, ps), desktopSubagentField(ps), desktopSubagentEffortField(ps))...),
 		// a Desktop already on magpie gets the import and tool search
 		// policies too (desktopSeedImport, desktopSeedToolSearch), and a
 		// profile for magpie's gateway it applies a key the gateway takes
@@ -334,7 +305,8 @@ func desktopCheck(p desktopPaths) string {
 	if !desktop3p(p, prof) {
 		return "Claude Desktop's deploymentMode (Claude-3p/claude_desktop_config.json) is 1p now, so it signs in with Anthropic rather than using magpie"
 	}
-	want := agentKey("claude-desktop")
+	gw := desktopGateway()
+	want := desktopKey(gw)
 	return wiringOff("Claude Desktop", prof, func(k string) (string, bool) {
 		v, ok := edit.GetJSON(prof, k)
 		if k != "inferenceGatewayApiKey" {
@@ -351,7 +323,7 @@ func desktopCheck(p desktopPaths) string {
 			return want, true // a key of magpie's other than Desktop's own
 		}
 		return open, ok
-	}, "inferenceGatewayBaseUrl", gateway.URL(), "inferenceGatewayApiKey", want)
+	}, "inferenceGatewayBaseUrl", gw, "inferenceGatewayApiKey", want)
 }
 
 // desktop3p: Desktop starts in its 3p mode with prof, the gateway profile
@@ -420,7 +392,7 @@ func desktopKeyApplied(p desktopPaths) error {
 	if f == "" {
 		return nil
 	}
-	want := agentKey("claude-desktop")
+	want := desktopKey(desktopGateway())
 	v, _ := edit.GetJSON(f, "inferenceGatewayApiKey")
 	// a key Desktop sealed that magpie can't open is left as it is
 	if open, known := desktopOpen("inferenceGatewayApiKey", v); !known || desktopKeyTaken(open, want) {
@@ -431,6 +403,37 @@ func desktopKeyApplied(p desktopPaths) error {
 		kvs = append(kvs, edit.KV{Path: "inferenceGatewayAuthScheme", Value: "bearer"})
 	}
 	return edit.SetJSON(f, kvs...)
+}
+
+// desktopApply turns Desktop's wiring on for v == magpieID, off for "",
+// or writes it again where the address or key changed.
+func desktopApply(home string, ps []desktopPaths, v string) error {
+	on := desktopOn
+	if v == "" {
+		on = desktopOff
+	}
+	desktopAdoptStash(ps)
+	src := desktopLocaleFrom(ps)
+	for _, p := range ps {
+		if src != "" {
+			p.app = src
+		}
+		if err := on(p); err != nil {
+			return err
+		}
+	}
+	// its Code tab is Claude Code, told what Desktop's ids for
+	// magpie's models can do while that one runs on magpie
+	desktopClaudeSync(home)
+	// and a running distro's, which a Code tab session with
+	// WSL as its host runs on (a stopped one is written on
+	// the round after it starts)
+	for _, a := range wslAgents() {
+		if strings.HasPrefix(a.ID, "claude@wsl:") && a.Sync != nil {
+			_ = a.Sync()
+		}
+	}
+	return nil
 }
 
 // desktopTierFields pick the model each of Claude Code's tiers runs on in
@@ -465,7 +468,7 @@ func desktopTierFields(home string, ps []desktopPaths) []Field {
 					}
 				}
 				if desktopWiredAny(ps) {
-					_ = claude(home).Sync()
+					desktopClaudeSync(home)
 				}
 				return joinErrs(errs)
 			},
@@ -616,11 +619,12 @@ const (
 	desktopLocale  = "claude-desktop.locale"
 	desktopImport  = "claude-desktop.import"
 	desktopSearch  = "claude-desktop.tool-search"
+	desktopSSH     = "claude-desktop.ssh-hosts"
 	desktopMCP     = "claude-desktop.mcp"
 	desktopMCPSeen = "claude-desktop.mcp-seen"
 )
 
-var desktopStashKeys = []string{desktopStashed, desktopMode, desktopMode3p, desktopApplied, desktopMade, desktopProfile, desktopLocale, desktopImport, desktopSearch, desktopMCP, desktopMCPSeen, desktopModelsMark}
+var desktopStashKeys = []string{desktopStashed, desktopMode, desktopMode3p, desktopApplied, desktopMade, desktopProfile, desktopLocale, desktopImport, desktopSearch, desktopSSH, desktopMCP, desktopMCPSeen, desktopModelsMark, desktopDiscoveryMark}
 
 // desktopAdoptStash moves the stash a packaged Desktop's folders got
 // before they had keys of their own (when magpie wrote only one set) onto
@@ -697,10 +701,11 @@ func desktopOn(p desktopPaths) error {
 			return err
 		}
 	}
+	gw := desktopGateway()
 	kvs := []edit.KV{
 		{Path: "inferenceProvider", Value: "gateway"},
-		{Path: "inferenceGatewayBaseUrl", Value: gateway.URL()},
-		{Path: "inferenceGatewayApiKey", Value: agentKey("claude-desktop")},
+		{Path: "inferenceGatewayBaseUrl", Value: gw},
+		{Path: "inferenceGatewayApiKey", Value: desktopKey(gw)},
 		{Path: "inferenceGatewayAuthScheme", Value: "bearer"},
 	}
 	// policies seeded once: the user may tighten them in Desktop
@@ -718,6 +723,13 @@ func desktopOn(p desktopPaths) error {
 	}
 	if err := desktopSeedToolSearch(p); err != nil {
 		return err
+	}
+	// pointed at an address of this computer's for SSH remote sessions,
+	// which 3p mode allows no host for until the profile says so
+	if gw != gateway.URL() {
+		if err := desktopSeedSSH(p); err != nil {
+			return err
+		}
 	}
 
 	// a profile for magpie's gateway the user applied since magpie's
@@ -1125,7 +1137,13 @@ func desktopOwnGatewayProfile(p desktopPaths) []byte {
 // (127.0.0.1, localhost or ::1, with or without /v1).
 func desktopIsOurGateway(u string) bool {
 	a, err := url.Parse(strings.TrimSpace(u))
-	if err != nil || a.Port() == "" {
+	if err != nil {
+		return false
+	}
+	if desktopOurAddress(a) {
+		return true
+	}
+	if a.Port() == "" {
 		return false
 	}
 	ours, err := url.Parse(gateway.URL())

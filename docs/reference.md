@@ -118,7 +118,7 @@ line; agents connected to magpie lose it when it quits.
 | Zoo Code (VS Code) | VS Code's `Code/User/settings.json` (and each profile's): `zoo-code.autoImportSettingsPath` names `globalStorage/zoocodeorganization.zoo-code/settings/magpie-import.json` beside it | model (one provider profile `magpie`, OpenAI Compatible, imported by Zoo Code at start-up) |
 | Copilot (JetBrains) | `byok.json` in `~/.config/github-copilot` (`$XDG_CONFIG_HOME/github-copilot` when set, `%USERPROFILE%\AppData\Local\github-copilot` on Windows), the Copilot language server's own file, which Xcode's and Eclipse's Copilot read too | provider (a `magpie` custom endpoint provider beside the user's: every magpie model at the gateway's `/v1/chat/completions`, sent with `magpie-copilot-jetbrains`; a model hidden in Manage Models stays hidden through a sync; off removes magpie's three keys alone). Found by the `github-copilot-intellij` plugin in a JetBrains IDE or Android Studio. Listed after the IDE restarts, and only while Copilot is signed in to GitHub on a plan with Bring Your Own Key (Free, Pro, Pro+; Business and Enterprise when the organisation allows it); the model is picked in Copilot Chat |
 | JetBrains Air | `acp.json` in `~/Library/Application Support/JetBrains/Air` (`~/.config/JetBrains/Air` on Linux, `%APPDATA%\JetBrains\Air` on Windows) + `magpie-opencode.json` beside it | model (a `Magpie` ACP agent: OpenCode's `opencode acp` on magpie's provider alone, its models and routing groups in Air's model menu; needs OpenCode installed) |
-| Air (JetBrains IDEs) | `~/.jetbrains/acp.json` (`%USERPROFILE%\.jetbrains\acp.json` on Windows; the Air plugin in 2026.2+ IDEs, shared with AI Assistant's custom agents) + `magpie-opencode.json` beside it | model (the same `Magpie` ACP agent as the Air app's, in Air's agent menu in the IDE; needs OpenCode installed) |
+| Air (JetBrains IDEs) | `~/.jetbrains/acp.json` (`%USERPROFILE%\.jetbrains\acp.json` on Windows; the Air plugin in 2026.2+ IDEs, shared with AI Assistant's custom agents) + `magpie-opencode.json` beside it | model (the same `Magpie` ACP agent as the Air app's, in Air's agent menu in the IDE; needs OpenCode installed; a `Magpie (WSL <distro>)` agent too for each running WSL distro that has OpenCode, for WSL projects) |
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
 | DeepSeek Harness (dsh) | `~/.dsh/profiles/*/cordis.patch.yml` (`$DSH_HOME`; a custom provider, Magpie, its key `MAGPIE_GATEWAY_KEY` in `~/.dsh/.env` and dsh's own key store `~/.dsh/.credentials.yaml`, which the desktop app reads; on one of magpie's models its `web-search-deepseek` row also goes to the gateway, which searches with the model or Settings › Web search, unless dsh has a `DEEPSEEK_API_KEY` or a row of your own), or `~/.dsh/config.yaml` before dsh 0.1.5 | model, effort |
@@ -141,6 +141,8 @@ line; agents connected to magpie lose it when it quits.
 | QwenPaw      | each agent's `agent.json` in its workspace (`~/.qwenpaw/workspaces/<agent>`, the agents listed in `config.json`), under `$QWENPAW_WORKING_DIR`, else a legacy `~/.copaw`, else `~/.qwenpaw` | model (a `magpie` custom provider in `providers/custom/magpie.json` under QwenPaw's secret folder, `$QWENPAW_SECRET_DIR` or `~/.qwenpaw.secret`, OpenAI Chat at the gateway with magpie's models; the agent's `active_model` set to it, what was there put back on Disconnect; one row per agent, `qwenpaw` the default and `qwenpaw#<id>` the others; an agent on an ACP backend isn't listed; restart QwenPaw after the first connect), effort (the agent's `thinking_level`; magpie's models with reasoning levels are declared `thinking_param_style: "effort"` so QwenPaw applies it) |
 | OpenClaw     | `openclaw.json` in `~/.openclaw` (`$OPENCLAW_CONFIG_PATH`, `$OPENCLAW_STATE_DIR`, `~/.openclaw-<profile>` for `$OPENCLAW_PROFILE`, `~` as `$OPENCLAW_HOME`) | model (a `magpie` provider in `models.providers`, `openai-completions`, with magpie's models in it; `agents.defaults.model`'s primary set to it, what was there put back on Disconnect; `magpie/*` added to a `modelPolicy.allow` that would refuse it; the user's own keys in the provider and its models kept; a chat already on a model keeps it until `/model default`) |
 | jcode        | `config.toml` in `$JCODE_HOME`, else `~/.jcode` | model (a `[providers.magpie]` profile, `openai-compatible`, with magpie's models in it; `[provider] default_provider`/`default_model` set to it, what was there put back on Disconnect; the user's own keys in the profile, such as `headers` and a model's `reasoning_effort`, kept; restart open jcode sessions after connecting) |
+| Dim (alpha, `dima`) | none of Dim's: magpie's own `dim.json` beside its settings, and a `dima` function in your shell profiles | model (Dim's documented start-up variables, set only for that run: `DIM_BASE_URL` the gateway's `/v1`, `DIM_API_FORMAT=openai-compatible`, `DIM_API_KEY`, `DIM_MODEL` and both token limits; Dim's home (`$DIMCODE_HOME`, else `~/.dimcode-alpha`), saved Providers and account are never read or written. Type `dima` in a new terminal; picking Dim's own again takes the function out) |
+| Mistral Vibe | `config.toml` in `$VIBE_HOME`, else `~/.vibe` | model (a `[[providers]]` entry named magpie with the gateway's `/v1` and the key as an `Authorization` header in `extra_headers`, since Vibe reads keys only from the environment; one `[[models]]` entry per model, aliased `magpie/<provider>/<model>`; `active_model` set to the alias, what was there put back on Disconnect; a `thinking` level the user set on a model kept; restart open vibe sessions after connecting) |
 | MiniMax Code (mcode) | `~/.minimax/config.yaml` (`$MINIMAX_DATA_DIR`, or the folder the desktop app moved it to) | model (a `magpie` custom provider; magpie's models in its /model) |
 | Droid (Factory) | `~/.factory/settings.json` (`$FACTORY_HOME_OVERRIDE`) | model (magpie's models as BYOK `customModels`, in Droid's /model) |
 | Cline (CLI)  | `~/.cline/data/settings/providers.json` (`$CLINE_DIR`) | model, effort (magpie takes its openai-compatible provider) |
@@ -398,6 +400,16 @@ agent's; any other of yours is always sent. The beta of the agent's own
 sign-in (`oauth-2025-04-20`, which Claude Code signed in to claude.ai asks)
 never goes, as the sign-in never does; one you set yourself does.
 
+`magpie provider set <id> resolve.<host>=<place>[,<place>…]` connects a
+host name of the provider's own base URLs to the places listed, as curl's
+`--resolve` does (the provider editor's Advanced › Connect to): a place is
+an IP address (with a port if it has its own) or `dns:<name>`, looked up at
+each connection, tried in order, and the URL's name stays for TLS and Host.
+An empty value takes that host out; `resolve=` clears them all. Only a
+provider you added with a base URL of its own, or a preset you pointed at a
+server of your own, takes them. `magpie provider <id>` lists them as
+`connect`.
+
 A key+URL provider is sent the User-Agent the agent sent magpie, as it
 sent it, on every API (chat, Anthropic, Responses, Gemini, count_tokens,
 embeddings, images, videos): a coding plan that serves only the agents it
@@ -451,7 +463,9 @@ vendor's reply said it ran at, empty when the reply doesn't say. The
 ChatGPT backend (Codex signed in with ChatGPT) says `auto` and `default`
 whether Fast ran or not, so from it those are left empty too. The JSON
 log keeps them as `tier_asked`, `tier_sent` and `tier_served`, and each
-try in `/v1/magpie/route` has `tier` and `tier_served`. The last column,
+try in `/v1/magpie/route` has `tier` and `tier_served`. A request's row
+on the Requests page shows them as Service tier (asked, sent when it
+differs, answered). The last column,
 `upstream_stop`, is why the upstream said its reply ended, in its own
 words (`stop`, `tool_calls`, `end_turn`, a Responses reply's
 `completed`), empty when it said none. A request's row on the Requests
@@ -676,6 +690,8 @@ magpie gateway-key remove <id>         # revokes remote access
 magpie gateway-key limit <id> week --tokens 2m --cost 5   # its own limit
 magpie gateway-key limit <id> list     # each limit, used, left and reset
 magpie gateway-key limit <id> 10d --tokens 5m   # every 10 days, from now
+magpie gateway-key limit <id> total --cost 300  # $300 in total, until reset
+magpie gateway-key limit <id> account --account codex/me@example.com --window 5h --tokens 2m   # with that account's 5 hours
 magpie gateway-key limit <id> 5h --tokens 200k  # every 5 hours, from now
 magpie gateway-key limit <id> add week --cost 20   # one more limit; all must pass
 magpie gateway-key limit <id> add month --cost 20 --model openai/*   # a limit of only OpenAI's models
@@ -693,13 +709,26 @@ magpie gateway-key groups set Work codex/me@example.com   # every key naming Wor
 magpie gateway-key mcp <id> github fs/read_file   # only these MCP servers and tools
 magpie gateway-key mcp <id> none        # no MCP server (all: every one)
 magpie gateway-key quotas <id> on      # told the quotas of what it may use
+magpie gateway-key admin <id> local     # may manage magpie through /v1/magpie/admin/, from this computer (any: from the network too; off)
 ```
 
 Each gateway key can have its own **limit**: a token total, an estimated
 cost in US$, or both, per day, week or month (calendar windows in local
 time: from midnight, from Monday, from the 1st), every N days (#1509;
 N from 1 to 3650) or every N hours (#2102; N from 1 to 8760, such as 5 for
-a subscription's 5-hour pace). An N-day or N-hour cycle starts when the
+a subscription's 5-hour pace), or **in total** (`total`, @Cyrus_4433 on X):
+a limit that never resets by the clock, counted from when it is set and
+started again only by **Reset usage** (`magpie gateway-key limit <id> total
+--cost 300`); its 429 says it stays refused until it is reset or raised. Or it follows **an account's window** (`account`, ljayic on X): one
+subscription account's own 5 hours, week or month, starting and resetting
+when that account's last reading says its window does (Gateway keys → the
+key's limit → Window → An account's window, then the account's window; CLI
+`--account <provider>/<account> --window <name>`). When that window can't
+be read (no reading yet, or its reset has passed with none since), the
+limit isn't reset or lifted: it counts from the reset that passed (or from
+when the limit was set), its row says it resets with the account's window,
+and a refused call is told to retry in 5 minutes while magpie reads the
+accounts again. An N-day or N-hour cycle starts when the
 limit is set and runs N×24 or N hours, then the next one starts where it
 ended, so a restart, a time-zone change or a daylight-saving shift doesn't
 move it. Changing only
@@ -1032,6 +1061,22 @@ gateway calls on under mTLS (call the gateway's own port); there is no
 `.p12` for a browser yet (`openssl pkcs12 -export -in client.pem -inkey
 client-key.pem -out laptop.p12` makes one).
 
+**A self-signed certificate.** A Remote magpie, a provider of your own,
+or a preset pointed at a server of yours (Ollama or LM Studio on another
+computer behind `https://`), on a domain whose certificate this computer
+doesn't trust, such as a self-signed one, or one macOS calls "not
+standards compliant", can be trusted as it is (Zhangzhangi on X): Advanced → Server certificate → Trust
+its certificate… shows the certificate the server answers with, its
+SHA-256 fingerprint, names and dates. Check the fingerprint against the
+server's (`openssl x509 -in cert.pem -noout -fingerprint -sha256`) and
+Trust it. From then on that provider's own host is taken with that one
+certificate alone, its chain, name and dates unchecked, and any other
+certificate is refused; the editor says so in red. A certificate renewed
+later has to be trusted again. Verify it again takes the pin off. It is
+off by default and kept for that provider alone. A preset's own vendor
+addresses never take one: the row shows only for an `https://` address
+at a host the preset doesn't name.
+
 Caddy is the alternative that also gets the certificate for you: run
 `relay.example.com { reverse_proxy 127.0.0.1:3425 }` with sharing on and a
 gateway key per client. A proxy on this computer adds forwarding headers,
@@ -1071,7 +1116,11 @@ at `/v2/models`.
 Alibaba's Token Plan is sold in two places, each with its own `sk-sp-` key
 that only its own host takes: on the Qwen AI platform as `qwen-token-plan`
 (`token-plan.maas.qianwenaiapi.com`), and on Alibaba Cloud Bailian as
-`bailian-token-plan` (`token-plan.cn-beijing.maas.aliyuncs.com`). Both serve
+`bailian-token-plan` (`token-plan.cn-beijing.maas.aliyuncs.com`). Alibaba Cloud's international
+plan is `alibaba-token-plan` (`token-plan.ap-southeast-1.maas.aliyuncs.com`),
+and the two at aliyuncs.com show the plan's windows on the Usage page once the
+provider's editor is given the Alibaba Cloud account's AccessKey ID and Secret
+(the `sk-sp-` key cannot read them). All serve
 Chat Completions at `/compatible-mode/v1` and Anthropic Messages at
 `/apps/anthropic`, and carry the plans' documented text models for when the
 host lists none. Bailian's also answers its decision model,
@@ -1097,6 +1146,49 @@ default, `us-east-1`, `eu-central-1`, `ap-northeast-1`, `cn-hongkong` and
 `sk-sp-` keys), with the plan's documented text models. Both serve Chat
 Completions at `/compatible-mode/v1` and Anthropic Messages at
 `/apps/anthropic`.
+
+### Management API
+
+A script or a provisioning tool manages providers, accounts, gateway keys and
+account groups with no hand-edited file (ljayic on X). The routes are under
+`/v1/magpie/admin/` and are the app's own handlers, so a page and a script
+can't drift:
+
+| Route | What it does |
+| --- | --- |
+| `GET providers` | the Providers list, as the app shows it (keys masked) |
+| `POST provider/{action}` | `save`, `delete`, `on`, `off`, `name`, `efforts`, `images`, `arrange`, `route`, `affinity`, `sink`, `usefirst`, `test`, `models`, `list`, and each key's or account's setting (`accountcap`, `accountname`, `windowcap`, `accountweight`, `keyspendcap`, `keyexpiring`, …) |
+| `POST keys/{action}`, `POST login/{action}`, `GET login/usage` | a provider's keys, and its signed-in accounts |
+| `POST signin` `{"agent": …}`, `GET signin/{id}`, `POST signin/{id}/cancel`, `POST signin/{id}/callback` | OAuth sign-in: the answer holds the vendor's page and the code to type there. Nothing is opened on this computer and no password is taken |
+| `GET gateway-keys[/models\|/mcp\|/account-windows]`, `POST gateway-keys/{action}` | gateway keys: `add-key`, `rename-key`, `rotate-key`, `limit-key`, `models-key`, `accounts-key`, `mcp-key`, `access-key`, `on-key`, `off-key`, `remove-key`, … |
+| `GET account-groups`, `POST account-groups/{action}` | named account groups |
+| `GET routing-groups`, `GET routing-groups/{id}` | the Routing page's groups and combos, as the app shows them; one by its id or `group/<id>` |
+| `POST routing-groups/create`, `POST routing-groups/update` | a group or combo made, or changed: `create` takes the editor's body (`name`, `members`, …) and is 409 for an id in use; `update` takes `id` and only the fields to change, the rest kept (`from` and a new `id` rename it, and the combos naming it follow) |
+| `POST routing-groups/{action}` | the Routing page's own: `save`, `delete` (`id` or `ids`; refused while a combo names it), `copy`, `switch`, `arrange`, `pick`, `defaults`, `template`, `share`, `import`, `show` |
+
+Bodies are the app's own JSON, and each is checked as the app checks it (a
+member a provider doesn't serve, an account it doesn't have, a combo of
+itself are 400). A member may name one account, `provider/model#<account>`.
+A route or action not listed is a 404: Routing's `found` and `skip`, which
+set this computer's agents, are not served. Never
+served: a provider's saved key, a gateway key's secret after its `add-key` or
+`rotate-key` answer, exporting sign-ins, and what changes this computer's
+other apps (moving, showing, restarting).
+
+Who may call it: a gateway key set with `magpie gateway-key admin <id>
+local|any`, or in the app from the key's menu, Advanced (Off, From this
+computer, From any computer); such a key says Manages magpie in its row. `local` is from this computer only; `any` also from the network
+when sharing is on. Only a key the user made can have it: a read-only,
+Magpie Browser, issued or expiring key, and the default sharing key, can't,
+and the API can't set the level on any key, so it can't raise its own
+caller. A request with no key is 401, a key without the level 403
+(`gateway_key_not_admin`). Browsers never call it, with or without a key:
+any request with `Origin` (`null`, a foreign page, a listed page or
+`*.localhost` among them) or `Sec-Fetch-*` is 403, and so is one that
+reached loopback under another name (a rebound page's GET has neither).
+Answers are `Cache-Control: no-store`. The import and export of sign-ins
+is left out on purpose: it would hand a script every account's secrets
+([#6307](https://github.com/yetone/magpie/issues/6307)).
 
 ### Embeddings and rerank
 
@@ -1207,12 +1299,14 @@ credentials are read when a request is signed.
 
 Each location serves models of its own, and Vertex AI has no list to ask which,
 so magpie gives each location the models it answered with on 2026-10-06
-(and `gemini-4-argon`, at `global` since 2026-10-13):
+(and Gemini 4: `gemini-4-argon` since 2026-10-13, `gemini-4-carbon` since
+2026-11-10 and `gemini-4-hydrogen` since 2026-11-12, at `global`, `us` and
+`eu`):
 
 | Location | Models |
 | --- | --- |
-| `global` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-4-argon`, `gemini-3.1-pro-preview`, `gemini-3.1-pro-preview-customtools`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `deepseek-ai/deepseek-v4.1-flash-maas`, `zai-org/glm-5.2-maas`, `openai/gpt-oss-120b-maas`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-2`, `claude-fable-5-1` |
-| `us`, `eu` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` |
+| `global` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.1-pro-preview`, `gemini-3.1-pro-preview-customtools`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `deepseek-ai/deepseek-v4.1-flash-maas`, `zai-org/glm-5.2-maas`, `openai/gpt-oss-120b-maas`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-2`, `claude-fable-5-1` |
+| `us`, `eu` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.1-flash-lite` |
 | A region | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
 
 A region that serves one more, as asia-northeast1 serves `gemini-3.5-flash`,
@@ -1548,9 +1642,9 @@ with the same JSON: `param-override` (`param_override`), `model-map`
 `think-tags` (strip `<think>…</think>`, or `thinking_to_content`), and
 `antigravity-cloak`, which keeps words Antigravity turns a system prompt
 away for out of what it sends Antigravity alone (magpie itself already
-breaks up the lines it knows of: Codex's, Claude Code's, Hermes' earlier
-persona; `magpie provider set antigravity prompt=as-written` turns that
-off). A
+rewords the lines it knows of: Codex's, Claude Code's, Hermes' earlier
+persona, omp's; `magpie provider set antigravity prompt=as-written` turns
+that off). A
 middleware's entry in the community `registry.json` has
 `"kind": "middleware"` and no `providers`.
 
@@ -1568,7 +1662,7 @@ export const agent = {
   prefix: "openai/",             // written before magpie's model id
   ua: ["aider", "litellm"],
 }
-export function connect({ gateway, model, models }) {
+export function connect({ gateway, model, models, decisionModels }) {
   return { "openai-api-base": gateway.v1, "openai-api-key": gateway.key }
 }
 ```
@@ -1591,7 +1685,51 @@ call costs. Each is left out when it isn't known (a routing group has no
   "pricing": { "prompt": "0.0000003", "completion": "0.0000012", "input_cache_read": "0.00000003" } }
 ```
 
-An id magpie's own agents use is refused. In the market an agent's entry has
+`connect` also gets `decisionModels`: magpie's decision models (Jev, Clef,
+a vendor's or a plugin's model marked `decides`, as the routing groups'
+pickers offer them), and the routing groups made of them. They are kept
+out of `models`, which an agent offers for a conversation, and out of
+`/v1/models`. Each has `id`, `name`, `provider` (a group has `group: true`
+instead) and `endpoints`, the gateway paths it is asked on: `/v1/systemone`,
+and `/v1/decisions`, which the gateway translates to System One for it.
+It is `[]` when there are none:
+
+```json
+{ "id": "openrouter/~typesafe/jev-latest", "name": "Jev · OpenRouter", "provider": "openrouter",
+  "endpoints": ["/v1/systemone", "/v1/decisions"] }
+```
+
+An agent that takes the gateway only from how it is started, not from a
+file, says so in `launch`: `{ env: { GEMINI_API_KEY: "{key}",
+GOOGLE_GEMINI_BASE_URL: "{url}" }, model: "--model" }`. While its model is
+one of magpie's, magpie puts a function named after its `bin` in the
+user's shells (zsh, bash, fish, PowerShell) that runs `magpie <id> run`,
+which starts the agent with those variables and the model flag; its own
+model takes the function out. A value is `{key}`, `{url}` or `{v1}`, a
+path after the address at most, so nothing else a plugin says reaches a
+shell profile. Beside `launch`:
+
+- `merge`: key paths of a json config whose object `connect` returns
+  magpie's members of, written beside the user's own and taken out alone
+  (`["customModelsConfig.customModels"]`);
+- `launch.args`: flags put before the user's arguments, each `{config}`,
+  the config's path (`{ "--settings": "{config}" }`); `launch.plain`:
+  arguments that start the agent as it is, never on the gateway
+  (`["remote-control"]`);
+- `base`: for a config handed over by `launch.args`, so magpie's own
+  file, the agent's own settings file: `connect` and `own` get it as
+  `base`, the user's own model is written there, and stepping out takes
+  the config away whole;
+- `own({ config, base, model })`: the user's own models for the picker, each
+  `{ value, model, direct }`, `direct` naming the vendor it goes to;
+- `effort: true`, the Effort field; `wsl: true`, the agent in WSL
+  distros too; `aliases`, other names `magpie <name>` takes.
+
+An id magpie's own agents use is refused, except a built-in's that moves
+onto a community plugin: with `@magpie-community/agent-agy` installed and
+on, `agy` is the plugin's, and what the built-in had wired is handed over
+as the plugin's, so nothing changes for the user; with it off or removed,
+agy is connected no more and the built-in is back. In the market an agent's entry has
 `"kind": "agent"` (`@magpie-community/agent-<name>`). An agent that needs a
 runtime (a timer, a file watched) keeps its agent file in moejs and adds a
 Bun module as the package's `main`; a package that declares `magpie.agent`
@@ -1908,6 +2046,7 @@ magpie model api relay/claude-opus-5-5 relay/claude-sonnet-5 anthropic   # sever
 magpie model api relay/gpt-5.5 --reset                          # auto again: the vendor's list and every URL
 magpie model apis                                               # the models you set an API for
 magpie model apis relay                                         # each of relay's models and its API
+magpie model tier relay/gpt-5.5 ultrafast                      # fast, ultrafast or usual: the speed every request for it is sent at
 ```
 
 It is saved as the editor's Save saves it (`provider.SetModelPrefs`, into
@@ -2326,13 +2465,13 @@ to (an account added by setup-token doesn't count), magpie keeps it and
 says so. Add another account first, or sign out in Claude Code itself,
 then remove it.
 
-With more than one Codex account on, magpie also sets `openai_base_url`
-in Codex's config.toml, so a request the signed-in account has no
-allowance for goes on to the others through the gateway. *Only switch
-Codex's sign-in* under Providers › Codex (or `magpie accounts switch-only
-codex on`) leaves that out: magpie only moves Codex's own sign-in
-(`auth.json`) as above, and Codex's requests go straight to OpenAI, never
-through magpie (#1907). An `openai_base_url` you wrote yourself stays. The
+A Codex that isn't connected to magpie goes straight to OpenAI on its own
+sign-in, however many of its accounts are on: magpie only moves Codex's
+sign-in (`auth.json`) as above. Connected, a request the signed-in account
+has no allowance for goes on to the others through the gateway. *Only
+switch Codex's sign-in* under Providers › Codex (or `magpie accounts
+switch-only codex on`) keeps Codex's requests off magpie even then
+(#1907). An `openai_base_url` you wrote yourself stays. The
 Codex app and a running `codex app-server` read the sign-in when they
 start, so one already open stays on its account until it is opened again;
 a new `codex` session takes the new one. Connected to magpie, Codex's
@@ -2440,7 +2579,7 @@ adding one; use an account you can afford to lose.
 
 Accounts signed in elsewhere can be imported from their files instead of
 signed in again: *Import accounts from a file…* under a subscription's
-accounts, or `magpie accounts import <codex|claude|antigravity|factory>
+accounts, or `magpie accounts import <codex|claude|antigravity|factory|<plugin>>
 <file>... [--yes]`. For ChatGPT that takes Codex's `auth.json`, codexbar's
 `~/.codexbar/config.json` (every ChatGPT account it switches between) and
 the exports of Cockpit Tools, CLIProxyAPI and Sub2API, as many files as
@@ -2499,7 +2638,8 @@ forwarding header (frp's `tcp`, `ssh -R`, socat, an nginx `proxy_pass`
 without `X-Forwarded-For`) reaches it from loopback, so magpie can't tell
 it from an agent on this computer and never answers it as one;
 `MAGPIE_TRUST_PROXY=1` doesn't change that. The page's sign-in cookie is
-no gateway key, and the page and its `/api` still need the page's key.
+no gateway key, and the page and its `/api` still need the page's key (or
+on a LazyCat box the box's sign-in, see [LazyCat](#lazycat)).
 Agents on this computer call the gateway's own port (`127.0.0.1:3425`),
 which needs no key from loopback. Ollama's `/api/*` and Claude Desktop's
 `/api/hello` are the page's own namespace on that port, so a client of
@@ -2882,6 +3022,58 @@ accounts is told its own calls alone: `/v1/magpie/usage` refuses it with a
 403, and `/v1/magpie/usage/requests` keeps only its rows, filter lists and
 share of the split by key.
 
+To keep a ledger of your own from those requests (rdsaltbo on X, #6060),
+read them as changes: `GET /v1/magpie/usage/requests?cursor=start&limit=500`
+answers `rows`, `deleted`, `next_cursor` and `has_more`; read again with
+`cursor=<next_cursor>` until `has_more` is `false`, keep the last
+`next_cursor`, and poll with it. `cursor=now` gives the cursor of this
+moment with no rows, to take only what comes after. Without `cursor` the
+offset and `limit` read above are unchanged.
+
+- **Rows** are upserts by `id`. The `id` (`u_…`) is made of what the record
+  itself says (when, whose, the ids below), never a token count, status,
+  model name or price, so it is the same on every read and after a restart
+  of magpie. A row magpie reads again with different figures (an agent's
+  file mends its tokens, an error arrives) comes again with the same `id` and
+  a higher `seq`: replace what you hold. `origin` says where the row is from:
+  `gateway`, `session` (read from the agent's own file; the gateway never
+  saw it), `reported` (`POST /v1/magpie/usage/requests`) or empty.
+  Every row is one request, never a session or model total: there is no
+  other granularity.
+- **Original ids** are under `original_ids`, each only when the source gave
+  it, and none is ever made up: `request_id` (the vendor's, or the one the
+  agent recorded), `response_id` (a response object the agent recorded),
+  `client_response_id` (the one the gateway sent its client, which can be
+  magpie's own when it translated the reply), `message_id` (the agent's own
+  message id, Claude Code's `msg_…`), `session_id` and `native_session_id`.
+  A missing key is a missing id. Use them to deduplicate against another
+  collector; use `id` to keep your own ledger idempotent. They are not
+  interchangeable.
+- **Deleted** are `{id, seq}` of rows that are no longer rows: a call read
+  from an agent's file that the gateway turned out to have served (its own
+  row, with another `id`, comes in `rows`), or one the user cleared. Drop
+  them from your ledger, so a call is never counted twice. Reading with
+  `cursor=start` lists the ledger as it is and no deleted ids.
+- **A cursor** is opaque and tied to this magpie's feed
+  (`usage-feed.jsonl` next to `usage.jsonl`), to the filters and key it was
+  given with, and to the moment it was given: a page that was not committed
+  is read again and gives the same rows, so rows may come twice and never
+  fail to come. The feed finds a change by reading the whole ledger again, a
+  call an agent's file brings late with an old time included, so `period`
+  and `day` have no say in it; `agent`, `provider`, `model`, `account`,
+  `callerKey`, `failed`, `retried`, `q`, `via` and `computer` narrow the rows
+  (the cursor still passes the rows they leave out). Deleted ids are kept 30
+  days. A cursor magpie can't resume from is refused, never answered with a
+  gap: `400 cursor_invalid`, `400 cursor_filter_changed` (read again with
+  `cursor=start` for new filters), `410 cursor_expired` (older than the
+  deleted ids kept) and `410 cursor_reset` (the feed was lost or replaced).
+  After a 410, read `cursor=start` and replace what you hold of the ledger.
+  A price change does not make a row new: `cost` is magpie's price at the time
+  of the read; keep the tokens, or the `cost` of a `reported` row.
+- A key held to a budget, models or accounts gets its own rows and its own
+  deleted ids, and a cursor given to another key is refused. `client_ip`
+  is left out, as in the offset mode.
+
 What is in flight now, for a status bar such as SketchyBar (#2132):
 `GET /v1/magpie/concurrency` answers `requests`, every agent request the
 gateway is working on, whether or not any limit is set (those waiting for a
@@ -3054,7 +3246,11 @@ press *Arrange* at the foot of the panel's tab and move the rows there. The
 same *Arrange* hides a subscription from the panel's tab (*Hide*, *Show*
 puts it back), and the tab's foot says how many are hidden. Hiding is the
 panel's only: routing, caps, the Usage page and the menu bar's own cells
-still have it, and a menu bar cell for it still opens its card. Both are
+still have it, and a menu bar cell for it still opens its card. A card or
+quota row hidden on the Usage page (its card's *Hide from Overview*) is left
+out of the panel's tab too, and of `magpie tui`'s Usage page; a
+subscription hidden there whole shows as hidden in the panel's *Arrange*,
+whose *Show* brings it back on the Usage page too. Both are
 kept in magpie's settings (`usageOrder`, `panelUsageHidden`). Which
 allowances the menu bar itself shows beside its icon is picked in Settings.
 The same list has *Tokens and cost today* and *Tokens and cost, last 7
@@ -3119,6 +3315,16 @@ gateway, the key and `--model` (yours wins when you give one); off magpie
 it starts agy untouched. A terminal open already takes the command the
 Launch row copies. Stepping out (`magpie agy default`) takes the block out
 again. `magpie agy env` prints what `agy run` adds.
+
+**Dim** alpha (`dima`, npm's `dimcode-alpha`) is started on magpie the
+way Dim documents for any OpenAI-compatible endpoint: `DIM_BASE_URL`,
+`DIM_API_FORMAT=openai-compatible`, `DIM_API_KEY`, `DIM_MODEL`,
+`DIM_MAX_CONTEXT_TOKENS` and `DIM_MAX_OUTPUT_TOKENS`, for that run only.
+Picking a catalog model (`magpie dim <model>`) keeps it in magpie's own
+`dim.json` and puts a marked `dima` function in your shell profiles, which
+runs `magpie dim run`; Dim's own folder, saved Providers and account are
+not touched. `magpie dim default` takes the file and the function out
+again, and `magpie dim env` prints what `dim run` adds. No WSL twin.
 
 agy installed in a WSL distro is listed as Antigravity CLI · WSL
 <distro>, found by `~/.gemini/antigravity-cli` or the `agy` command there.
@@ -3218,6 +3424,30 @@ magpie update --mirror https://mirror.example/
 No mirror is used unless you give one, and the SHA-256 every download is
 checked against still comes from usemagpie.ai, never from the mirror.
 
+On a network that lets github.com through and not usemagpie.ai (a company
+allow list), the app and `magpie update` need no setting: when the feed
+fails, the newest release is read from `yetone/magpie-releases` itself
+(`api.github.com/repos/yetone/magpie-releases/releases/latest`, or the
+release page's redirect when the API is rate-limited), with its
+`SHA256SUMS` and `SHA256SUMS.sig` from github.com. They go through the same
+check as the feed's: the ed25519 signature against the key built into the
+binary, the version in the signed message, each file's hash from the signed
+list. A release read this way must be signed whatever its version. The
+Stable and Daily channels and a `MAGPIE_UPDATE_FEED` of your own don't
+fall back.
+
+Settings → About → *Update source* (`"updateSource"` in settings.json,
+`magpie settings set updateSource github`, this computer's own) chooses where an
+update comes from. Automatic (empty, the default) is what is described here:
+usemagpie.ai, then GitHub. `site` (usemagpie.ai only) never goes to GitHub,
+for the release or for a file. `github` (GitHub only) reads the release from
+`yetone/magpie-releases` without asking the feed, and downloads files from
+github.com (through a `--mirror` when one is given, then GitHub's API route);
+usemagpie.ai is not asked. On the Stable and Daily channels the release is
+only the site's pick, so `github` still reads it from the feed and downloads
+from GitHub. A `MAGPIE_UPDATE_FEED` of your own is never overridden. Every source
+is held to the same signature and hashes (`Release.verify`).
+
 Release files are downloaded from usemagpie.ai's copy on Cloudflare R2
 (`usemagpie.ai/files/<tag>/<file>`). Every five minutes the site copies the
 newest release and the Stable one from GitHub into R2, which takes a file
@@ -3247,13 +3477,96 @@ downloads a new version in the background and installs it when you restart
 a terminal. Every release is on
 [yetone/magpie-releases](https://github.com/yetone/magpie-releases/releases).
 
+### Signed releases
+
+usemagpie.ai's feed only carries a release; it is not what magpie trusts. From
+v0.1.3862 on, release CI in `yetone/magpie-releases` signs each release's
+`SHA256SUMS` with an ed25519 key and publishes the signature as
+`SHA256SUMS.sig` (base64). The signed text is the line `magpie release
+<version>` followed by `SHA256SUMS`, so a signature is good for one version
+only. The private key is the `UPDATE_SIGNING_KEY` secret of
+`yetone/magpie-releases`, nowhere else. The public key is built into magpie
+(`internal/update/signed.go`).
+
+From v0.1.3891 the release workflow also attests every file with
+`actions/attest-build-provenance` (a SLSA provenance statement signed through
+Sigstore with the run's GitHub identity). Before downloading a file of such a
+release, the updater (`internal/update/attest.go`, sigstore-go) fetches the
+bundles for the file's signed SHA-256 (from the site's copy first when the file
+comes from the site, below, else from
+`api.github.com/repos/yetone/magpie-releases/attestations/sha256:<digest>`) and
+checks them offline against the Sigstore trusted root embedded in the binary
+(`attest_root.json`, public-good instance): certificate chain, certificate
+timestamp, Rekor entry, issuer `token.actions.githubusercontent.com`, subject
+`release.yml` of `yetone/magpie-releases` on `main` or a `v*` tag, source
+repository `yetone/magpie-releases`, and the digest among the statement's
+subjects. This is in addition to the ed25519 check, never instead of it. A
+bundle that fails, or GitHub saying it has none (404, empty list), refuses the
+file. Anything that leaves it unknown (GitHub unreachable, rate limited, 5xx,
+not JSON, *Update source* set to the site alone and the site has none) does not stop the update,
+since the signature has held; the log says the file went unattested. A
+`MAGPIE_UPDATE_FEED` of your own skips it. The embedded root must be renewed
+(`gh attestation trusted-root`, first line) when Sigstore rotates its public
+good keys; until then a new chain fails as "not attested".
+
+The same bundles are kept on R2 (`site/files.js`, `keepBundles`): the five-minute
+cron asks that API for each file's digest of a release from v0.1.3891 on and,
+once every file has one, writes `<tag>/attestations.jsonl` (a bundle to a line),
+served at `https://usemagpie.ai/files/<tag>/attestations.jsonl` and checked with
+`gh attestation verify <file> -R yetone/magpie-releases --bundle
+attestations.jsonl`. It is not a release asset (the release's count is
+unchanged), is written only whole, and is pruned with its tag.
+
+The updater reads it for a file the feed names on the site
+(`https://usemagpie.ai/files/<tag>/<file>`), before asking GitHub's API
+(ArcticLampyrid on X). The site is only transport: its bundles go through the
+same check (embedded root, identity, the signed digest), so it can't make a bad
+one pass. A miss (a pruned tag's 302 to GitHub, which is not followed; any
+other status; no bundle in the body; the site unreachable) asks GitHub's API as
+before. A bundle from the site that fails asks GitHub's API too, and a valid one
+there holds; when that API can't be read, it is a refusal, not unknown. With
+*Update source* set to the site alone, the site's bundles are checked and
+GitHub is never asked: a miss is unknown, a failing bundle a refusal. With it
+set to GitHub, the file and its bundles come from GitHub alone.
+
+The feed hands the app that `SHA256SUMS` and signature (`signed`). The app
+checks the signature against its key, takes every file's SHA-256 from the
+signed list, and refuses the update when the signature is missing or does not
+match, or when the feed's own hash for a file differs from the signed one.
+That holds for the Mac app, `magpie update`, the background update and the
+Windows and Linux builds alike, so a changed feed, a mirror or a proxy can no
+longer swap a file together with its hash. On the Mac the new app's signing
+team is still checked too.
+
+Transition: a magpie that has the key refuses any release at or above
+v0.1.3862 that is not signed. Releases below it were never signed, and a
+magpie older than the key (it ignores `signed`) still updates by the feed's
+SHA-256 as before, so nobody is cut off; the first update that lands on a
+signed release is trusted that way once, and every one after it is verified.
+`MAGPIE_UPDATE_FEED`, which points updates at a server of your own for
+testing, lifts the requirement (a signature the server does give is still
+checked). `install.sh` does not verify the signature: its first download is
+trusted to the site over HTTPS and the SHA-256 the site gives.
+
 ### Update channel
 
-magpie takes every version as it comes out unless you choose Stable, in
-*Settings → About → Update channel* or with `magpie update channel stable`
+magpie takes every version as it comes out unless you choose Daily or
+Stable, in *Settings → About → Update channel* or with
+`magpie update channel daily` or `magpie update channel stable`
 (`magpie update channel every` goes back; `magpie update channel` prints
-the one in use). It is saved as `"updateChannel": "stable"` in
-settings.json, and the app and `magpie update` both follow it.
+the one in use). It is saved as `"updateChannel": "daily"` or `"stable"`
+in settings.json, and the app and `magpie update` both follow it.
+
+Daily is one version a day. Each day at 20:00 UTC it becomes the newest
+release out by then whose Test run on `main` passed (the run on the
+release's own commit) and that has all of its 17 files; a day with no
+such release keeps the day before's. A release marked urgent goes to Daily
+at once. What's new lists every version since yours as one list, and the
+Version row names the newest out on Every version as it does on Stable.
+The site works it out every quarter hour
+(`https://usemagpie.ai/api/latest?channel=daily`,
+`usemagpie.ai/download/daily/<platform>`); the Docker image's `daily` tag
+follows it.
 
 Stable is one version a week. Each Monday at 00:00 UTC it becomes the
 newest release that had been out for three days by then (Friday 00:00
@@ -3266,6 +3579,14 @@ A version installed from the site can be newer than Stable's; the app
 keeps it and waits until Stable passes it. While it waits, the Version
 row says *Up to date on Stable*, names the newest version out on Every
 version, and offers to switch to Every version.
+
+The site's downloads offer Stable's version beside the newest
+(`usemagpie.ai/download/stable/<platform>`). A fresh install of it (no
+magpie run on this computer before) takes Stable before its first update
+check, so it isn't offered the newest at once: it asks the feed for
+Stable's version and the newest, and when it is Stable's and a newer one
+is out, sets `"updateChannel": "stable"`. A channel you set is kept, and a
+version that is both Stable's and the newest stays on Every version.
 
 The update feed works this out from the release list
 (`https://usemagpie.ai/api/latest?channel=stable`); nothing is promoted
@@ -3298,6 +3619,11 @@ make release          # dist/: native app build + cli builds for every platform
 make release-windows  # dist/: the Windows app, amd64 and arm64 (cross-compiles)
 make release-linux    # dist/: the Linux app for this machine's arch
 ```
+
+The release targets and `make app` pack the UI's files into one zip first
+(`make assets-pack`, `build/assetpack`; embedded by `-tags packedassets`),
+which takes about 6 MB off each binary. `make build`, `make cli` and the
+tests embed the tree as it is.
 
 Linux needs `libgtk-3-dev` and `libwebkit2gtk-4.1-dev` for the app build
 (the Makefile adds the `gtk3` tag; with plain `go build`, pass `-tags gtk3`);
@@ -3469,7 +3795,12 @@ once its key is turned off, removed or rotated.
 The image has a `HEALTHCHECK`: `magpie healthcheck` exits 0 while the gateway
 answers on `MAGPIE_ADDR`, under `serve` and `web` alike, so `docker ps` shows
 the container as healthy (Compose: `depends_on: condition: service_healthy`)
-with no curl in the image. Bind-mounting a folder at `/config` in place of a
+with no curl in the image. The running magpie writes where it listens, its
+pid and how it was started (`app`, `tray`, `web`, `serve`) to `gateway.json` in
+its config folder, so `magpie healthcheck`, `magpie update` and the other
+commands find it from a shell that doesn't have `MAGPIE_ADDR` (a systemd
+service's); `--addr host:port` names it by hand, and `magpie status --json`
+prints the role, pid, version and address for a watchdog. Bind-mounting a folder at `/config` in place of a
 named volume works too; it has to be writable by uid 65532.
 
 #### NAS with agents on other machines
@@ -3534,11 +3865,110 @@ VPN such as Tailscale or WireGuard; a reverse proxy or tunnel forwarding to
 Magpie over loopback needs a gateway key from its clients, as the network does.
 
 The image's tags: `latest` is the newest release, and magpie releases
-several times a day. `daily` is the newest release as of 20:00 UTC, moved
-once a day (`.github/workflows/docker-daily.yml`), for Renovate or
-Watchtower to update at most daily (with Renovate, pin its digest);
+several times a day. `daily` is the desktop app's Daily channel: once a
+day at 20:00 UTC, the newest release whose CI run passed, or an urgent one
+at once (`.github/workflows/docker-daily.yml` follows
+`usemagpie.ai/api/latest?channel=daily`), for Renovate or Watchtower to
+update at most daily (with Renovate, pin its digest);
 `stable` is the desktop app's Stable channel, one a week. `0.1.N` is one
 release, `0.1` the newest of its line, and `edge` every change on `main`.
+
+#### LazyCat
+
+On a [LazyCat](https://lazycat.cloud) box (懒猫微服) magpie runs as an
+app's service with `magpie web`. With `MAGPIE_WEB_SIGN_IN=lazycat` the page
+takes the box's own sign-in for its key: the box's administrators open
+magpie from the box's app list (`https://magpie.<box>.heiyu.space`), signed
+in to the box, with nothing to paste. The page sets them no cookie of its
+own, so signing out of the box signs them out of the page; a browser signed
+in with the key's link keeps its cookie. A manifest (`lzc-manifest.yml`) for
+it:
+
+```yaml
+application:
+  subdomain: magpie
+  upstreams:
+    - location: /
+      backend: http://magpie:3430/
+  # the gateway's client routes (clientPrefixes, internal/gateway/oneport.go),
+  # for agents that aren't signed in to the box: the gateway checks them as
+  # everywhere
+  public_path:
+    - /v1
+    - /v1beta
+    - /models
+    - /chat/completions
+    - /responses
+    - /messages
+    - /images
+    - /embeddings
+    - /rerank
+    - /decisions
+    - /audio
+    - /videos
+    - /muse-code/models
+    - /backend-api/codex
+    - /alpha/search
+    - /mcp
+    - /me
+    - /deepseek-chat
+    - /join
+    - /magpie-ca.crt
+services:
+  magpie:
+    image: ghcr.io/yetone/magpie:0.1.N
+    command: web --addr 0.0.0.0:3430 --no-open
+    environment:
+      - MAGPIE_WEB_SIGN_IN=lazycat
+    binds:
+      # the app's own folder, which the box keeps across updates and the
+      # image's user (uid 65532) can write: a folder the box makes for a
+      # bind, as /lzcapp/var/config, is root's alone
+      - /lzcapp/var:/config
+```
+
+The box's ingress sends a browser that isn't signed in to the box's login
+page, and puts on every request it passes the app who sent it, in place of
+whatever the caller sent: the account (`X-HC-User-ID`), its role
+(`X-HC-User-Role`) and what sent it (`X-HC-Source`, `client` for a
+browser). The page takes an account whose role is `ADMIN`, from a browser,
+each named once, for a request the page itself made or a browser opening
+the page in a tab of its own (its Fetch Metadata: `Sec-Fetch-Site`
+`same-origin` or `none`, or a navigation to the page from another): the
+box's sign-in is the box's cookie, which a browser may send with a request
+another app's page on the box makes. Another account, a request another app
+or the box itself sent, one with no account, one another page made and one
+from a browser that doesn't say where it came from are turned away and told
+why; the link with the key, in the app's log, still signs a browser in.
+`magpie web` won't start with `MAGPIE_WEB_SIGN_IN=lazycat` without
+`LAZYCAT_APP_DOMAIN`, which LazyCat sets in an app's containers, so the
+setting isn't taken somewhere else by mistake; that is all magpie can check
+of where it runs. The setting says the box's ingress is the only way to the
+page's port. The box's sign-in stands in for no gateway key: the gateway's
+client routes ask for theirs as everywhere. magpie sends none of the box's
+`X-HC-*` headers on to a vendor, the ChatGPT backend or an MCP server,
+unless a provider's `PassHeaders` names one.
+
+A `public_path` entry opens its path and what is under it to callers that
+aren't signed in to the box (`/v1` opens `/v1/chat/completions`, not
+`/v1x`). Keep `/` out of it, so a browser that isn't signed in is sent to
+the box's login page. Let nothing but the box's ingress reach the page's
+port (3430): not a TCP ingress (`application.ingress`) or the box's LAN port
+forwarding. There the box passes every header as the caller wrote it, and
+anyone who reaches that port could say they are the box's administrator.
+magpie turns away a peer on a public address whatever it sends, but it
+can't tell a private one from the ingress: LazyCat's docs
+(developer.lazycat.cloud/en/http-request-headers.html) say the ingress sets
+`X-HC-*` after authenticating and clears them when it fails, and name no
+address for it.
+Another app's container reaches the app through the ingress alone, unless
+its manifest puts it in the box's own network (`network_mode: host`, as
+some of the box's own apps are): from there, as from the box itself, the
+page's port can be reached, so such an app is trusted as the box's
+administrators are. The gateway's port (3425) can be published: the
+gateway checks what reaches it as everywhere, and the box's sign-in
+stands in for none of it. magpie takes the app's address from
+`LAZYCAT_APP_DOMAIN`, so `MAGPIE_PUBLIC_URL` isn't needed.
 
 ### Developing
 
@@ -3569,6 +3999,7 @@ magpie tray                     # menu bar icon only (use this in your login ite
 magpie tui                      # the same thing, in the terminal; serves the gateway while open when no other magpie does
 magpie web                      # the app's window in a browser (WSL, a server over SSH); --lan, --addr, --no-open, --gateway, --tls-cert/--tls-key
                                 # (a new key each run; MAGPIE_WEB_KEY keeps one, for a page run as a service)
+                                # (in a LazyCat app, MAGPIE_WEB_SIGN_IN=lazycat lets the box's administrators in without it)
                                 # (behind a reverse proxy, MAGPIE_WEB_URL=https://<the page there> prints the link through it)
 magpie serve                    # the gateway alone, no window; --web[=host:port] serves the page too, from the same process
                                 # --tls-cert <file> --tls-key <file>: https:// for other computers (see HTTPS under sharing)
@@ -3602,6 +4033,7 @@ magpie settings get usageAlert
 magpie settings set noBird on   # checked and saved as the window saves it
 magpie settings set redactWords acme,globex
 magpie settings reset theme     # back to its default
+magpie settings set dayStart 4   # a day starts at 4:00 (0 to 6): the Usage page and daily and monthly key caps cut days there; the Sessions page does not yet
 
 magpie quota                    # what is left of every subscription, plan and key balance
 magpie quota refresh codex      # read Codex's cards again now (once per 30s)

@@ -42,7 +42,7 @@ var (
 func init() {
 	usageapi.Clients = func() []usageapi.Client {
 		var out []usageapi.Client
-		for _, a := range agent.Clients() {
+		for _, a := range agent.Looks() {
 			out = append(out, usageapi.Client{ID: a.ID, Name: a.Name, Icon: a.Icon})
 		}
 		return out
@@ -388,6 +388,16 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 			return
 		}
 		writeJSON(rw, rs[0])
+	})
+	// the accounts a check-in reaches whose provider is switched off, for
+	// the Usage page's folded Switched off group (wxkwxk666 on X): asks
+	// nothing, switches nothing on
+	mux.HandleFunc("GET /api/usage/checkins/off", func(rw http.ResponseWriter, r *http.Request) {
+		qs := provider.OffCheckins()
+		if qs == nil {
+			qs = []provider.SubscriptionQuota{}
+		}
+		writeJSON(rw, qs)
 	})
 	// what was left of each window over time, for the quota cards' curves
 	// (#651); ?days= back

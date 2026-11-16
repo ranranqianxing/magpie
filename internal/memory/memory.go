@@ -7,31 +7,21 @@
 // user picks are also given a digest of it in their instructions
 // (library/instructions.go). The Library's Memory tab lists and edits it.
 //
-// It is memory.json in magpie's config folder: one writer at a time across
-// magpies (filelock), written through a temp file, the last good
-// generation kept beside it, and a file that can't be read is unknown,
-// never empty, so nothing is written over it.
+// It is a folder of Markdown files in magpie's config folder, one a memory
+// (store.go): one writer at a time across magpies (filelock), a change to
+// several written all or none (a journal), and a file that can't be read
+// is unknown, never empty, so nothing is written over it.
 package memory
 
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
-
-	"github.com/yetone/magpie/internal/appdir"
-	"github.com/yetone/magpie/internal/edit"
-	"github.com/yetone/magpie/internal/filelock"
-	"github.com/yetone/magpie/internal/lastgood"
 )
 
 // The kinds of memory. A kind decides how long a memory stays true and
@@ -88,9 +78,16 @@ type Memory struct {
 	Sources      []Source  `json:"sources,omitempty"`
 	Created      time.Time `json:"created"`
 	Updated      time.Time `json:"updated"`
+	// Edited is when the user last changed it (Edit by the user, Save
+	// of what they typed): a change made then is theirs, which a sync
+	// from another computer tells apart from an agent's or a tidy's
+	// (Combine)
+	Edited time.Time `json:"edited,omitzero"`
 	// Used is when a search last returned it, Uses how many times
 	Used time.Time `json:"used,omitzero"`
 	Uses int       `json:"uses,omitempty"`
+	// Skill is the Library skill this procedure was made (MadeSkill)
+	Skill string `json:"skill,omitempty"`
 }
 
 // Source is where a memory was said or found.
@@ -111,7 +108,7 @@ type Project struct {
 	Roots []string `json:"roots,omitempty"`
 }
 
-// file is memory.json.
+// file is all of memory as read from Dir (store.go).
 type file struct {
 	Version  int                 `json:"version"`
 	Memories []*Memory           `json:"memories"`
@@ -126,6 +123,23 @@ type file struct {
 	// conversations that the user deleted or archived, the last
 	// maxDismissed: never proposed again
 	Dismissed []string `json:"dismissed,omitempty"`
+	// Removed is when each memory deleted for good was deleted, kept
+	// keepRemoved: a sync doesn't bring it back from a computer that
+	// still has it (Combine)
+	Removed map[string]time.Time `json:"removed,omitempty"`
+	// Declined are the suggestions the user turned down (Suggest), by
+	// key, the last maxDeclined
+	Declined []string `json:"declined,omitempty"`
+
+	// what read found on disk, for write to change only what changed
+	// (store.go): each memory file's hash as read, the ids whose file
+	// can't be read (never written over nor removed), the hashes magpie
+	// last wrote (written: another is the user's edit), and meta.json's
+	// bytes
+	seen    map[string]string
+	broken  map[string]bool
+	written map[string]string
+	metaB   []byte
 }
 
 // maxDismissed is how many dismissed texts are kept.
@@ -147,73 +161,11 @@ func dismiss(f *file, m *Memory) {
 	}
 }
 
-// Path is memory.json; a variable for tests.
-var Path = func() string { return appdir.Join(appdir.Config(), "memory.json") }
-
-var (
-	mu = filelock.Mutex{Path: func() string { return Path() + ".lock" }}
-	// now is the clock; a variable for tests
-	now = time.Now
-)
+// now is the clock; a variable for tests
+var now = time.Now
 
 // ErrNotFound is a memory id that isn't there.
 var ErrNotFound = errors.New("no memory with that id")
-
-// read reads memory.json: empty when it isn't there, an error when it is
-// and can't be read.
-func read() (*file, error) {
-	f := &file{Version: 1}
-	b, err := lastgood.Read(Path(), lastgood.Into[file])
-	if errors.Is(err, fs.ErrNotExist) {
-		return f, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(b, f); err != nil {
-		return nil, err
-	}
-	f.Memories = slices.DeleteFunc(f.Memories, func(m *Memory) bool { return m == nil || m.ID == "" })
-	return f, nil
-}
-
-func write(f *file) error {
-	p := Path()
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
-	}
-	if err := lastgood.Keep(p, lastgood.Into[file], 0o600); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return err
-	}
-	return edit.WriteAtomic(p, b)
-}
-
-// change reads memory.json, lets fn change it and writes it, one magpie
-// at a time. A file that can't be read is never written over.
-func change(fn func(f *file) error) error {
-	mu.Lock()
-	defer mu.Unlock()
-	f, err := read()
-	if err != nil {
-		return err
-	}
-	if err := fn(f); err != nil {
-		return err
-	}
-	return write(f)
-}
-
-// view reads memory.json under the lock, for a read that is consistent
-// with the last write.
-func view() (*file, error) {
-	mu.Lock()
-	defer mu.Unlock()
-	return read()
-}
 
 // All is every memory, in every state, newest change first, and the
 // projects they are kept for.
@@ -355,8 +307,11 @@ func norm(s string) string {
 // user threw the same text away before (dismissed), or set it aside in
 // that scope: m is nil then, or the one set aside, and added false.
 func Save(in Input, origin string, src *Source, proj *Project) (m *Memory, added bool, err error) {
-	t := now().UTC()
+	t := now()
 	m = &Memory{Kind: Fact, Scope: Global, Origin: origin, Status: Active, Created: t, Updated: t}
+	if origin == FromUser {
+		m.Edited = t
+	}
 	apply(m, in)
 	if err := check(m); err != nil {
 		return nil, false, err
@@ -405,6 +360,9 @@ func Save(in Input, origin string, src *Source, proj *Project) (m *Memory, added
 			}
 			o.Sources = keepSources(append(o.Sources, m.Sources...))
 			o.Updated = t
+			if origin == FromUser {
+				o.Edited = t
+			}
 			m = o
 			return nil
 		}
@@ -492,7 +450,10 @@ func editIn(f *file, m *Memory, in Input, byUser bool) error {
 	if byUser && (in.Text != nil || in.Kind != nil || in.Scope != nil || in.Why != nil) {
 		c.Origin = FromUser
 	}
-	c.Updated = now().UTC()
+	c.Updated = now()
+	if byUser {
+		c.Edited = c.Updated
+	}
 	*m = c
 	return nil
 }
@@ -538,6 +499,7 @@ func Remove(ids ...string) error {
 		f.Memories = slices.DeleteFunc(f.Memories, func(m *Memory) bool {
 			if slices.Contains(ids, m.ID) {
 				dismiss(f, m)
+				removed(f, m.ID)
 				return true
 			}
 			return false
@@ -555,7 +517,7 @@ func touch(ids []string) {
 	if len(ids) == 0 {
 		return
 	}
-	t := now().UTC()
+	t := now()
 	f, err := view()
 	if err != nil {
 		return
@@ -579,43 +541,4 @@ func touch(ids []string) {
 		}
 		return nil
 	})
-}
-
-// Modified is memory.json's modification time, zero when it isn't there:
-// for a reader to tell whether it changed.
-func Modified() time.Time {
-	st, err := os.Stat(Path())
-	if err != nil {
-		return time.Time{}
-	}
-	return st.ModTime()
-}
-
-// cache is memory.json as cached() last read it, and its modification time.
-var cache struct {
-	sync.Mutex
-	at time.Time
-	f  *file
-}
-
-// cached is memory.json as last read, read again when it changed: for the
-// digest, which a library sync reads for every agent.
-func cached() (*file, error) {
-	cache.Lock()
-	defer cache.Unlock()
-	st, err := os.Stat(Path())
-	if errors.Is(err, fs.ErrNotExist) {
-		return &file{Version: 1}, nil
-	}
-	if err == nil && cache.f != nil && st.ModTime().Equal(cache.at) {
-		return cache.f, nil
-	}
-	f, err := read()
-	if err != nil {
-		return nil, err
-	}
-	if st != nil {
-		cache.at, cache.f = st.ModTime(), f
-	}
-	return f, nil
 }

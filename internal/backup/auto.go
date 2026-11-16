@@ -406,6 +406,8 @@ func autoCollect(app string) (Bundle, error) {
 		s := *b.Settings
 		s.Proxy, s.ProxyCustom = "", ""
 		s.PluginProxy, s.PluginProxyCustom = "", ""
+		s.UpdateProxy, s.UpdateProxyCustom = "", ""
+		s.Proxies = nil
 		b.Settings = &s
 	}
 	return b, err

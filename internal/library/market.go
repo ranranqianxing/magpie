@@ -100,6 +100,9 @@ var featured = []MarketServer{
 	searchServer(),
 	visionServer(),
 	memoryServer(),
+	sessionsServer(),
+	evermeServer(),
+	nowledgeServer(),
 	remoteServer("context7", "Context7", "Upstash", gh("upstash"), "https://mcp.context7.com/mcp",
 		"Up-to-date documentation and code examples for any library, straight into the prompt.", false,
 		Input{Key: "CONTEXT7_API_KEY", Where: "header", Label: "API key", Description: "Optional — raises the rate limit. From context7.com/dashboard", Secret: true, format: "{}"}),
@@ -240,7 +243,8 @@ func visionServer() MarketServer {
 const memoryServerName = "magpie-memory"
 
 // memoryServer is Magpie Memory: what is known about the user, kept by
-// magpie for every agent, as memory_search, memory_save and memory_forget,
+// magpie for every agent, as memory_search, memory_save, memory_forget and
+// memory_context,
 // through `magpie mcp memory`, which passes each call to the gateway's
 // MemoryMCPPath with the folder the agent started it in. It is there to be
 // shared and costs nothing, so, unlike magpie's other servers, it is given
@@ -248,6 +252,49 @@ const memoryServerName = "magpie-memory"
 func memoryServer() MarketServer {
 	return localServer(memoryServerName, "Magpie Memory", "Magpie", "https://usemagpie.ai/favicon.png", "https://usemagpie.ai",
 		"Memory shared by every agent: your preferences, rules and what each project needs, kept in Magpie. Agents search it before asking again, and save what you ask them to remember.", magpieCommand, []string{"mcp", "memory"})
+}
+
+// sessionsServerName is the name Magpie Sessions' server is written
+// under, the name the gateway's own sessions server goes by (ownMCP).
+const sessionsServerName = "magpie-sessions"
+
+// sessionsServer is Magpie Sessions: what was said in every agent's
+// sessions on this computer, as search_sessions and read_session, through
+// `magpie mcp sessions`, which passes each call to the gateway's
+// SessionsMCPPath (cryingLiu on X). An agent given it reads the user's
+// other conversations, so it is given only to the agents picked for it.
+func sessionsServer() MarketServer {
+	m := localServer(sessionsServerName, "Magpie Sessions", "Magpie", "https://usemagpie.ai/favicon.png", "https://usemagpie.ai",
+		"Search and read what was said in every agent's sessions on this computer: an earlier conversation, decision or fix, from Claude Code, Codex or any agent Magpie reads.", magpieCommand, []string{"mcp", "sessions"})
+	m.OptIn = true
+	return m
+}
+
+// evermeServer is EverMe's memory (EverMind-AI/EverMe, @everme/memory-mcp,
+// the generic stdio server its README gives for any MCP host): mem_search,
+// mem_context, mem_save_fact and mem_save_turn against the EverMe backend.
+// The agent id and token are what `evercli auth login` and the EverMe
+// console issue (evt_...); the managed backend's address is the README's
+// own and EVERME_API_BASE can be edited for a self-hosted one (OipsAnthony
+// on X).
+func evermeServer() MarketServer {
+	m := localServer("everme-memory", "EverMe Memory", "EverMind", gh("EverMind-AI"), "https://github.com/EverMind-AI/EverMe",
+		"Cross-device, cross-agent memory from EverMe, as a second memory beside Magpie Memory: agents search it and save facts to it.", "npx", []string{"-y", "@everme/memory-mcp"},
+		Input{Key: "EVERME_AGENT_ID", Where: "env", Label: "Agent ID", Description: "agt_… , from EverMe (evercli auth login)", Placeholder: "agt_…", Required: true},
+		Input{Key: "EVERME_AGENT_TOKEN", Where: "env", Label: "Agent token", Description: "evt_… , never an emk_ account key", Placeholder: "evt_…", Secret: true, Required: true})
+	m.server.Env = map[string]string{"EVERME_API_BASE": "https://api.everme.evermind.ai"}
+	return m
+}
+
+// nowledgeServer is Nowledge Mem's own MCP endpoint, the Streamable HTTP
+// one Mem serves at 127.0.0.1:14242/mcp on the computer it runs on
+// (mem.nowledge.co/docs/integrations). A Mem reached through Access
+// Anywhere takes its API key in the Authorization header and its tunnel's
+// address, both edited after adding (OipsAnthony on X).
+func nowledgeServer() MarketServer {
+	return remoteServer("nowledge-mem", "Nowledge Mem", "Nowledge", gh("nowledge-co"), "http://127.0.0.1:14242/mcp",
+		"Nowledge Mem's graph memory, as a second memory beside Magpie Memory. Mem must be running on this computer; for a remote Mem, edit the address and add its API key.", false,
+		Input{Key: "Authorization", Where: "header", Label: "API key", Description: "Optional — only for a Mem reached over Access Anywhere", Placeholder: "nmem_…", Secret: true, format: "Bearer {}"})
 }
 
 // selfCommand is the server's command and env for this magpie: its binary
@@ -285,6 +332,7 @@ var homepages = map[string]string{
 	"cloudflare-docs": "https://github.com/cloudflare/mcp-server-cloudflare",
 	"microsoft-learn": "https://github.com/MicrosoftDocs/mcp",
 	"huggingface":     "https://huggingface.co/settings/mcp",
+	"nowledge-mem":    "https://mem.nowledge.co/docs/integrations",
 }
 
 func init() {
@@ -410,7 +458,7 @@ func serverKey(s *Server) string {
 	if s.Remote() {
 		return strings.TrimSuffix(strings.ToLower(s.URL), "/")
 	}
-	if len(s.Args) == 2 && s.Args[0] == "mcp" && (s.Args[1] == "image" || s.Args[1] == "browser" || s.Args[1] == "search" || s.Args[1] == "vision" || s.Args[1] == "memory") {
+	if len(s.Args) == 2 && s.Args[0] == "mcp" && (s.Args[1] == "image" || s.Args[1] == "browser" || s.Args[1] == "search" || s.Args[1] == "vision" || s.Args[1] == "memory" || s.Args[1] == "sessions") {
 		return "magpie mcp " + s.Args[1] // magpie's own, wherever its binary is
 	}
 	uv := progName(s.Command) == "uvx"
@@ -611,6 +659,13 @@ func rank(r *registryServer, m MarketServer, q string) int {
 	return s
 }
 
+// brandIcons are logos the registry doesn't carry, by repository, taken
+// from the project's own site, so its server isn't shown with its owner's
+// avatar.
+var brandIcons = map[string]string{
+	"https://github.com/morluto/rea": "https://rea.tools/assets/favicon.svg", // MIT, the site's own favicon
+}
+
 // fromRegistry is what a registry entry becomes in the library: its remote
 // when it has one, else the package it's published as.
 func fromRegistry(r *registryServer) (MarketServer, bool) {
@@ -648,6 +703,9 @@ func fromRegistry(r *registryServer) (MarketServer, bool) {
 			m.Icon = ic.Src
 			break
 		}
+	}
+	if m.Icon == "" {
+		m.Icon = brandIcons[strings.ToLower(strings.TrimSuffix(r.Repository.URL, "/"))]
 	}
 	if m.Icon == "" && owner != "" {
 		m.Icon = gh(owner)
@@ -837,6 +895,13 @@ func serverIcon(l *Library, s *Server) string {
 		}
 	}
 	if u := l.Icons[k]; u != "" {
+		if _, avatar := strings.CutPrefix(u, "https://github.com/"); avatar {
+			for _, m := range popularServers() { // added before its logo was known
+				if m.Icon != u && serverKey(&m.server) == k && !strings.HasPrefix(m.Icon, "https://github.com/") {
+					return m.Icon
+				}
+			}
+		}
 		return u
 	}
 	for _, m := range featured {

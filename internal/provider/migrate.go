@@ -40,6 +40,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yetone/magpie/internal/filememo"
@@ -292,7 +293,26 @@ func Movable(id string) bool { return movers[id] != nil }
 // is listed by MoveCandidates with why, until it moves. The built-ins are
 // retired one by one, each with its code (the owner, 10-16: 陆续把内置
 // Provider下线掉), so this is the set retired so far.
-func BuiltinRetired(id string) bool { return Movable(id) && retiredBuiltins[id] }
+func BuiltinRetired(id string) bool {
+	if id == "antigravity" && antigravityBuiltinForTest.Load() > 0 {
+		return false
+	}
+	return Movable(id) && retiredBuiltins[id]
+}
+
+// antigravityBuiltinForTest counts the tests that serve the built-in
+// Antigravity again (AntigravityBuiltinForTest).
+var antigravityBuiltinForTest atomic.Int32
+
+// AntigravityBuiltinForTest serves the built-in Antigravity again until the
+// returned func runs. Its route has served nothing since it was retired on
+// 11-15, and its code is still shared with Gemini CLI's: the tests of that
+// route use this until the code is taken out (#6723).
+func AntigravityBuiltinForTest() func() {
+	antigravityBuiltinForTest.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { antigravityBuiltinForTest.Add(-1) }) }
+}
 
 // retiredBuiltins are the built-in subscriptions whose code is gone.
 var retiredBuiltins = map[string]bool{
@@ -309,6 +329,11 @@ var retiredBuiltins = map[string]bool{
 	"grok":            true,
 	"devin":           true,
 	CommandCodePlanID: true,
+	// Google bans accounts it sees on Code Assist through Antigravity's
+	// own client (the owner, 11-15): the built-in asks Google nothing, and
+	// its plugin serves the users who have it, withdrawn for anyone new
+	// (plugin.WithdrawnOf), who are pointed to Antigravity (local agy CLI)
+	"antigravity": true,
 }
 
 // PluginServes is whether the built-in id's subscription is its plugin's to
@@ -673,7 +698,9 @@ func move(ctx context.Context, id string, mv *mover) (err error) {
 		return fmt.Errorf("no %s account to move", id)
 	}
 	had := pluginListed(mv.pkg)
-	if err := installPlugin(ctx, mv.pkg, mv.min); err != nil {
+	// the user's own accounts: a package withdrawn for anyone new is
+	// still theirs (plugin.KeepWithdrawn)
+	if err := installPlugin(plugin.KeepWithdrawn(ctx), mv.pkg, mv.min); err != nil {
 		return installFailed(mv.pkg, err)
 	}
 	installed := !had
@@ -1111,7 +1138,7 @@ func keepMovedCurrent(ctx context.Context) {
 		if mv.min == "" {
 			continue
 		}
-		if err := installPlugin(ctx, mv.pkg, mv.min); err != nil {
+		if err := installPlugin(plugin.KeepWithdrawn(ctx), mv.pkg, mv.min); err != nil {
 			log.Printf("updating %s's plugin: %s", id, err)
 		}
 	}

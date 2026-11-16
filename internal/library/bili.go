@@ -16,7 +16,7 @@ import (
 
 	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/agent"
-	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/claudecode"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
@@ -37,12 +37,11 @@ import (
 // bili's local proxy, which forwards to the gateway (ANTHROPIC_BASE_URL
 // .../bili/<magpie's address>). Codex's lane is an MCP server only, ZCode's
 // routes only its own provider, Kimi Code's renames the default model in
-// config.toml at each start (bili-kimi) and dsh's installs through dsh's
-// package manager: none of those is offered.
+// config.toml at each start (bili-kimi): none of those is offered.
 //
-// Zed has no plugin of bili's, and Hermes' sets HTTPS_PROXY alone, which
-// magpie's http://127.0.0.1 provider never takes: their magpie provider
-// goes through bili's /bili/ prefix with bili start answering there
+// Zed has no plugin of bili's, and Hermes' and dsh's ride proxy settings of
+// the agent's process, which magpie's http://127.0.0.1 provider never takes:
+// their magpie provider goes through bili's /bili/ prefix with bili start answering there
 // (biliURLLanes, bili_url.go).
 //
 // bili's remove doesn't put a file back as it was: it leaves "packages": []
@@ -114,28 +113,12 @@ type BiliView struct {
 
 var biliMu sync.Mutex
 
-// biliPath is bili's, "" when it isn't installed: on PATH, or where its
-// documented install (npm -g with ~/.local as the prefix) puts it, which
-// may not be on magpie's PATH yet.
-var biliPath = func() string {
-	name := "bili"
-	if runtime.GOOS == "windows" {
-		name = "bili.cmd"
-	}
-	if p, err := proc.Look(name); err == nil {
-		return p
-	}
-	dirs := []string{filepath.Join(home(), ".local", "bin")}
-	if runtime.GOOS == "windows" {
-		dirs = []string{filepath.Join(appdir.Getenv("APPDATA"), "npm")}
-	}
-	for _, d := range dirs {
-		if p := filepath.Join(d, name); exists(p) {
-			return p
-		}
-	}
-	return ""
-}
+// biliPath is bili's, "" when it isn't installed: on PATH, or in a folder
+// a user's tools are installed in (proc.FindTool: npm -g's, with ~/.local
+// as its prefix where the documented install puts it, bun's including a
+// BUN_INSTALL), which may not be on magpie's PATH yet. On Windows npm's
+// shim is bili.cmd and bun's is bili.exe.
+var biliPath = func() string { return proc.FindTool("bili") }
 
 // biliInstaller is billion-context's documented install: npm's global
 // install with ~/.local as the prefix, so it needs no administrator; on
@@ -151,15 +134,14 @@ var biliInstaller = func() []string {
 	return []string{npm, "install", "-g", biliPackage, "--prefix=" + filepath.Join(home(), ".local")}
 }
 
-// biliRun runs bili with nothing to answer it.
-var biliRun = func(bin string, timeout time.Duration, args ...string) (string, error) {
+// biliRun runs bili with nothing to answer it. tools are the programs it
+// runs by name (biliTool), whose folders go on its PATH.
+var biliRun = func(bin string, tools []string, timeout time.Duration, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := proc.CommandContext(ctx, bin, args...)
 	cmd.Stdin = nil
-	// a bili in ~/.local/bin is a node script: its folder goes first, and
-	// node is found where the user's shell finds it
-	cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(bin)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Env = append(os.Environ(), "PATH="+biliPATH(bin, tools, os.Getenv("PATH")))
 	out, err := cmd.CombinedOutput()
 	text := strings.TrimSpace(string(out))
 	if err != nil {
@@ -172,6 +154,47 @@ var biliRun = func(bin string, timeout time.Duration, args ...string) (string, e
 		return text, fmt.Errorf("bili %s: %s", strings.Join(args, " "), lastLines(text, 4))
 	}
 	return text, nil
+}
+
+// biliPATH is the PATH bili runs with: a bili in ~/.local/bin is a node
+// script, so its folder goes first, and node is found where the user's
+// shell finds it; then the folder of each of tools that isn't on path.
+// bili's installer runs an agent's CLI by name (Claude Code's: `claude mcp
+// add bili`; OpenCode's: `opencode --version`, which picks the config key),
+// and magpie may have found that CLI where its own PATH doesn't reach:
+// in a folder only proc.FindTool looks in (an nvm Node other than the
+// default, pnpm's, mise's), or the Claude Code magpie downloaded. bili then failed with "spawnSync claude ENOENT" after it had
+// already written Claude Code's settings.json (fwxkogaia on X, 0.1.4179).
+func biliPATH(bin string, tools []string, path string) string {
+	have := filepath.SplitList(path)
+	dirs := []string{filepath.Dir(bin)}
+	for _, t := range tools {
+		if t == "" {
+			continue
+		}
+		d := filepath.Dir(t)
+		if !slices.Contains(have, d) && !slices.Contains(dirs, d) {
+			dirs = append(dirs, d)
+		}
+	}
+	if path != "" {
+		dirs = append(dirs, path)
+	}
+	return strings.Join(dirs, string(os.PathListSeparator))
+}
+
+// biliTool is the program of a's that bili's install and remove run by
+// name: the agent's own, or for Claude Code with none of the user's, the
+// one magpie runs (claudecode.Find: the one magpie downloaded); "" when
+// there is none.
+func biliTool(a *agent.Agent) string {
+	if p := a.BinPath(); p != "" {
+		return p
+	}
+	if a.ID == "claude" {
+		return claudecode.Find()
+	}
+	return ""
 }
 
 // biliAgents are the agents here bili's plugin can be given to. One in
@@ -241,11 +264,11 @@ func readBili(agents []*agent.Agent) *BiliView {
 			v.Install = biliShown(c)
 		}
 	} else {
-		if out, err := biliRun(v.Path, 30*time.Second, "--version"); err == nil {
+		if out, err := biliRun(v.Path, nil, 30*time.Second, "--version"); err == nil {
 			v.Version = biliVersion(out)
 		}
 		v.Saved = readBiliSaved()
-		out, err := biliRun(v.Path, 30*time.Second, "plugin", "list")
+		out, err := biliRun(v.Path, nil, 30*time.Second, "plugin", "list")
 		if st = parseBiliList(out); err != nil || len(st) == 0 {
 			v.ListErr = lastLines(out, 2)
 			if err != nil {
@@ -366,7 +389,7 @@ func SetBili(id string, on bool) (*BiliView, error) {
 			}
 			snap = append(snap, f)
 		}
-		out, err := biliRun(bin, 2*time.Minute, "plugin", "install", biliLane(id))
+		out, err := biliRun(bin, []string{biliTool(a)}, 2*time.Minute, "plugin", "install", biliLane(id))
 		if err != nil {
 			return nil, err
 		}
@@ -396,7 +419,7 @@ func SetBili(id string, on bool) (*BiliView, error) {
 	for _, p := range paths {
 		cur[p] = biliRead(p)
 	}
-	if _, err := biliRun(bin, 2*time.Minute, "plugin", "remove", biliLane(id)); err != nil {
+	if _, err := biliRun(bin, []string{biliTool(a)}, 2*time.Minute, "plugin", "remove", biliLane(id)); err != nil {
 		return nil, err
 	}
 	snap := state[id]

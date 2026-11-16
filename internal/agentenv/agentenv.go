@@ -41,7 +41,7 @@ var Vars = []string{
 	// Antigravity's gateway, which wins over its settings.json
 	"AGY_LLM_GATEWAY_URL",
 	// Cline: its folder, its data, its sessions and its MCP settings file
-	"CLINE_DIR", "CLINE_DATA_DIR", "CLINE_SESSION_DATA_DIR", "CLINE_MCP_SETTINGS_PATH",
+	"CLINE_DIR", "CLINE_DATA_DIR", "CLINE_SESSION_DATA_DIR", "CLINE_MCP_SETTINGS_PATH", "CLINE_GLOBAL_SETTINGS_PATH",
 	// Pi and its forks (OmO, Senpi), whose profile and config are apart
 	"PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "PI_CONFIG_DIR", "PI_PROFILE",
 	"OMO_CODING_AGENT_DIR", "SENPI_CODING_AGENT_DIR",
@@ -54,11 +54,15 @@ var Vars = []string{
 	"STEP_CODING_AGENT_DIR", "STEPCODE_CONFIG_DIR",
 	// MothX's config folder ($MOTHX_DIR/settings.json)
 	"MOTHX_DIR",
+	// Kiro Crew's CLI search path adds $BUN_INSTALL/bin
+	"BUN_INSTALL",
 	// Shelley's socket ($SHELLEY_SOCKET), which magpie tells it through
 	"SHELLEY_SOCKET",
 	// PenguinHarness's data root and the Project its CLI works in
 	// ($PENGUIN_HOME/$PENGUIN_PROJECT_ID/.project_config.toml)
 	"PENGUIN_HOME", "PENGUIN_PROJECT_ID",
+	// Devin CLI's sessions folder ($DEVIN_SESSIONS_DIR/cli)
+	"DEVIN_SESSIONS_DIR",
 	// omp
 	"OMP_PROFILE",
 	// Qoder's two builds, the global site's and China's
@@ -87,13 +91,17 @@ var Vars = []string{
 	"KUN_DATA_DIR",
 	// AstrBot's root, the folder holding its data/ (else ~/.astrbot, the desktop app's)
 	"ASTRBOT_ROOT",
+	// Dim alpha's folder (dima), ~/.dimcode-alpha without it
+	"DIMCODE_HOME",
+	// Mistral Vibe's folder (config.toml, skills, AGENTS.md), ~/.vibe without it
+	"VIBE_HOME",
 	// jcode's folder, ~/.jcode without it
 	"JCODE_HOME",
 	// OpenClaw: its config file, its state folder (openclaw.json in it), a
 	// named profile's folder (~/.openclaw-<profile>) and its own ~
 	"OPENCLAW_CONFIG_PATH", "OPENCLAW_STATE_DIR", "OPENCLAW_PROFILE", "OPENCLAW_HOME",
 	// MiMo Code, MiniMax Code, OpenHanako, Hermes, dsh, WorkBuddy, CodeBuddy Code
-	"MIMOCODE_HOME", "MINIMAX_DATA_DIR", "MAVIS_DATA_DIR", "HANA_HOME", "HERMES_HOME", "DSH_HOME",
+	"MIMOCODE_HOME", "MINIMAX_DATA_DIR", "MAVIS_DATA_DIR", "HANA_HOME", "PASEO_HOME", "HERMES_HOME", "DSH_HOME",
 	"WORKBUDDY_CONFIG_DIR", "CODEBUDDY_CONFIG_DIR",
 	// DS Bot's data folder, and its Electron userData holding locations.json
 	"DS_BOT_HOME", "DS_BOT_SHELL_DATA",
@@ -127,6 +135,9 @@ var Vars = []string{
 	// QwenPaw's working folder (~/.qwenpaw, or a legacy ~/.copaw, without
 	// it) and its secret folder, <working folder>.secret without it
 	"QWENPAW_WORKING_DIR", "QWENPAW_SECRET_DIR",
+	// billion-context's config file, the Library's billion-context tab
+	// changes; $XDG_CONFIG_HOME/billion-context/billion-context.json without it
+	"BILI_CONFIG_FILE",
 	// Cursor's CLI: its config folder (its chats) and its data folder
 	"CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR",
 	// OpenCode and OpenChamber

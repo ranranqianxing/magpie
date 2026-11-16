@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yetone/magpie/internal/agentenv"
@@ -51,6 +52,7 @@ func UserPath() {
 			addPath(filepath.SplitList(p))
 			login.Lock()
 			login.dirs, login.vars, login.at = filepath.SplitList(p), vars, time.Now()
+			loginSaid.Store(&vars)
 			login.Unlock()
 		}
 	}()
@@ -96,6 +98,7 @@ func LoginPath() []string {
 		return nil
 	}
 	login.dirs, login.vars, login.at = filepath.SplitList(p), vars, time.Now()
+	loginSaid.Store(&vars)
 	return login.dirs
 }
 
@@ -140,6 +143,19 @@ func LoginEnvKnown(k string) string {
 	return login.vars[k]
 }
 
+// loginSaid is login.vars as last stored, for LoginEnvSaid.
+var loginSaid atomic.Pointer[map[string]string]
+
+// LoginEnvSaid is LoginEnvKnown without the lock: LoginPath holds it while
+// the shell answers, which may take seconds, and netproxy reads the
+// shell's proxy on every request magpie makes.
+func LoginEnvSaid(k string) string {
+	if m := loginSaid.Load(); m != nil {
+		return (*m)[k]
+	}
+	return ""
+}
+
 // UserBinDirs are the folders a user's command-line tools are installed in
 // that exist here — npm's prefixes, each Node version of nvm, fnm and mise,
 // bun, volta, pnpm, asdf, the standalone installers' ~/.local/bin,
@@ -151,6 +167,9 @@ func UserBinDirs() []string { return userDirs(true) }
 func userDirs(everyNode bool) []string {
 	home, _ := os.UserHomeDir()
 	var known []string
+	if d := bunBin(); d != "" {
+		known = append(known, d)
+	}
 	for _, d := range []string{".local/bin", ".npm-global/bin", ".npm/bin", ".bun/bin", ".volta/bin", ".asdf/shims", ".local/share/mise/shims", ".cargo/bin", ".deno/bin", "Library/pnpm"} {
 		known = append(known, filepath.Join(home, d))
 	}

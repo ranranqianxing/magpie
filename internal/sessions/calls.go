@@ -70,7 +70,7 @@ type Call struct {
 // what it takes to read on from off.
 type callFile struct {
 	Claude      *claudeUsageState
-	ContentHash string
+	ContentHash digest
 	dirty       map[int]bool
 	// readSize is the size of the file being read (prepareCalls), for
 	// growCalls
@@ -80,7 +80,7 @@ type callFile struct {
 	Size     int64
 	Mod      int64  // unix nanoseconds
 	Off      int64  // after the last whole line read
-	Head     string // hash of the prefix, to tell one replaced from one grown
+	Head     digest // of the prefix, to tell one replaced from one grown
 	HeadSize int
 	Path     string
 	Calls    []Call
@@ -345,8 +345,10 @@ func callSourcesWith(codex []file) []file { return callSourcesInto(nil, codex) }
 func callSourcesInto(out []file, codex []file) []file {
 	lists := append(callFileLists(codex), openCodeCallFiles(), zcodeCallFiles(), dshCallFiles(),
 		minimaxCallFiles(), kimiCallFiles(), wslFiles("kimi"), piCallFiles(), codebuddyCallFiles(), workbuddyAIFiles(),
-		agyCallFiles(),                        // #2097
-		antigravityCallFiles(),                // #2190
+		agyCallFiles(),                               // #2097
+		antigravityCallFiles(),                       // #2190
+		wslFiles("antigravity"), wslCallFiles("agy"), // @guyng35955 on X
+		devinCallFiles(),                      // aohan0905 on X
 		workbuddyCallFiles(), grokCallFiles()) // #4423
 	if out == nil {
 		return allowed(distinctOf(lists...))
@@ -392,7 +394,7 @@ func prepareCalls(f file, old *callFile, owned bool) *callFile {
 
 	head := headOf(f.path)
 	var st *callFile
-	if old != nil && !packed(f.path) && f.size >= old.Size && old.Off <= f.size && sameHead(head, old.Head, old.HeadSize) && old.ContentHash != "" && prefixHash(f.path, old.Off) == old.ContentHash {
+	if old != nil && !packed(f.path) && f.size >= old.Size && old.Off <= f.size && sameHead(head, old.Head, old.HeadSize) && old.ContentHash != (digest{}) && prefixHash(f.path, old.Off) == old.ContentHash {
 		if owned {
 			st = old.cloneState()
 		} else {
@@ -411,7 +413,7 @@ func prepareCalls(f file, old *callFile, owned bool) *callFile {
 		}
 	}
 	st.dirty = map[int]bool{}
-	st.Head, st.HeadSize, st.Path = hashHead(head), len(head), f.path
+	st.Head, st.HeadSize, st.Path = headDigest(head), len(head), f.path
 	st.readSize = f.size
 	return st
 }
@@ -1292,18 +1294,18 @@ func (st *callFile) codexCompact(i int) {
 }
 
 func hashHead(head string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(head))) }
-func sameHead(head, hash string, size int) bool {
-	return size >= 0 && len(head) >= size && hashHead(head[:size]) == hash
+func sameHead(head string, hash digest, size int) bool {
+	return size >= 0 && len(head) >= size && headDigest(head[:size]) == hash
 }
 
 // prefixHash checks distributed windows of the indexed prefix. Small files
-// are checked in full. The version tag invalidates earlier full-file hashes.
+// are checked in full.
 // Rewrites outside the sampled windows can go undetected; appends cost at most
 // 64 KiB of reads per fingerprint regardless of the session's length.
-func prefixHash(path string, n int64) string {
+func prefixHash(path string, n int64) digest {
 	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		return digest{}
 	}
 	defer f.Close()
 	h := sha256.New()
@@ -1314,7 +1316,7 @@ func prefixHash(path string, n int64) string {
 	defer hashBufs.Put(buf)
 	if n <= window*samples {
 		if _, err = io.ReadFull(f, buf[:n]); err != nil {
-			return ""
+			return digest{}
 		}
 		h.Write(buf[:n])
 	} else {
@@ -1322,12 +1324,12 @@ func prefixHash(path string, n int64) string {
 			off := (n - window) * i / (samples - 1)
 			// A full window may come back with io.EOF at the file's end.
 			if k, _ := f.ReadAt(buf[:window], off); int64(k) < window {
-				return ""
+				return digest{}
 			}
 			h.Write(buf[:window])
 		}
 	}
-	return fmt.Sprintf("sample-v1:%x", h.Sum(nil))
+	return digest(h.Sum(nil)[:16])
 }
 
 var hashBufs = sync.Pool{New: func() any { return new([64 << 10]byte) }}

@@ -282,6 +282,7 @@
       <li><b>magpie に届かない。</b>WSL 既定の NAT ネットワークでは、magpie は WSL ネットワーク上の Windows のアドレスでも専用のキーでゲートウェイを提供し、そのアドレスをエージェントの設定に書き込みます。ミラーモードでは、エージェントは Windows と同じく <code>127.0.0.1</code> を使います。通すかどうかは Windows ファイアウォールが決め、WSL のネットワークは「パブリック」扱いです。接続が遮断されるときはそこで magpie を許可してください。</li>
       <li><b>変更が反映されない。</b>WSL のエージェントは起動時に設定を読みます。WSL 側で再起動してください。</li>
     </ul>
+    <p>magpie が <span class="ui">再適用</span> や <span class="ui">直し方</span> を出しているエージェントは <a href="/docs/ja/agent-drift">エージェントが magpie を通らなくなったとき</a> を見てください。</p>
 
     <h2 id="lan"><a class="anchor" href="#lan">ネットワーク上の別のコンピュータから</a></h2>
     <p>既定では、ゲートウェイはこのコンピュータにだけ応答します。別のコンピュータから使うには <span class="ui">設定</span> › <span class="ui">ネットワークと共有</span> › <span class="ui">ローカルネットワークで共有</span> をオンにします。相手のコンピュータは <span class="ui">ゲートウェイ</span> ページの <span class="ui">ゲートウェイキー</span> のキーを送ります。</p>
@@ -296,6 +297,8 @@
     <p>Command Code、Cursor、Devin、Factory、Grok、Kiro、Xiaomi MiMo、Qoder、WorkBuddy、ZCode、Zed は magpie に組み込まれなくなり、それぞれ同じ働きをするコミュニティプラグインが提供します。以前に追加したアカウントはプラグインへの移行が必要で、移行するまで使えません。</p>
     <ul><li><b>直し方：</b>プロバイダ一覧の上に「… の組み込みサブスクリプションは終了しました。アカウントはまだプラグインに移行されていません」と出ます。<span class="ui">プラグインに移行</span> を押すと、magpie がプラグインをインストールし、各アカウントを確認します。移行してもアカウント、モデル、エージェントはそのままです。magpie は自動でも移行し、<span class="ui">プラグイン</span> ページからプラグインをインストールしても移行されます。</li></ul>
     <p>移行後のエラーはプラグインから来ています。サインイン、モデル、リクエストはプラグインが処理します。</p>
+
+    <p><a href="/docs/ja/mirrors">中国のミラー：magpie のプラグイン・Bun・アップデートを速くダウンロード</a></p>
 
     <h2 id="faq"><a class="anchor" href="#faq">よくある質問</a></h2>
     <h3>プロバイダは動いているのに、なぜ 502 になるのですか？</h3>

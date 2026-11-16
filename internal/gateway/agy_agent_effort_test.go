@@ -4,6 +4,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -48,7 +50,7 @@ func TestAgyAgentEffort(t *testing.T) {
 	}
 	s := New()
 	// agy's own request, as captured from agy 1.5.3 against a stub
-	const body = `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"includeThoughts":true,"thinkingBudget":-1}}}`
+	body := `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"includeThoughts":true,"thinkingBudget":-1}}}`
 	// the thinkingConfig the relay was sent
 	asked := func(agent, model string) gjson.Result {
 		t.Helper()
@@ -102,11 +104,50 @@ func TestAgyAgentEffort(t *testing.T) {
 			t.Errorf("picked %s for agy, opencode's to %s went %s, want %s", c.pick, c.model, got.Raw, asSent)
 		}
 	}
+	// agy's own /effort or --effort names a level in its request: that is
+	// the user's pick of the moment, over the row's (haohaolee on X)
+	if err := provider.SetAgentEffort("agy", "low"); err != nil {
+		t.Fatal(err)
+	}
+	body = strings.Replace(body, `"thinkingBudget":-1`, `"thinkingLevel":"HIGH"`, 1)
+	if got := asked("agy", pro); got.Get("thinkingLevel").String() != "HIGH" {
+		t.Errorf("agy asked HIGH with the row at low: sent %s", got.Raw)
+	}
+	body = strings.Replace(body, `"thinkingLevel":"HIGH"`, `"thinkingBudget":-1`, 1)
 	if err := provider.SetAgentEffort("agy", ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := asked("agy", pro); !same(got, asSent) {
 		t.Errorf("taken off: sent %s, want %s", got.Raw, asSent)
+	}
+}
+
+// A Gemini that lists a level above high (Gemini 4 Hydrogen's xhigh, as
+// Google's model page and models.dev give it) is sent it, and max goes as
+// its nearest, xhigh; a Gemini listing high at most (Carbon), or none, is
+// still sent high (#6452).
+func TestWithGeminiEffortAboveHigh(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	os.MkdirAll(filepath.Dir(catalog.CachePath()), 0o755)
+	if err := os.WriteFile(catalog.CachePath(), []byte(`{"google-vertex":{"models":{
+	  "gemini-4-hydrogen":{"id":"gemini-4-hydrogen","reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high","xhigh"]}]},
+	  "gemini-4-carbon":{"id":"gemini-4-carbon","reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high"]}]}}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	catalog.Reset()
+	t.Cleanup(catalog.Reset)
+	for _, c := range []struct{ model, effort, want string }{
+		{"gemini-4-hydrogen", "xhigh", "xhigh"},
+		{"gemini-4-hydrogen", "max", "xhigh"},
+		{"gemini-4-hydrogen", "high", "high"},
+		{"gemini-4-carbon", "xhigh", "high"},
+		{"gemini-4-carbon", "max", "high"},
+		{"gemini-3.9-unlisted", "max", "high"},
+	} {
+		out := withGeminiEffort([]byte(`{"contents":[]}`), c.model, c.effort)
+		if got := gjson.GetBytes(out, "generationConfig.thinkingConfig.thinkingLevel").String(); got != c.want {
+			t.Errorf("%s at %s: %s, want %s", c.model, c.effort, got, c.want)
+		}
 	}
 }
 
