@@ -11,6 +11,7 @@ package agent
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -199,8 +200,6 @@ func ompIn(at place) *Agent {
 // ompAt is omp with its agent folder at dir, magpie's entry in its
 // models.yml being entry's.
 func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
-	// magpie's entry laid over the one in the models file at path (ompKept)
-	ompProvider := func(path string) any { return ompKept(path, entry()) }
 	// omp reads the .yml and falls back to the .yaml
 	pick := func(name string) string {
 		yml := filepath.Join(dir, name+".yml")
@@ -208,6 +207,13 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 			return filepath.Join(dir, name+".yaml")
 		}
 		return yml
+	}
+	// the protocol picked in its row (omp_protocol.go)
+	protocol := ompProtocolKey(at, dir)
+	// magpie's entry, on the protocol picked, laid over the one in the
+	// models file at path (ompKept), an api the user typed there kept
+	ompProvider := func(path string) any {
+		return ompKept(path, ompAPIKept(path, ompOn(entry(), ompProtocol(protocol))))
 	}
 	path := pick("config")
 	// the entries of enabledModels a sync took out (scope_gone.go)
@@ -574,7 +580,12 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 				return edit.SetYAML(path, edit.KV{Path: "defaultThinkingLevel", Value: v})
 			},
 			Options: func(map[string]string) []Option { return static(append([]string{"auto"}, ompEfforts...)...) },
-		}), ompAdvisorFields(path)...),
+		}), append(ompAdvisorFields(path), protocolField(at, protocol, pick("models"), func() (string, bool) {
+			models := pick("models")
+			v, _ := edit.GetYAML(models, "providers."+magpieID+".api")
+			_, has := edit.GetYAMLText(models, "providers."+magpieID)
+			return v, has
+		}, writeMagpie, func() bool { return false }))...),
 	}
 }
 
@@ -622,9 +633,8 @@ type ompProviderEntry struct {
 	// key the gateway is shared on the network with
 	Auth   string `yaml:"auth,omitempty"`
 	APIKey string `yaml:"apiKey,omitempty"`
-	// Headers name omp to the gateway: omp 16.x asks with Bun's User-Agent
-	// and only a later one with its own (omp/18.4.4), so its requests went
-	// to "Bun" in usage and past omp's own rules and stand-ins
+	// Headers name omp to the gateway where omp doesn't itself
+	// (ompUserAgent)
 	Headers map[string]string `yaml:"headers,omitempty"`
 	// Compat names the header omp sends its session in. omp names the
 	// conversation on Anthropic's Messages API (X-Claude-Code-Session-Id),
@@ -644,6 +654,44 @@ const ompSessionSince = "16.0.6"
 // effort (pi-ai 16.4.0); 16.3.5's schema stops at xhigh and turns the whole
 // file away over a max.
 const ompMaxSince = "16.4.0"
+
+// ompNamedSince is the first omp that names itself to every provider: its
+// requests carry User-Agent omp/<version> (pi-ai 18.1.6, transportFetch's
+// withInferenceUserAgent: "Inference requests now identify as omp by
+// default"). 18.1.5 and older, 16.x among them, ask with Bun's (Bun/1.4.2),
+// on Chat, Responses, Messages and Gemini alike; each run against a stand-in
+// gateway, 16.3.5, 18.1.5, 18.1.6 and 18.4.4.
+const ompNamedSince = "18.1.6"
+
+// ompUserAgent is the User-Agent magpie's provider names omp by, "" for
+// none. Before ompNamedSince omp asks with Bun's, so its requests went to
+// "Bun" in usage and past omp's own rules and stand-ins: magpie names it,
+// with its version. One that names itself is left to, as a header would
+// put its own version out of sight (Zyvaletta on X). One whose version
+// isn't known is named plain omp: a newer one loses its version to it, an
+// older one unnamed would be Bun's.
+func ompUserAgent(version string) string {
+	switch {
+	case version == "":
+		return "omp"
+	case Newer(ompNamedSince, version):
+		return "omp/" + version
+	}
+	return ""
+}
+
+// ompOwnUserAgent says whether a User-Agent in magpie's provider is one
+// magpie writes (ompUserAgent): plain omp, as every magpie before wrote,
+// or omp/<version> (a pre-release's too). Any other is the user's.
+func ompOwnUserAgent(v string) bool {
+	if v == "omp" {
+		return true
+	}
+	ver, ok := strings.CutPrefix(v, "omp/")
+	return ok && ompVersionRe.MatchString(ver)
+}
+
+var ompVersionRe = lazyre.New(`^v?[0-9]+(\.[0-9]+)*([-+][0-9A-Za-z.+-]*)?$`)
 
 // ompVersion is the version of the omp on PATH, "" when not known; a var so
 // tests can fake it.
@@ -689,6 +737,12 @@ func ompProviderAt(gw, version string) ompProviderEntry {
 			e.API = "openai-responses"
 		case slices.Contains(m.APIs, string(provider.Anthropic)):
 			e.API, e.BaseURL = "anthropic-messages", gw
+			// not gateway.AsksAdaptively, as dsh and Pi: omp's budget
+			// isn't clamped (xhigh and max are 32768, which the gateway
+			// and agy-cli read as xhigh), and its anthropic-adaptive
+			// turns reasoning off by leaving thinking out at the lowest
+			// effort, which a model that can stop thinking (a GLM)
+			// takes as thinking on (#6778)
 			mode = "budget"
 			if gateway.AdaptiveThinking(m.ID) {
 				mode = "anthropic-adaptive"
@@ -732,8 +786,10 @@ func ompProviderAt(gw, version string) ompProviderEntry {
 	}
 	images := ompImageModels(version, ms)
 	ms = append(ms, images...)
-	e := ompProviderEntry{BaseURL: gw + "/v1", API: "openai-completions", Auth: "none",
-		Headers: map[string]string{"User-Agent": "omp"}, Models: ms}
+	e := ompProviderEntry{BaseURL: gw + "/v1", API: "openai-completions", Auth: "none", Models: ms}
+	if ua := ompUserAgent(version); ua != "" {
+		e.Headers = map[string]string{"User-Agent": ua}
+	}
 	if version != "" && !Newer(ompSessionSince, version) {
 		e.Compat = map[string]string{"promptCacheSessionHeader": "x-session-affinity"}
 	}
@@ -808,8 +864,57 @@ func ompGeminiMode(id string) string {
 // ProviderConfigSchema). Each stays; the address, API, auth, key and model
 // list are magpie's, an auth or key it no longer writes gone with it, so a
 // loopback's auth: none never sits beside the key a WSL omp needs (#2030).
+//
+// A User-Agent header is magpie's while it is one magpie writes
+// (ompOwnUserAgent): the one it writes now takes its place, or none, so an
+// omp that names itself is no longer named plain omp by an older magpie's
+// header. Any other is the user's and stays, in place of magpie's.
 func ompKept(path string, e ompProviderEntry) any {
-	return yamlKept(path, "providers."+magpieID, e, "baseUrl", "api", "auth", "apiKey", "models")
+	kept := yamlKept(path, "providers."+magpieID, e, "baseUrl", "api", "auth", "apiKey", "models")
+	out, ok := kept.(map[string]any)
+	if !ok {
+		return kept
+	}
+	var have map[string]any
+	if raw, err := edit.Read(path); err == nil {
+		var doc struct {
+			Providers map[string]struct {
+				Headers map[string]any `yaml:"headers"`
+			} `yaml:"providers"`
+		}
+		if yaml.Unmarshal(raw, &doc) == nil {
+			have = doc.Providers[magpieID].Headers
+		}
+	}
+	theirs := map[string]any{}
+	for k, v := range have {
+		if s, _ := v.(string); strings.EqualFold(k, "User-Agent") && !ompOwnUserAgent(s) {
+			theirs[k] = v
+		}
+	}
+	headers, _ := out["headers"].(map[string]any)
+	for k := range headers {
+		if strings.EqualFold(k, "User-Agent") {
+			delete(headers, k)
+		}
+	}
+	if len(theirs) > 0 {
+		if headers == nil {
+			headers = map[string]any{}
+		}
+		maps.Copy(headers, theirs)
+	} else if ua := e.Headers["User-Agent"]; ua != "" {
+		if headers == nil {
+			headers = map[string]any{}
+		}
+		headers["User-Agent"] = ua
+	}
+	if len(headers) == 0 {
+		delete(out, "headers")
+	} else {
+		out["headers"] = headers
+	}
+	return out
 }
 
 // ompOwnOptions lists the models of the providers the user added to omp's

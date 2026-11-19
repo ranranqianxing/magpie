@@ -236,6 +236,24 @@ func fakeChrome(r *bufio.Reader, how string) {
 // image file before it takes them in: one that ends naming one.
 var namesImage = regexp.MustCompile(`(?im)\.(png|jpe?g|gif|webp)[ \t]*$`)
 
+// fakeImage is an image the fake took in, as its prompt holds it.
+var fakeImage = regexp.MustCompile(`\[Image #(\d+):([^\]]*)\]`)
+
+// fakeUserRow is a message's content as Claude Code's transcript records
+// it: its words, each image's mark "[Image #<n>]" and, with images, the
+// images as blocks after them (whole.go reads it so).
+func fakeUserRow(typed string) any {
+	m := fakeImage.FindAllStringSubmatch(typed, -1)
+	if len(m) == 0 {
+		return typed
+	}
+	content := []any{map[string]any{"type": "text", "text": fakeImage.ReplaceAllString(typed, "[Image #$1]")}}
+	for _, img := range m {
+		content = append(content, map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": base64.StdEncoding.EncodeToString([]byte(img[2]))}})
+	}
+	return content
+}
+
 // nameWait is how long the fake takes words that name an image file to
 // take in. Claude Code took 0.45s, asking the clipboard for the file; the
 // fake's is longer than its image's 200ms and the Enter after it, for an
@@ -328,6 +346,15 @@ func fakeClaude(args []string) {
 		time.AfterFunc(d, func() { _ = os.WriteFile(listed, nil, 0o600) })
 	}
 	streams := 0
+	// FAKE_HISTORY: a resumed conversation's history is drawn above the
+	// prompt, and it talks of the dialogs
+	if os.Getenv("FAKE_HISTORY") != "" {
+		fmt.Print("\r\n> Why does it say asked to accept running in Bypass\x1b[1CPermissions\x1b[1Cmode?\r\n" +
+			"  ❯ No, exit\r\n  ❯ Yes, I accept\r\n  Do you trust this folder? Yes, I trust this folder\r\n" +
+			"  Choose the text style that looks best; Select login method; Press Enter to continue;\r\n" +
+			"  Enter to confirm · Esc to skip, keep browser tools off\r\n" +
+			strings.Repeat("  and more history of that conversation, long past the dialogs' words\r\n", 40))
+	}
 	fmt.Print("\r\n❯ ")
 	// the prompt's words, and the prompt as drawn, again as a paste
 	// starts and as one is taken in. As Claude Code 2.1.318 does, it draws
@@ -352,6 +379,11 @@ func fakeClaude(args []string) {
 	takeText := func(p string) {
 		mu.Lock()
 		defer mu.Unlock()
+		// FAKE_CUT: a paste over 1024 bytes loses its whole blocks, as
+		// Windows 10's own ConPTY lost them (#5205): the tail is left
+		if os.Getenv("FAKE_CUT") == "1" && len(p) > 1024 {
+			p = p[len(p)/1024*1024:]
+		}
 		draw := p
 		if breaks := strings.Count(p, "\n"); len(p) > 800 || breaks > 2 {
 			pasted++
@@ -438,6 +470,7 @@ func fakeClaude(args []string) {
 			continue
 		}
 		line := typed.String()
+		asTyped := line // what the transcript records, as Claude Code does (fakeUserRow)
 		typed.Reset()
 		drawn.Reset()
 		mu.Unlock()
@@ -513,7 +546,7 @@ func fakeClaude(args []string) {
 		}
 		f, _ := os.OpenFile(filepath.Join(dir, sid+".jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		rows := []any{
-			map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": line}},
+			map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": fakeUserRow(asTyped)}},
 			map[string]any{"type": "assistant", "requestId": "req_1", "message": map[string]any{"id": "msg_1", "model": "claude-haiku", "role": "assistant",
 				"content": []any{map[string]any{"type": "text", "text": "echo: " + line}}}},
 			map[string]any{"type": "system", "subtype": "turn_duration"},
@@ -720,6 +753,29 @@ func TestShimImageNotTakenIsUnpastable(t *testing.T) {
 	out := runShim(t, []string{"FAKE_NO_IMAGE=1"}, append([]string{fakePath(t)}, pArgs...), []string{img}, 2)
 	if out[1]["type"] != "result" || out[1]["is_error"] != true || !strings.HasPrefix(fmt.Sprint(out[1]["result"]), Unpastable+ImageNotTaken) {
 		t.Fatalf("the turn ended %v, want an error beginning %q", out[1], Unpastable+ImageNotTaken)
+	}
+}
+
+// A message that reaches Claude Code cut, as Windows 10's own ConPTY cut
+// one over 1KB (#5205), ends the turn in an error that begins Unpastable
+// before any of its reply, which the bridge asks again as claude -p: it
+// was answered as sent, the model given the cut's tail. A short one on the
+// same console is answered as before.
+func TestShimCutMessageIsUnpastable(t *testing.T) {
+	long := "K-HEAD " + strings.Repeat("filler words ", 400) + " K-TAIL"
+	out := runShim(t, []string{"FAKE_CUT=1"}, append([]string{fakePath(t)}, pArgs...), []string{long}, 2)
+	if r := out[1]; r["type"] != "result" || r["is_error"] != true || !strings.HasPrefix(fmt.Sprint(r["result"]), Unpastable) ||
+		!strings.Contains(fmt.Sprint(r["result"]), "characters") {
+		t.Fatalf("a cut message ended %v, want an error beginning %q", out, Unpastable)
+	}
+	for _, m := range out {
+		if m["type"] == "assistant" || m["type"] == "stream_event" {
+			t.Fatalf("a cut message's reply got out: %v", out)
+		}
+	}
+	short := runShim(t, []string{"FAKE_CUT=1"}, append([]string{fakePath(t)}, pArgs...), []string{"hello"}, 3)
+	if r := short[2]; r["type"] != "result" || r["is_error"] != false {
+		t.Fatalf("a short message ended %v, want answered", short)
 	}
 }
 
@@ -1130,6 +1186,17 @@ func TestShimTrustsWhenTold(t *testing.T) {
 // that folder's settings.json and the next run is shown none of it.
 func TestShimAcceptsBypassDisclaimer(t *testing.T) {
 	out := runShim(t, []string{"FAKE_BYPASS=1", BypassEnv + "=1"}, append([]string{fakePath(t)}, pArgs...), []string{"hello"}, 3)
+	if out[0]["subtype"] != "init" || out[1]["type"] != "assistant" {
+		t.Fatalf("got %v, want an interactive turn", out)
+	}
+}
+
+// A resumed conversation whose history holds the dialogs' words and
+// option rows is not a dialog: the prompt box is showing, and the run
+// goes on, with no BypassEnv or TrustEnv to answer one (@alisenray on X:
+// every --resume failed at 45s, "not answered", no dialog on screen).
+func TestShimIgnoresDialogWordsInHistory(t *testing.T) {
+	out := runShim(t, []string{"FAKE_HISTORY=1"}, append([]string{fakePath(t)}, pArgs...), []string{"hello"}, 3)
 	if out[0]["subtype"] != "init" || out[1]["type"] != "assistant" {
 		t.Fatalf("got %v, want an interactive turn", out)
 	}

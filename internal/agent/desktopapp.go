@@ -136,9 +136,18 @@ var desktopApps = map[string]desktopApp{
 	// and needs no CLI. Its Windows install folder isn't known here, so on
 	// Windows only the rule that a desktop app's folder is never gone holds.
 	// Antigravity's app (antigravity.go), not Antigravity IDE
-	// (com.google.antigravity-ide). Its Windows and Linux installs aren't
-	// known here: there the file its backend writes finds it.
-	"antigravity": {id: "com.google.antigravity", names: []string{"Antigravity.app"}},
+	// (com.google.antigravity-ide). On Windows Google's
+	// Antigravity-x64.exe (2.32.1 from antigravity.google/download) is
+	// electron-builder's per-user NSIS installer, package antigravity: a
+	// real 2.30.0 install on the Windows box is
+	// %LOCALAPPDATA%\Programs\antigravity\Antigravity.exe, registered
+	// under HKCU's Uninstall\121a0be4-… (the UUID v5 of
+	// com.google.antigravity, as dsh's) with its DisplayVersion. A fresh
+	// install writes no ~/.gemini/antigravity, so with only the file its
+	// backend writes the app went unfound there (JJasonsun on Discord).
+	// Linux has only a tarball to unpack anywhere, which writes no desktop
+	// entry: there the file its backend writes finds it.
+	"antigravity": {id: "com.google.antigravity", names: []string{"Antigravity.app"}, win: filepath.Join("antigravity", "Antigravity.exe"), guid: "121a0be4-63bd-531e-acf8-fc3924c7e984"},
 	// MiniMax Code Desktop (3.1.10: MiniMax Code.app, com.minimax.agent.cn
 	// from filecdn.minimax.chat, com.minimax.agent from file.cdn.minimax.io;
 	// app-identity.js) runs the mcode runtime on ~/.minimax/config.yaml, as
@@ -148,6 +157,9 @@ var desktopApps = map[string]desktopApp{
 	// folder is the default's, not read from an install.
 	"minimax-code": {id: "com.minimax.agent.cn", names: []string{"MiniMax Code.app"}, win: filepath.Join("MiniMax Code", "MiniMax Code.exe"),
 		more: []desktopApp{{id: "com.minimax.agent", names: []string{"MiniMax Code.app"}}}},
+	// Nowledge Mem (0.10.121: Nowledge Mem.app, co.nowledge.mem.desktop, a
+	// Tauri app) keeps its config folder only once it has been opened.
+	"nowledge-mem": {id: "co.nowledge.mem.desktop", names: []string{"Nowledge Mem.app"}},
 	"codebuddy": {id: "com.tencent.codebuddy", names: []string{"CodeBuddy.app"},
 		more: []desktopApp{{id: "com.tencent.codebuddycn", names: []string{"CodeBuddy CN.app"}}}},
 }

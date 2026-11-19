@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/sessions"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -58,8 +59,9 @@ func gatewayMode(web bool) (bool, string) {
 
 // agentsHere says whether an agent is found on this computer, stopping at
 // the first: each agent's check can read app bundles and ask Spotlight.
-// A test's own.
-var agentsHere = func() bool { return slices.ContainsFunc(agent.All(), (*agent.Agent).Detected) }
+// WSL's agents are those last listed: a hung wsl.exe doesn't hold the
+// Sessions page (sessions.Dirs asks this). A test's own.
+var agentsHere = func() bool { return slices.ContainsFunc(agent.AllKnown(), (*agent.Agent).Detected) }
 
 // gatewayModeRoutes: POST /api/settings/gateway-mode {"mode": "on" | "off"
 // | ""} sets Settings' choice, "" leaving it to magpie again.
@@ -157,4 +159,7 @@ func agentsHereKept() bool {
 func init() {
 	f := ownSessionsOff
 	sessions.OwnOff.Store(&f)
+	// the browser page in gateway mode ticks a skill or the prompts for
+	// no agent: a magpie that uses this one's Library gives them to its own
+	library.NoAgentsShown = func() bool { on, _ := gatewayMode(true); return on }
 }

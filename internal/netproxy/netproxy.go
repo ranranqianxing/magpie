@@ -203,6 +203,13 @@ func forChoice(c string) (*url.URL, error) {
 // its transport.
 var HTTP1 func(u *url.URL) bool
 
+// Elsewhere sends a request that Go's own TLS can't carry another way,
+// before a transport of Dispatch's dials it: ok false leaves the request
+// to the transport. internal/provider sets it for OpenCode Zen's free
+// tier, which answers a client that isn't Bun's 429 (zen_bun.go); nil
+// leaves every request to its transport.
+var Elsewhere func(req *http.Request) (res *http.Response, ok bool, err error)
+
 // Dispatch is a RoundTripper sending a request through base, unless its
 // context names a provider's own proxy (With): then through a clone of
 // base kept for that proxy alone. Connections are so reused among the
@@ -249,6 +256,11 @@ type route struct {
 }
 
 func (d *dispatch) RoundTrip(req *http.Request) (*http.Response, error) {
+	if f := Elsewhere; f != nil {
+		if res, ok, err := f(req); ok {
+			return res, err
+		}
+	}
 	if d.moved() {
 		d.CloseIdleConnections()
 	}
@@ -390,7 +402,7 @@ func For(u *url.URL) (*url.URL, error) {
 	if p, err := fromEnv(u); p != nil || err != nil {
 		return p, err
 	}
-	sys := System()
+	sys, _ := liveSystem()
 	if sys.URL == "" {
 		return fromShell(u), nil
 	}
@@ -438,7 +450,7 @@ func EnvWith(choice string, env []string) []string {
 				return env
 			}
 		}
-		sys := System()
+		sys, _ := liveSystem()
 		p, bypass = sys.URL, sys.Bypass
 		if p == "" {
 			if p, bypass = shellProxy(); p == "" {
@@ -525,11 +537,17 @@ func Describe() (proxy, source string) {
 	if p, _ := fromEnv(u); p != nil {
 		return p.String(), "environment"
 	}
-	if sys := System(); sys.URL != "" {
+	sys, dead := liveSystem()
+	if sys.URL != "" {
 		return sys.URL, "system"
 	}
 	if p := fromShell(u); p != nil {
 		return p.String(), "environment"
+	}
+	if dead != "" {
+		// the system's proxy is set, but nothing listens on its port:
+		// requests go direct until something does (liveSystem)
+		return dead, "down"
 	}
 	return "", "none"
 }
@@ -546,6 +564,9 @@ func Redact(raw string) string {
 		return ""
 	}
 	if settings.IsProxyRef(raw) {
+		if a := sshShown(raw); a != "" {
+			return a
+		}
 		// a saved proxy shown as its address, with no login
 		u.User = nil
 		return u.String()
@@ -559,6 +580,18 @@ func Redact(raw string) string {
 		address = strings.TrimPrefix(address, "http://")
 	}
 	return address
+}
+
+// sshShown is how a saved SSH proxy (a reference) is shown: its server's
+// address, not the tunnel's on loopback; "" for any other proxy.
+func sshShown(ref string) string {
+	id := settings.ProxyID(ref)
+	for _, p := range settings.Shared().Proxies {
+		if p.ID == id && p.IsSSH() {
+			return strings.TrimSpace(p.URL)
+		}
+	}
+	return ""
 }
 
 // fromEnv is the proxy the environment names for u: HTTPS_PROXY or
@@ -683,6 +716,29 @@ func System() Proxy {
 	sysCache.Lock()
 	defer sysCache.Unlock()
 	return sysCache.p
+}
+
+// liveSystem is System as Auto takes it, for magpie's own requests and
+// the CLIs and plugin hosts it starts: a system proxy on this computer's
+// loopback that nothing listens on is none, and dead is its address. A
+// VPN or proxy app that quits without clearing Windows' Internet Options
+// (or the system's on macOS and Linux) leaves 127.0.0.1:port there, and
+// every request failed with "proxy not reachable", a restart of magpie
+// too, until the user set the proxy Off (@bitssly on X). The login
+// shell's proxy is taken so already (shell.go). The environment's
+// *_PROXY, set for this process by whoever started it, and a proxy set
+// in magpie are never taken around: a dead one fails, so it shows. A
+// port is looked at again within 2 seconds while down (listening), so
+// the proxy app coming back is followed at once.
+func liveSystem() (p Proxy, dead string) {
+	p = System()
+	if p.URL == "" {
+		return p, ""
+	}
+	if u, err := Parse(p.URL); err == nil && u.Hostname() != "" && !listening(u) {
+		return Proxy{}, p.URL
+	}
+	return p, ""
 }
 
 // refreshSystem reads the system proxy into sysCache, then closes done.

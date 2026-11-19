@@ -64,6 +64,8 @@ var (
 type shim struct {
 	outMu sync.Mutex
 	out   io.Writer
+	// held takes what is written meanwhile, nil when none (whole.go)
+	held io.Writer
 
 	// pty is Claude Code's terminal: what it draws is read from it, and
 	// what is typed written to it
@@ -91,6 +93,11 @@ type shim struct {
 	rowsMu sync.Mutex
 	rows   int
 	rowsCh chan struct{}
+	// said is the words of the messages that reached the transcript since
+	// one was sent, to check it whole (whole.go); nil when none is
+	said []heardRow
+	// taken is the image files' paths Claude Code took as images meanwhile
+	taken []string
 	// a turn is going: from a message's row to the turn's end
 	busy bool
 
@@ -491,6 +498,68 @@ var (
 	trustSettle = 300 * time.Millisecond
 )
 
+var (
+	// the option rows a question is answered on: the unselected row has
+	// no ❯, so they are matched by their words
+	noRow     = lazyre.New(`No,\s*exit`)
+	trustRow  = lazyre.New(`Yes,\s*I trust`)
+	bypassRow = lazyre.New(`Yes,\s*I accept`)
+	trustAsk  = "trust this folder"
+	bypassAsk = "Bypass Permissions mode"
+	chromeAsk = "keep browser tools off"
+	themeAsk  = "Choose the text style"
+	// the most a dialog draws under its option rows: its footer
+	// ("Enter to confirm · Esc to cancel"). A resumed conversation that
+	// talks of the dialog has its prompt box and status line there.
+	dialogFoot = 160
+	// the most a dialog draws under its heading: its options, and a
+	// preview of the choice
+	dialogBody = 1500
+)
+
+// tailAfter is how many characters of words follow byte offset end.
+func tailAfter(words string, end int) int {
+	return utf8.RuneCountInString(words[end:])
+}
+
+// optionDialog is whether words end on a question: its heading, then its
+// option rows, a No and the yes row, with only the dialog's footer under
+// them. The question's words alone are not it: a resumed conversation's
+// history can hold them (#, @alisenray: "Bypass Permissions mode" in the
+// history failed every --resume at 45s with the prompt box showing).
+func optionDialog(words, ask string, yes *lazyre.RE) bool {
+	h := strings.Index(words, ask)
+	if h < 0 {
+		return false
+	}
+	end := -1
+	for _, re := range []*lazyre.RE{noRow, yes} {
+		m := re.FindAllStringIndex(words, -1)
+		if len(m) == 0 || m[len(m)-1][0] < h {
+			return false
+		}
+		if e := m[len(m)-1][1]; e > end {
+			end = e
+		}
+	}
+	return tailAfter(words, end) <= dialogFoot
+}
+
+// headingDialog is whether words end on a screen drawn under heading ask
+// (an onboarding screen, the Claude in Chrome offer, sign-in): the
+// heading is in the bottom of the screen, not further up in history.
+func headingDialog(words, ask string) bool {
+	h := strings.LastIndex(words, ask)
+	return h >= 0 && tailAfter(words, h+len(ask)) <= dialogBody
+}
+
+// lastMatchNear is whether re matches in words with at most n characters
+// after its last match.
+func lastMatchNear(re *lazyre.RE, words string, n int) bool {
+	m := re.FindAllStringIndex(words, -1)
+	return len(m) > 0 && tailAfter(words, m[len(m)-1][1]) <= n
+}
+
 // lastAt is where re's last match in p starts, -1 with none.
 func lastAt(re *lazyre.RE, p string) int {
 	m := re.FindAllStringIndex(p, -1)
@@ -597,30 +666,30 @@ func (s *shim) ready() error {
 		now, _ := s.looks()
 		nowWords := strings.Join(strings.Fields(now+" "+p), " ")
 		doing := "showed no prompt"
-		if strings.Contains(nowWords, "trust this folder") {
+		if optionDialog(nowWords, trustAsk, trustRow) {
 			doing = asking
-		} else if strings.Contains(nowWords, "Bypass Permissions mode") {
+		} else if optionDialog(nowWords, bypassAsk, bypassRow) {
 			doing = bypassAsking
-		} else if strings.Contains(nowWords, "keep browser tools off") {
+		} else if headingDialog(nowWords, chromeAsk) {
 			doing = chromeAsking
 		}
 		s.doing.Store(doing)
 		switch {
-		case strings.Contains(p, "trust this folder") && os.Getenv(TrustEnv) != "1":
+		case optionDialog(words, trustAsk, trustRow) && os.Getenv(TrustEnv) != "1":
 			return errUntrusted
-		case strings.Contains(words, "Bypass Permissions mode") && os.Getenv(BypassEnv) != "1":
+		case optionDialog(words, bypassAsk, bypassRow) && os.Getenv(BypassEnv) != "1":
 			return fmt.Errorf("Claude Code's interactive mode runs in Bypass Permissions mode and asks to accept it, which only its user answers: %s", s.lastScreen())
-		case signIn.MatchString(p):
+		case signIn.MatchString(p) && lastMatchNear(signIn, words, dialogBody):
 			return fmt.Errorf("Claude Code's interactive mode asks to sign in: %s", s.lastScreen())
-		case firstRun.MatchString(words):
+		case lastMatchNear(firstRun, words, dialogFoot):
 			if err := onboard("notes", "\r"); err != nil {
 				return err
 			}
-		case terminalSetup.MatchString(words):
+		case lastMatchNear(terminalSetup, words, dialogFoot):
 			if err := onboard("terminal", "\x1b"); err != nil {
 				return err
 			}
-		case (strings.Contains(p, "trust this folder") || strings.Contains(words, "Bypass Permissions mode")) && answered < 3:
+		case (optionDialog(words, trustAsk, trustRow) || optionDialog(words, bypassAsk, bypassRow)) && answered < 3:
 			// the choice is the last one drawn after ❯, "No, exit" at
 			// first. A key sent as the question is first drawn can be lost
 			// to its being drawn again on No, so Enter goes only to a Yes
@@ -648,7 +717,7 @@ func (s *shim) ready() error {
 					_, _ = io.WriteString(s.pty, "\x1b[B")
 				}
 			}
-		case strings.Contains(words, "keep browser tools off"):
+		case headingDialog(words, chromeAsk):
 			// Claude in Chrome found: kept off, as the bridge runs it
 			// --no-chrome. Answered once the offer has stayed drawn, as
 			// the onboarding is: 2.1.319 turns away a key sent just after
@@ -657,7 +726,7 @@ func (s *shim) ready() error {
 			if err := onboard("chrome", "\x1b"); err != nil {
 				return fmt.Errorf("Claude Code's interactive mode asks whether to use Claude in Chrome and takes no answer; run Claude Code once in a terminal and answer it: %s", s.lastScreen())
 			}
-		case strings.Contains(words, "Choose the text style"):
+		case headingDialog(words, themeAsk):
 			if err := onboard("theme", "\r"); err != nil {
 				return err
 			}
@@ -729,6 +798,10 @@ func (s *shim) emit(v any) {
 	b, _ := json.Marshal(v)
 	s.outMu.Lock()
 	defer s.outMu.Unlock()
+	if s.held != nil {
+		_, _ = s.held.Write(append(b, '\n'))
+		return
+	}
 	_, _ = s.out.Write(append(b, '\n'))
 }
 
@@ -776,11 +849,12 @@ func (s *shim) input(r io.Reader) error {
 			err = s.send(pieces)
 			s.dropImages()
 			var unpasted *imageUnpasted
-			if errors.As(err, &unpasted) {
+			var cut *messageCut
+			if errors.As(err, &unpasted) || errors.As(err, &cut) {
 				// the prompt holds the path as words: the turn is told
 				// it failed, for the bridge to ask it as claude -p, and
 				// this Claude Code ends with it
-				s.emit(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true, "session_id": s.sid,
+				s.tell(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true, "session_id": s.sid,
 					"result": Unpastable + err.Error()})
 			}
 			if err != nil {
@@ -1258,11 +1332,18 @@ func pasteClean(text string) string {
 func (s *shim) send(pieces []piece) error {
 	s.rowsMu.Lock()
 	before, busy := s.rows, s.busy
+	s.said = []heardRow{} // kept from now on (heard), till send returns
 	s.rowsMu.Unlock()
+	defer s.heardAll()
+	// a row counted (sawRow) while send failed before its check is let out
+	defer s.letHeld()
+	var pasted strings.Builder // the words pasted, to check them whole
+	images := 0
 	marker := 0
 	for i, p := range pieces {
 		var err error
 		if p.image != "" {
+			images++
 			if marker, err = s.pasteImage(s.path(p.image), marker); err != nil {
 				return err
 			}
@@ -1276,6 +1357,8 @@ func (s *shim) send(pieces []piece) error {
 		if i == 0 && len(pieces) == 1 && strings.TrimSpace(p.text) == "" {
 			p.text = "."
 		}
+		pasted.WriteString(p.text)
+		pasted.WriteByte('\n')
 		s.clearScreen()
 		if _, err := io.WriteString(s.pty, "\x1b[200~"+p.text+"\x1b[201~"); err != nil {
 			return err
@@ -1295,7 +1378,7 @@ func (s *shim) send(pieces []piece) error {
 			sent := s.rows > before
 			s.rowsMu.Unlock()
 			if sent {
-				return nil
+				return s.checkWhole(pasted.String(), images)
 			}
 			select {
 			case <-s.rowsCh:
@@ -1534,11 +1617,20 @@ func (s *shim) transcript() string {
 // result (renderParts).
 const userMark = "[user message]\n"
 
+// sawRow counts a message's row. While one sent is checked (said isn't
+// nil), what comes after the row is held from here, on the transcript's
+// own reader: the reply is read right after its message's row, and held
+// only once send saw the count, a reply got out before its message was
+// checked whole (#6887).
 func (s *shim) sawRow() {
 	s.rowsMu.Lock()
 	s.rows++
 	s.busy = true
+	checking := s.said != nil
 	s.rowsMu.Unlock()
+	if checking {
+		s.hold()
+	}
 	select {
 	case s.rowsCh <- struct{}{}:
 	default:

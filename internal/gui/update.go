@@ -67,9 +67,16 @@ type updater struct {
 	// downloads what it finds whatever Settings' NoAutoDownload says; with
 	// it on, any other check stops at found (#2296)
 	fetch bool
-	// keep: the check under way is a restart's, which leaves a version
-	// downloaded and waiting as it is (freshen)
+	// keep: the check under way is the update dialog's, which leaves a
+	// version downloaded and waiting as it is (freshen)
 	keep bool
+	// restarting: the check under way is a restart's (recheck), which
+	// downloads a newer version in place of the one waiting, a restart
+	// waiting for the gateway included; restartGot is the version such a
+	// check downloaded, or found to be the newest, which a restart then
+	// goes into without asking again
+	restarting bool
+	restartGot string
 	// again: a check came while a download was under way (one download
 	// at a time); once that one is in, the feed is asked again, and a
 	// newer version found then takes its place
@@ -121,13 +128,20 @@ type updateJSON struct {
 	Notes   string `json:"notes,omitempty"`
 	URL     string `json:"url,omitempty"`
 	Stuck   string `json:"stuck,omitempty"` // available: why it can't update itself
+	// Run tells this run of magpie from the next, of the same version:
+	// a page whose restart asked for no update reloads once it changes
+	// (restart.go)
+	Run int64 `json:"run,omitempty"`
 	// available, stuck "not-writable": the folder magpie may not write to
 	StuckDir string `json:"stuckDir,omitempty"`
 	// available, stuck "package": the package manager that installed
 	// magpie and updates it (pacman's magpie-bin from the AUR, say), and
 	// the command that does
 	Packaged *packagedJSON `json:"packaged,omitempty"`
-	Retry    bool          `json:"retry,omitempty"` // error: a click downloads it again
+	// available, stuck "container": the image of the version out, its
+	// own tag (update.Image)
+	Image string `json:"image,omitempty"`
+	Retry bool   `json:"retry,omitempty"` // error: a click downloads it again
 	// error: the download failed through this mirror (Settings' UpdateMirror),
 	// and GitHub itself may do (#893)
 	Mirror string `json:"mirror,omitempty"`
@@ -141,7 +155,13 @@ type updateJSON struct {
 	// isn't the newest
 	Channel string `json:"channel,omitempty"`
 	Newest  string `json:"newest,omitempty"`
-	Done    int64  `json:"done,omitempty"` // downloading: bytes so far
+	// Ahead: latest on Stable or Daily, this version is newer than the
+	// channel's (Latest). Nothing is installed until the channel passes
+	// it, and "up to date on Daily" read as an update that never came
+	// (realfxw on X: 0.1.4445 on Daily, whose pick was 0.1.4395, restarted
+	// again and again)
+	Ahead bool  `json:"ahead,omitempty"`
+	Done  int64 `json:"done,omitempty"` // downloading: bytes so far
 	// downloading: the step under way, "" before the first
 	// (update.StepDownload, StepRetry, StepVerify, StepUnpack,
 	// StepSignature), and how fast the bytes came over the last seconds,
@@ -371,23 +391,26 @@ func (u *updater) download() bool {
 	return true
 }
 
-// recheck asks the feed before a restart that has no version downloaded
-// and waiting to go into (what another magpie put in, say). It waits for
-// the feed a little while (recheckTicks of recheckTick); a newer version
-// is then downloading. asked is a click, which downloads what is found
-// whatever Settings' NoAutoDownload says (coeo91 on Discord).
+// recheck asks the feed before a restart, so the restart goes into the
+// newest version out: one newer than the version downloaded and waiting
+// is downloaded in its place, and the restart goes into that once it is
+// in. The clock's check runs every half hour or more, and magpie releases
+// many times a day, so the one waiting was often a release or more old,
+// and the new version's first check had the user update again at once
+// (char1es_lu on X). It waits for the feed a little while (recheckTicks of
+// recheckTick); a newer version is then downloading. asked is a click,
+// which downloads what is found whatever Settings' NoAutoDownload says
+// (coeo91 on Discord).
 //
-// A version downloaded and waiting is restarted into as it is, and the
-// feed isn't asked, however it came to be downloaded: by itself (the
-// default), by a click on Download update, or by a restart's own asking.
-// magpie releases many times a day, so a click that asked found a newer
-// one nearly every time and downloaded it whole while the user waited:
-// the download done ahead of time was no use (canlee886 on X), the
-// header's Update downloaded again and again and never restarted
-// (elis_pina on X, on Windows), and Restart after Download update went
-// off downloading again (sakamotokurome on X, with downloads on a click:
-// "重启能不能跟更新分开"). The new version's first check, seconds after it
-// starts, finds whatever is newer by then.
+// The feed isn't asked, and the one waiting is restarted into as it is
+// (keepsStaged), when:
+//   - a restart's own check downloaded it: the header's Update restarts
+//     once a click's download is in, and asking again there found a newer
+//     one, downloaded it, and never restarted (elis_pina on X, on Windows);
+//   - downloads wait for a click (Settings' NoAutoDownload): the one
+//     clicked for is what goes in, and nothing more is fetched
+//     (sakamotokurome on X: "重启能不能跟更新分开"; iiiiiimone on X, whose
+//     proxy is billed by traffic).
 func (u *updater) recheck(asked bool) {
 	if u.keepsStaged() {
 		return
@@ -399,11 +422,11 @@ func (u *updater) recheck(asked bool) {
 // recheckTick). fetch is a click's: what is found is downloaded whatever
 // Settings' NoAutoDownload says. keep, a restart's, leaves a version
 // downloaded and waiting as it is: a newer one found is not downloaded in
-// its place.
+// its place. Without keep the check is a restart's (restarting).
 func (u *updater) ask(fetch, keep bool) {
 	if u.begin() {
 		u.mu.Lock()
-		u.fetch, u.keep = fetch, keep
+		u.fetch, u.keep, u.restarting = fetch, keep, !keep
 		u.mu.Unlock()
 		go u.run()
 	}
@@ -416,11 +439,14 @@ func (u *updater) ask(fetch, keep bool) {
 }
 
 // keepsStaged is whether a restart goes into the version downloaded and
-// waiting without asking the feed again: whenever one is (recheck).
+// waiting without asking the feed again (recheck): one a restart's own
+// check downloaded, or any with downloads on a click.
 func (u *updater) keepsStaged() bool {
 	u.mu.Lock()
-	defer u.mu.Unlock()
-	return u.state == "ready" && u.staged != ""
+	waiting := u.state == "ready" && u.staged != ""
+	own := waiting && u.latest != nil && u.latest.Version == u.restartGot
+	u.mu.Unlock()
+	return own || waiting && settings.Load().NoAutoDownload
 }
 
 // askedOver is whether the feed was last asked over d ago.
@@ -505,7 +531,7 @@ func (u *updater) begin() bool {
 	if u.state == "checking" || u.state == "downloading" {
 		return false
 	}
-	u.state, u.err, u.retry, u.mirror, u.network, u.asked, u.byClock, u.fetch, u.keep = "checking", "", false, "", false, time.Now(), false, false, false
+	u.state, u.err, u.retry, u.mirror, u.network, u.asked, u.byClock, u.fetch, u.keep, u.restarting = "checking", "", false, "", false, time.Now(), false, false, false, false
 	return true
 }
 
@@ -580,13 +606,20 @@ func (u *updater) run() {
 	// - downloads wait for a click (hold): the one clicked for is the one
 	//   restarted into, and nothing more is fetched (iiiiiimone on X,
 	//   whose proxy is billed by traffic, turns them off);
-	// - the check is a restart's (keep, recheck): the restart goes into
-	//   the one waiting at once, and the new version's first check
-	//   fetches anything newer (canlee886, sakamotokurome on X);
-	// - a restart waits for the gateway to be idle into it (waiting).
+	// - the check is the update dialog's (keep, freshen): it names the one
+	//   waiting;
+	// - a restart waits for the gateway to be idle into it (waiting),
+	//   unless the check is that restart's own (restarting, recheck),
+	//   which goes into the newest (char1es_lu on X).
 	// Quitting puts in the one waiting.
-	if u.staged != "" && u.latest != nil && (err != nil || !update.Newer(rel.Version, u.latest.Version) || hold || u.keep || u.waiting) {
+	if u.staged != "" && u.latest != nil && (err != nil || !update.Newer(rel.Version, u.latest.Version) || hold || u.keep || u.waiting && !u.restarting) {
 		u.state = "ready" // what was downloaded is still the latest
+		if u.restarting {
+			// a restart's answer, in after the restart stopped waiting for
+			// it (a slow feed): the page's restart once it is in doesn't
+			// ask again
+			u.restartGot = u.latest.Version
+		}
 		// the feed found it before it had its notes (the site, kept from
 		// GitHub's API, reads them from the releases feed, which can lag
 		// a new release by minutes): the notes it has now are taken (#649,
@@ -669,6 +702,9 @@ func (u *updater) run() {
 		return
 	}
 	u.state, u.staged = "ready", staged
+	if u.restarting {
+		u.restartGot = rel.Version // the restart goes into it as it is
+	}
 	if u.onReady != nil {
 		go u.onReady(rel.Version)
 	}
@@ -776,11 +812,12 @@ func (u *updater) jsonIn(lang string) updateJSON {
 			go u.relang(u.latest.Version, lang)
 		}
 	}
-	j := updateJSON{State: u.state, Current: Version, Error: u.err, Retry: u.retry}
+	j := updateJSON{State: u.state, Current: Version, Run: runStarted, Error: u.err, Retry: u.retry}
 	if u.channel != "" && u.latest != nil {
 		j.Channel = u.channel
 		if u.state == "latest" {
 			j.Newest = u.newest
+			j.Ahead = update.Newer(Version, u.latest.Version)
 		}
 	}
 	if u.latestStale() {
@@ -796,6 +833,9 @@ func (u *updater) jsonIn(lang string) updateJSON {
 		j.Stuck = u.stuck
 		if u.stuck == "not-writable" {
 			j.StuckDir = u.exeDir
+		}
+		if u.stuck == "container" && u.latest != nil {
+			j.Image = update.Image(u.latest.Version)
 		}
 		if u.stuck == "package" && u.packaged != nil {
 			j.Packaged = &packagedJSON{Manager: u.packaged.Name(), Package: u.packaged.Package, Command: u.packaged.Command()}
@@ -1052,15 +1092,23 @@ func restartFrom(w Windows, view string) bool {
 // Off the Mac, the new one opens its window on view when window is set, and
 // only the tray icon when not; the Mac's always opens its window.
 func restartToUpdate(web, window bool, view string) bool {
-	return restartInto(web, window, view, false, false)
+	return restartInto(web, window, view, false)
 }
 
-// restartInto is restartToUpdate; bySelf, Settings' AutoRestart restarts
-// (#2096), and the Mac's new one too opens only its menu bar icon when no
-// window was up, rather than putting up one the user had closed. The new
-// one, by itself, also takes no focus (quiet_restart.go), and puts the
-// window back minimised when it was (minimised, #3495).
-func restartInto(web, window bool, view string, bySelf, minimised bool) bool {
+// restartBySelf is the restart nobody clicked (Settings' AutoRestart,
+// `magpie update` in a terminal, a Remote magpie's ask, another copy
+// replacing this one's binary): the new version comes back in the tray
+// alone, the window left closed even when it was up (eating_dream on X:
+// every half hour's update put the window back over what they were
+// doing). It came back as it was before (#2096), minimised if it was
+// (#3495); the user opens it from the tray when they want it.
+func restartBySelf() bool { return restartInto(false, false, "", true) }
+
+// restartInto is restartToUpdate; bySelf, a restart nobody clicked, and
+// the Mac's new one too opens only its menu bar icon when no window is
+// asked for. The new one, by itself, also takes no focus
+// (quiet_restart.go).
+func restartInto(web, window bool, view string, bySelf bool) bool {
 	if pending.Load() != nil {
 		return false // a handover under way restarts already
 	}
@@ -1076,7 +1124,7 @@ func restartInto(web, window bool, view string, bySelf, minimised bool) bool {
 	}
 	updatedInApp(version) // its first start leaves the notes to Settings (#525)
 	if bySelf && !web {
-		markQuietRestart(window && minimised) // it comes back without taking focus
+		markQuietRestart() // it comes back without taking focus
 	} else {
 		unmarkQuietRestart() // one asked for comes to the front
 	}
@@ -1110,7 +1158,16 @@ func restartInto(web, window bool, view string, bySelf, minimised bool) bool {
 		return false
 	}
 	if err != nil {
+		// the new version is in place but nothing started it: quitting now
+		// would leave no magpie running at all (ShipInSand on X: it "often
+		// disappears by itself"). This one runs on and says so.
 		log.Println("update:", err)
+		os.Remove(filepath.Join(settings.Dir(), updatedInAppFile))
+		unmarkQuietRestart()
+		updates.mu.Lock()
+		updates.err = "the new version is installed but couldn't be started (" + err.Error() + "): quit magpie and open it again"
+		updates.mu.Unlock()
+		return false
 	}
 	return true
 }

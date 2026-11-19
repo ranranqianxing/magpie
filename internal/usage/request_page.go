@@ -55,6 +55,12 @@ type RequestPage struct {
 	Series   []SeriesPoint
 	By       map[string][]Share
 	ChartBy  map[string][]Share // the whole period's legend while a day is selected
+	// AgentModels is each agent's By["modelAt"], by the agent a filter
+	// names it by (ReportedAs): what the same page with that agent picked
+	// would have as its By["modelAt"], counted in the same pass. A day's
+	// card asked for a page of each agent beside the day's own, a whole
+	// build each, every time the day was switched (WaiooT on X).
+	AgentModels map[string][]Share
 	// Computers are the rows told apart by the computer they were made on,
 	// ThisComputer's and each other's by id, of the rows without the
 	// filter's computer, and Names what the others are called: none when no
@@ -64,6 +70,9 @@ type RequestPage struct {
 	// Speeds are the models of the rows the filter keeps, ranked by the
 	// median speed of their requests (speed_rank.go)
 	Speeds []ModelSpeed
+	// ProviderSpeeds are the same rows' models on each provider they were
+	// tried on: speed, first token, and how the tries went (speed_rank.go)
+	ProviderSpeeds []ProviderSpeed
 	// Heat is the rows by day, as the chart's filter keeps them: only for
 	// the heatmap's own period (HeatmapOf)
 	Heat *Heatmap
@@ -290,13 +299,13 @@ type rowChunk struct {
 // rowMsg is the Text of a row's Claude message id, after rowText's, and
 // rowError its error's
 const (
-	rowMsg   = 36
+	rowMsg   = 37
 	rowError = 9
 	// rowClient is the Text of the client's own name, when the user counts
 	// it as another agent (Row.Client, #1958)
 	rowClient = 33
 	// rowTexts is how many strings a row has: rowText's and the message id
-	rowTexts = 37
+	rowTexts = 38
 )
 
 // rowVaried are the strings that differ call by call: the error, the
@@ -362,8 +371,8 @@ func (c *rowChunk) shape(t [rowTexts]uint32) uint32 {
 // reason ("Upstream stop reason", #1927) and the service tiers (#1784)
 // among them: a string left out comes back empty from the cache, in the
 // page and in /v1/magpie/usage/requests (TestRowTextHoldsEveryString)
-func rowText(r *Row) [36]*string {
-	return [36]*string{&r.Agent, &r.Provider, &r.Host, &r.SessionProvider, &r.SessionAccount, &r.Model, &r.Requested, &r.Served, &r.Effort, &r.Error, &r.ErrType, &r.RequestID, &r.Endpoint, &r.Session, &r.NativeSession, &r.Kind, &r.Source, &r.Via, &r.ProviderKeyID, &r.ProviderKeyName, &r.CallerKeyID, &r.CallerKeyName, &r.Archive, &r.Operation, &r.ProviderAccount, &r.ResponseID, &r.Upstream, &r.Subagent, &r.ParentAgent, &r.Stop, &r.TierAsked, &r.TierSent, &r.TierServed, &r.Client, &r.CallerIssuerID, &r.ClientIP}
+func rowText(r *Row) [37]*string {
+	return [37]*string{&r.Agent, &r.Provider, &r.Host, &r.SessionProvider, &r.SessionAccount, &r.Model, &r.Requested, &r.Served, &r.Effort, &r.Error, &r.ErrType, &r.RequestID, &r.Endpoint, &r.Session, &r.NativeSession, &r.Kind, &r.Source, &r.Via, &r.ProviderKeyID, &r.ProviderKeyName, &r.CallerKeyID, &r.CallerKeyName, &r.Archive, &r.Operation, &r.ProviderAccount, &r.ResponseID, &r.Upstream, &r.Subagent, &r.ParentAgent, &r.Stop, &r.TierAsked, &r.TierSent, &r.TierServed, &r.Client, &r.CallerIssuerID, &r.ClientIP, &r.Wire}
 }
 func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 	if c.dict == nil {
@@ -2539,6 +2548,8 @@ func buildRequestBlocksIn(p Period, f Filter, offset, limit int, now time.Time, 
 		chartGroups[d] = map[string]*Share{}
 		seriesGroups[d] = map[string]*Share{}
 	}
+	agentModels := map[string]map[string]*Share{}
+	reported := map[string]string{} // ReportedAs, once for each agent
 	// Bound the requested prefix before adding limit: external offsets can
 	// reach MaxInt, and a page beyond all sources needs no heap at all.
 	maxRows := 0
@@ -2664,7 +2675,21 @@ func buildRequestBlocksIn(p Period, f Filter, offset, limit int, now time.Time, 
 					add(chartGroups[dim], keys.key(&r, dim), d)
 				}
 				if cell.bits&(cellGroup<<j) != 0 {
-					add(groups[dim], keys.key(&r, dim), d)
+					k := keys.key(&r, dim)
+					add(groups[dim], k, d)
+					if j == modelAtDim {
+						a, ok := reported[agent]
+						if !ok {
+							a = ReportedAs(agent)
+							reported[agent] = a
+						}
+						m := agentModels[a]
+						if m == nil {
+							m = map[string]*Share{}
+							agentModels[a] = m
+						}
+						add(m, k, d)
+					}
 				}
 			}
 		}
@@ -2704,9 +2729,13 @@ func buildRequestBlocksIn(p Period, f Filter, offset, limit int, now time.Time, 
 	slices.Sort(out.Purposes)
 	out.CallerKeys = callerGroups(callers)
 	out.Accounts = callerGroups(accounts)
-	out.Speeds = speeds.result()
+	out.Speeds, out.ProviderSpeeds = speeds.result(), speeds.providers()
 	for _, d := range Dimensions {
 		out.By[d] = sharesOf(groups[d])
+	}
+	out.AgentModels = make(map[string][]Share, len(agentModels))
+	for a, m := range agentModels {
+		out.AgentModels[a] = sharesOf(m)
 	}
 	if f.Day != "" {
 		out.ChartBy = map[string][]Share{}
@@ -2827,7 +2856,7 @@ func pageFromLedgerAt(p Period, f Filter, offset, limit int, all Ledgered, now t
 			out.Big.add(&r)
 		}
 	}
-	out.Speeds = speeds.result()
+	out.Speeds, out.ProviderSpeeds = speeds.result(), speeds.providers()
 	chartRows := l.Rows
 	if f.Day != "" {
 		chartFilter := f
@@ -2842,6 +2871,17 @@ func pageFromLedgerAt(p Period, f Filter, offset, limit int, all Ledgered, now t
 				add(r)
 			}
 		})
+	}
+	out.AgentModels = map[string][]Share{}
+	byAgent := map[string][]Row{}
+	for _, r := range all.Filtered(f.Without("modelAt")).Rows {
+		a := ReportedAs(r.Agent)
+		byAgent[a] = append(byAgent[a], r)
+	}
+	for a, rows := range byAgent {
+		if m := Breakdown(rows, "modelAt"); len(m) > 0 {
+			out.AgentModels[a] = m
+		}
 	}
 	for _, d := range Dimensions {
 		g := f.Without(d)
