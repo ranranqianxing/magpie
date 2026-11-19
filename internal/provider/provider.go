@@ -250,6 +250,15 @@ type Provider struct {
 	// can't keep to); one more waits for room (see RPMLimit). 0 is no
 	// limit.
 	MaxRPM int `json:"maxRPM,omitempty"`
+	// MaxImages is the most images one request to it may carry, by the
+	// user's word: by model id, "*" for all its models (100milionseek's
+	// and Coarena's APIs take 8 a request and refuse the ninth with 400,
+	// #6849). The count is over the whole conversation, tool results
+	// included. Past it the oldest images are left out, each replaced by
+	// a line of text saying so, the latest user message's kept whole
+	// (gateway.withinImageCap). None set leaves it to what a refusal that
+	// names its cap teaches (gateway.imageCaps). See ImageCapOf.
+	MaxImages map[string]int `json:"maxImages,omitempty"`
 	// QuotaRest is how many minutes one of its keys sits out once the
 	// vendor says it is out of its allowance without saying when it is
 	// back (#1772: Ollama Cloud's weekly limit); 0 is the gateway's own
@@ -416,9 +425,10 @@ type Provider struct {
 	// Discord): SocketAuto tries it and falls back to HTTP, and leaves the
 	// host to HTTP for a while once it refuses the handshake, as
 	// chatgpt.com is; SocketOn tries it every time and falls back without
-	// that. "", the default, is HTTP alone. Only a provider of a key with a
-	// Responses URL takes it (TakesSocket). Set with `magpie provider set
-	// <id> socket=`.
+	// that; SocketOff is HTTP alone. "", the default, is auto on OpenAI's
+	// own API and HTTP alone elsewhere (SocketMode). Only a provider of a
+	// key with a Responses URL takes it (TakesSocket). Set with `magpie
+	// provider set <id> socket=`.
 	Socket string `json:"socket,omitempty"`
 
 	// NativeCompaction has Codex's compaction_trigger go to the provider
@@ -1022,6 +1032,7 @@ func (p Provider) clone() Provider {
 	p.AccountConcurrency = maps.Clone(p.AccountConcurrency)
 	p.AccountWeights = maps.Clone(p.AccountWeights)
 	p.Contexts = maps.Clone(p.Contexts)
+	p.MaxImages = maps.Clone(p.MaxImages)
 	p.AccountModelsAll = maps.Clone(p.AccountModelsAll)
 	if p.AccountModels != nil {
 		m := make(map[string][]string, len(p.AccountModels))
@@ -1135,6 +1146,7 @@ func accountSettings(a, pk Provider) Provider {
 	a.AccountConcurrency, a.QueueLimit, a.QueueWait = pk.AccountConcurrency, pk.QueueLimit, pk.QueueWait
 	a.AccountWeights = pk.AccountWeights
 	a.MaxRPM = pk.MaxRPM
+	a.MaxImages = pk.MaxImages
 	// how long a request to it alone is kept while it is busy
 	a.Patience = pk.Patience
 	// how long its accounts rest out of quota, and the most they rest
@@ -1970,6 +1982,13 @@ func normalize(p Provider) Provider {
 	if p.Decide == "" {
 		p.Decide = p.arkSystemOne()
 	}
+	// one asked at the Gemini Developer API on an AI Studio key, the
+	// google preset's or a custom one, answers gemini-decision-1 at its
+	// Decisions API on the same key (WangYeruo on X: it was asked at
+	// OpenRouter instead, this provider having no decision API)
+	if p.Decide == "" {
+		p.Decide = p.googleDecisions()
+	}
 	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed && p.Routing != Pace && p.Routing != Weighted && p.Routing != FreeFirst && p.Routing != Fastest && p.Routing != Drain && !PluginRouting(p.Routing) {
 		p.Routing = ""
 	}
@@ -1990,6 +2009,7 @@ func normalize(p Provider) Provider {
 	p.AccountWeights = normalAccountWeights(p.AccountWeights)
 	p.QueueLimit, p.QueueWait = min(max(p.QueueLimit, 0), MaxQueueLimit), min(max(p.QueueWait, 0), MaxQueueWait)
 	p.MaxRPM = min(max(p.MaxRPM, 0), MaxRPMLimit)
+	p.MaxImages = normalMaxImages(p.MaxImages)
 	p.QuotaRest = min(max(p.QuotaRest, 0), MaxQuotaRest)
 	if p.RestCap != RestCapOff {
 		p.RestCap = min(max(p.RestCap, 0), MaxQuotaRest)
@@ -2358,6 +2378,16 @@ func (p Provider) Native(model string) Protocol {
 	}
 	if len(out) == 0 {
 		return ""
+	}
+	// a remote magpie's own best API for it (magpie_prefers): its list
+	// names every API the model goes on as it is in the order its provider
+	// speaks them, Chat first, so a GPT its OpenAI key or ChatGPT sign-in
+	// serves best on Responses, and a routing group whose members are,
+	// was asked on Chat here — where OpenAI turns away the max effort
+	// Responses takes (OoopsHh on X: Pi's openai/* and auto/* on
+	// openai-completions, codex/* alone on openai-responses)
+	if pr := p.RemotePrefers(model); pr != "" && slices.Contains(out, pr) {
+		return pr
 	}
 	if p.ResponsesFirst(model) && slices.Contains(out, Responses) {
 		return Responses

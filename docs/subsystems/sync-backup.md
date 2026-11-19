@@ -306,6 +306,44 @@ clock.
   `syncOnce` after the sign-ins, never replaced as a part; see
   [Memory's backups and sync](memory.md#backups-and-sync).
 
+## The usage history in a backup file
+
+A backup file made by `magpie backup` or Settings → Sync → Export carries the
+usage history unless `--no-usage` (or the Export form's tick) leaves it out
+(JasonLeeForOnly on Discord: a server moved by backup and restore lost every
+call). [`WithUsage`](../../internal/backup/backup.go) puts in `Bundle.Usage`:
+usage.jsonl's whole lines, gzipped ([`LogBackup`](../../internal/usage/backup_log.go);
+a line still being written is left out), their count, and the gzipped quota
+history (`provider.QuotaHistoryData`). `Collect` never adds it, so a sync, a
+join and an automatic backup carry no usage: sync shares usage by day files
+(`usage.go`), and an automatic backup would hold the whole log every day.
+Routing history (debug data) and `usage-others` (the other computers' days)
+are never in a backup file.
+
+`Restore` with `Parts.Usage` (on in `All`; `magpie restore --no-usage` and
+the Import form's tick turn it off) merges, never replaces:
+[`MergeLog`](../../internal/usage/backup_log.go) appends the backup's lines
+this log doesn't have, compared byte for byte as a multiset, so a line here
+is passed over as often as it is here. Restoring the same file twice adds
+nothing; two calls the old log had as the same bytes both arrive; a line
+that isn't a JSON object is passed over. Most of the log is read before the
+gateway's log lock is taken, the rest under it, and the new lines are
+appended with O_APPEND a few MB at a time after a newline if the log ends
+in an unfinished line. Rows keep `Computer == ""`: they are this computer's
+calls from then on, key spend caps included. Quota points merge with
+`provider.MergeQuotaHistory`. `Result.Usage` is the number of calls added,
+nil when the file has no usage (one made before, or with `--no-usage`),
+which restores as before.
+
+Not yet: where usage is also shared by sync, the old computer's calls are
+in `usage-others` and, after a restore, in this log too, so they count
+twice (#6987).
+
+Tests: `TestBackupCarriesUsageHistory` (two homes, a restore twice, a
+duplicate line, `--no-usage`), `TestOldBackupWithoutUsage`,
+`TestUsageMergeKeepsLinesWhole` (an unfinished last line on both sides),
+and `sync-signins.test.cjs` for the forms.
+
 ## Data folder on another disk
 
 Settings › Sync's Data folder (CHENGJIAHEGOXIS and buhaodeshiyehao on X)
@@ -414,6 +452,17 @@ switch that anyone with the file and the passphrase can use those accounts.
   form says so (`TestMergeSignInsTheLaterRenewedStays`,
   `TestMergeSignInsRemovedOnlyWhenTheOtherSideRemovedIt`,
   `TestApplySignInsKeepsWhatChangedSinceTheMerge`, `sync-signins.test.cjs`).
+- **Left out here** (`Config.SignInsExcept`, provider ids; Ethereal499 on
+  X): under the Sign-ins tick, **Not synced** picks subscriptions whose
+  sign-ins stay on this computer. [`SignIns.Except`](../../internal/provider/signins_except.go)
+  takes them out of what `collect` sends, and out of the server's before
+  `MergeSignIns`, the preview and a Restore, so the server's are never put
+  in and none here is removed for being missing there. `syncOnce` puts the
+  server's ones back with `With`, so the computers that sync them keep
+  them. An id names its `-plugin` sign-ins too. The choice is this
+  computer's: the setup text doesn't carry it, and a setup without it
+  leaves nothing out (`TestSyncSignInsExcept`, `TestSignInsExcept`,
+  `sync-signins-except.test.cjs`; `magpie webdav set sign-ins-except=claude`).
 
 ## GitHub constraints and errors
 
@@ -478,7 +527,19 @@ switch that anyone with the file and the passphrase can use those accounts.
   responses stay actionable errors. Authentication, permission and branch
   failures remain distinct from missing files. Rate limits use sync backoff.
 - The request archive goes to S3 only when sync has a bucket. Its objects are
-  separate from the encrypted setup and usage files. With no bucket the same
+  separate from the encrypted setup and usage files. In the bucket it is kept
+  to `RequestArchiveMB` (1 GiB unless set; synced, as every computer writes
+  the one bucket) by `gateway/archive_bucket.go`: the oldest calls past it
+  are removed, down to a tenth under it. Only names of `ArchiveName`'s shape
+  under `<prefix>/magpie/archive/` are counted or removed, never the backup,
+  usage or another key. The serving magpie lists the archive once, two
+  minutes after it starts, whether the archive is on or off, so a bucket
+  grown before the cap (18 GB in a month for an R2 user on X) is brought
+  under it on update. After that uploads are counted, and the bucket is
+  listed again only once a tenth of the size has been uploaded since
+  (`TestRequestArchiveKeptUnderItsSize`,
+  `TestBucketArchiveBroughtUnderItsSizeAtStart`,
+  `TestBucketArchiveListedPerTenthUploaded`). With no bucket the same
   files are kept on this computer instead (`gateway.DiskArchive`, in
   `<settings.Dir()>/request-archive/<date>/<id>.json`, written through a
   temporary file and renamed, 0600), under its own switch,
@@ -565,6 +626,33 @@ such plugins carries none and hashes as before (`TestClaudePluginsCollected`,
 `TestClaudePluginsNoneOrUnknown`, `TestClaudePluginsPut`,
 `TestClaudePluginsInLibraryPart`). The preview names each marketplace and
 plugin (`TestClaudePluginsInPreview`).
+
+The Library's own Claude plugins (`library.Bundle.Plugins`,
+[`plugin_carry.go`](../../internal/library/plugin_carry.go), #6685) go in
+the library part as one record each, never as their parts: a plugin from a
+GitHub or git link as its source, which the other computer installs from
+itself, and one from a folder (or a link holding a sign-in) with its files.
+The other computer makes the parts again, each naming its own plugin
+folder, removes a plugin the bundle lacks, and keeps one it can't fetch yet
+as pending, with a problem. An empty list hashes as a bundle from before
+plugins were carried, and a bundle without the list leaves this computer's
+plugins alone. The preview names each plugin, its files as one digest
+(`TestSyncLibraryPlugins`, `TestNoPluginsHashAsBefore`).
+
+A library skill from GitHub or a git repository goes in the library part as
+its source too (#5715, [`skill_carry.go`](../../internal/library/skill_carry.go)),
+and the other computer fetches it itself, so a big skill no longer counts
+against the 64 MiB. What a sync still leaves out is said, never a silent
+success: `state.LibraryLeft` names the skills and plugins whose files were
+too big to go (or that this computer never had, `Skill.Missing`), and
+`state.LibraryProblems` what the last sync that brought the library in
+couldn't put here (a skill not fetched from its source yet, one kept as it
+was changed here). `Status` gives them as the view's `libraryLeft` and
+`libraryProblems`, dropping a problem settled since (`library.Unsettled`:
+Update fetched the skill), and Settings › Sync shows them in red under the
+status (`askPreviewRows` in syncfiles.js; `TestSyncSkillsBySourceAndLeftOut`,
+`sync-library-left.test.cjs`). A restore (`backup.Restore` through the
+restore and plan paths) doesn't record them yet.
 
 ## Verification
 

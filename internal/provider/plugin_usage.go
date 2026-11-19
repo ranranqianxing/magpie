@@ -125,7 +125,38 @@ func pluginLoginQuota(ctx context.Context, l Login) SubscriptionQuota {
 	}
 	keepPluginPlan(pp, key, u.Plan)
 	// a wallet's spend counted, for a cap to hold it (#5770)
-	return withWalletSpend(quotaOfPlugin(q, u), l.User, time.Now())
+	return withWalletSpend(namedModelWindows(quotaOfPlugin(q, u), pp.Models), l.User, time.Now())
+}
+
+// namedModelWindows scopes each window that says no models but is named
+// by a model the provider serves to that model alone. Google AI Studio
+// limits each model's day on its own, and its plugin
+// (magpie-gemini-web's ai-studio) tells a model's cooldown as a window
+// named after it, full till the cooldown ends, with no model said. Read
+// as the whole account's, gemini-4-hydrogen's 429 held the account
+// from every model till the reset (WangYeruo on X), while argon still
+// answered. A window named otherwise ("所有模型", "5 hours") is the
+// whole account's, as before.
+func namedModelWindows(q SubscriptionQuota, models []plugin.Model) SubscriptionQuota {
+	if len(models) == 0 {
+		return q
+	}
+	for i, w := range q.Windows {
+		if w.Model != "" || w.matches != nil || w.Family != "" || w.Pool != "" || w.Text || w.Aside {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSpace(w.Name))
+		if name == "" {
+			continue
+		}
+		for _, m := range models {
+			if strings.ToLower(m.ID) == name {
+				q.Windows[i].matches = idSetOf([]string{name}).has
+				break
+			}
+		}
+	}
+	return q
 }
 
 // quotaOfPlugin fills q with what the plugin told.
@@ -191,6 +222,12 @@ func quotaOfPlugin(q SubscriptionQuota, u plugin.Usage) SubscriptionQuota {
 		// window that counts nothing yet says 0 with a count, or with no
 		// text, and one that stops the account is a reading at 0
 		w.Text = w.Text || x.Aside && x.Display != "" && (used == nil || *used == 0) && x.Amount == 0 && x.Limit == 0 && x.Balance == nil
+		if x.Credits && used != nil && !w.Text {
+			// the account goes on past it on credits it holds: routed as
+			// used, with the account on its credits (Allowance.OnCredits);
+			// aside only for a magpie that doesn't know it
+			w.Aside, w.Credits = false, true
+		}
 		if t, err := time.Parse(time.RFC3339, x.ResetsAt); err == nil {
 			w.ResetsAt = &t
 		}

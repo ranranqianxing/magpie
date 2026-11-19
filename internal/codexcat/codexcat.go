@@ -216,7 +216,7 @@ func CatalogAt(ms []catalog.Model, effort string) []byte { return CatalogUsed(ms
 // them (FitOwn).
 func CatalogUsed(ms []catalog.Model, effort string, used []string) []byte {
 	entries := entriesAt(ms, 0, effort)
-	FitOwn(entries, used, ChatGPTOwn)
+	FitOwn(entries, used, OwnIn(ms))
 	out := struct {
 		Models []any `json:"models"`
 	}{Models: entries}
@@ -232,6 +232,44 @@ func CatalogUsed(ms []catalog.Model, effort string, used []string) []byte {
 // Codex that reaches them through magpie, which FitOwn keeps in the first
 // AppList.
 func ChatGPTOwn(slug string) bool { return strings.HasPrefix(slug, "codex/") }
+
+// OwnSlug is the slug of Codex's own model m is, when a ChatGPT account
+// serves it: one magpie holds (codex/<slug>), or one another magpie holds,
+// whose entry for its own Codex names it codex/<slug> (office/codex/<slug>,
+// provider.codexEntries). Such a model is given Codex's own entry for the
+// slug where this computer's Codex has one, as a ChatGPT account here is,
+// and is one of Codex's own models where the Codex app reads them (FitOwn).
+func OwnSlug(m catalog.Model) (string, bool) {
+	if slug, ok := strings.CutPrefix(m.ID, "codex/"); ok {
+		return slug, true
+	}
+	if len(m.Codex) == 0 {
+		return "", false
+	}
+	var e struct {
+		Slug string `json:"slug"`
+	}
+	if json.Unmarshal(m.Codex, &e) != nil {
+		return "", false
+	}
+	slug, ok := strings.CutPrefix(e.Slug, "codex/")
+	if !ok || slug == "" || !strings.HasSuffix(m.ID, "/"+e.Slug) {
+		return "", false
+	}
+	return slug, true
+}
+
+// OwnIn is ChatGPTOwn for ms: a slug of theirs that is Codex's own model
+// (OwnSlug), another magpie's ChatGPT account's too.
+func OwnIn(ms []catalog.Model) func(slug string) bool {
+	remote := map[string]bool{}
+	for _, m := range ms {
+		if _, ok := OwnSlug(m); ok {
+			remote[m.ID] = true
+		}
+	}
+	return func(slug string) bool { return ChatGPTOwn(slug) || remote[slug] }
+}
 
 // level, tier and model are an entry of models.json as Entries writes it.
 type level struct {
@@ -364,7 +402,8 @@ func entriesAt(ms []catalog.Model, after int, effort string) []any {
 	autoReview := AutoReviewModel()
 	var entries []any
 	for i, m := range ms {
-		if raw, ok := own[strings.TrimPrefix(m.ID, "codex/")]; ok && strings.HasPrefix(m.ID, "codex/") {
+		if slug, ok := OwnSlug(m); ok && own[slug] != nil {
+			raw := own[slug]
 			e := ownEntry(raw, m.ID, shownName(m), after+i+1)
 			// the window as magpie resolves it — the one the user set,
 			// else the account's list's — not the cache's, which is what
@@ -397,9 +436,9 @@ func entriesAt(ms []catalog.Model, after int, effort string) []any {
 		// or a group one is in, gets the tier Codex's own catalog gives its
 		// GPT models
 		if slug, ok := strings.CutPrefix(m.ID, "codex/"); m.Fast || ok && strings.HasPrefix(slug, "gpt-") {
-			e.Tiers = append(e.Tiers, fastTier)
+			e.Tiers = withTiers(own, append(e.Tiers, fastTier), m.Tiers)
 		} else if m.OwnTier && (len(m.Tiers) == 0 || len(ownTiers(own, m)) > 0) {
-			e.Tiers = ownTiers(own, m)
+			e.Tiers = withTiers(own, ownTiers(own, m), m.Tiers)
 		} else if len(m.Tiers) > 0 {
 			// another magpie's model: the tiers it offers its own Codex
 			// (#1234)
@@ -722,13 +761,18 @@ func ownTiers(own map[string]map[string]any, m catalog.Model) []tier {
 var fastTier = tier{ID: "priority", Name: "Fast", Description: "1.5x speed, increased usage"}
 
 // namedTiers are the tiers ids name, each as Codex's own catalog writes it
-// on any of its models, else by its id: Fast's "priority" as Codex names it.
+// on any of its models, else by its id: Fast's "priority" as Codex names
+// it, "ultrafast" as Ultrafast.
 func namedTiers(own map[string]map[string]any, ids []string) []tier {
 	ts := []tier{}
 	for _, id := range ids {
 		t := tier{ID: id, Name: id}
-		if id == fastTier.ID {
+		switch id {
+		case fastTier.ID:
 			t = fastTier
+		case "ultrafast":
+			// as magpie names it, where Codex's own catalog doesn't
+			t.Name = "Ultrafast"
 		}
 	found:
 		for _, slug := range slices.Sorted(maps.Keys(own)) {
@@ -744,6 +788,20 @@ func namedTiers(own map[string]map[string]any, ids []string) []tier {
 			}
 		}
 		ts = append(ts, t)
+	}
+	return ts
+}
+
+// withTiers is ts with each tier of ids it lacks after them, named as
+// namedTiers names it: Ultrafast where the provider's account or key
+// offers it (provider.CodexTiers), beside the Fast these entries take from
+// Codex's own catalog, which a magpie with no Codex beside it (Docker)
+// hasn't got (OoopsHh on X).
+func withTiers(own map[string]map[string]any, ts []tier, ids []string) []tier {
+	for _, id := range ids {
+		if !slices.ContainsFunc(ts, func(t tier) bool { return t.ID == id }) {
+			ts = append(ts, namedTiers(own, []string{id})...)
+		}
 	}
 	return ts
 }
@@ -1176,7 +1234,8 @@ func listedEntry(m catalog.Model, priority int, work settings.Settings, autoRevi
 	}
 	e := ownEntry(raw, m.ID, shownName(m), priority)
 	desc, _ := e["description"].(string)
-	e["description"] = cmp.Or(strings.TrimSpace(desc), m.Name) + " via magpie"
+	// another magpie's entry ends so already: said once
+	e["description"] = cmp.Or(strings.TrimSuffix(strings.TrimSpace(desc), " via magpie"), m.Name) + " via magpie"
 	if c := m.Context; c > 0 {
 		// the window magpie resolves (the user's, else this entry's own),
 		// and where the user has Codex compact it, theirs alone: not
@@ -1260,7 +1319,7 @@ func listedEntry(m catalog.Model, priority int, work settings.Settings, autoRevi
 			e["input_modalities"] = slices.DeleteFunc(slices.Clone(in), func(x any) bool { return x == "image" })
 		}
 	}
-	if v1 && (m.Fast || m.Seals) {
+	if _, own := OwnSlug(m); v1 && (m.Fast || m.Seals || own) {
 		Stamp(e)
 	} else if _, ok := e["multi_agent_version"]; !ok && m.AgentsV2 {
 		e["multi_agent_version"] = "v2"

@@ -55,6 +55,11 @@
 .rt-flier .wing.far { animation-delay: -.03s; }
 @keyframes rtflap { 0%, 100% { transform: scaleY(1); } 55% { transform: scaleY(-.62) skewX(-8deg); } }
 .rt-flier .rt-lift { animation: rtcome .3s ease-out; transition: transform .45s cubic-bezier(.3, 0, .2, 1), opacity .45s; }
+/* motion reduced: the magpie only fades in and out, wings still (opacity alone) */
+.rt-flier.calm .wing { animation: none; }
+.rt-flier.calm .rt-lift { animation: rtfade .2s cubic-bezier(.23, 1, .32, 1); transition: opacity .25s cubic-bezier(.23, 1, .32, 1); }
+.rt-flier.calm.away .rt-lift { transform: none; opacity: 0; }
+@keyframes rtfade { from { opacity: 0; } }
 .rt-flier.away .rt-lift { transform: translate(14px, -16px) scale(.8); opacity: 0; }
 @keyframes rtcome { from { transform: translate(-6px, -10px) scale(.85); opacity: 0; } }
 .rt-srcs { position: relative; z-index: 1; min-width: 0; display: grid; gap: 10px; }
@@ -119,10 +124,14 @@
 .rt-accts li:not(.rt-sub) > b > * { flex: none; }
 .rt-accts li:not(.rt-sub) > b > span:not(.ic) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .rt-accts li:not(.rt-sub) > b > span.who { flex-shrink: 100; } /* the name first, the plan after it */
-.rt-accts li:not(.rt-sub) > b > span:not(.ic):not(.who):not(:empty) { margin-left: .3em; }
+.rt-accts li:not(.rt-sub) > b > span:not(.ic):not(.who):not(.prov):not(:empty) { margin-left: .3em; }
+/* a key's row: its provider's name heads it and keeps its room; the key's
+   name follows, muted */
+.rt-accts li.keyled:not(.rt-sub) > b > span.who { margin-left: .3em; }
 .rt-accts li:not(.rt-sub) > b > .ic { align-self: center; }
 .rt-accts b > span:not(.ic) { font-weight: 450; color: var(--muted); }
-.rt-accts b > span.who { color: var(--fg); font-weight: 560; }
+.rt-accts b > span.who, .rt-accts li.keyled b > span.prov { color: var(--fg); font-weight: 560; }
+.rt-accts li.keyled b > span.who { color: var(--muted); font-weight: 450; }
 .rt-accts b .ic { display: inline-flex; width: 16px; height: 16px; margin-right: 7px; vertical-align: -3px; }
 .rt-accts b .ic img, .rt-accts b .ic svg { width: 16px; height: 16px; }
 .rt-accts b .fb { margin-left: 6px; font-size: 10.5px; font-weight: 560; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
@@ -300,6 +309,9 @@
 :is(#view-routing, #view-groups) .row-head { margin: 14px 0 6px; padding: 0 2px; gap: 0; }
 :is(#view-routing, #view-groups) .row-head .note { font-size: 11px; color: var(--faint); margin-left: 8px; }
 #view-routing .row-head .rt-livedot + .note { margin-left: 8px; }
+/* the note gives way first: with Routing groups ›, Settings › and Hide
+   accounts beside it, German ran 38px past a 560px window (#6669) */
+#view-routing > .row-head .note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rt-gnew { display: inline-flex; align-items: center; gap: 4px; }
 /* the toolbar's Hide plans: every group's quota lines folded */
 .rt-groups.rt-noplans .rt-gquota { display: none; }
@@ -503,6 +515,13 @@ button.rt-session { cursor: pointer; }
 :where(.rt-more:not(.min1150)) .rt-pgrp.long, .rt-cols.solo .rt-pgrp.long { break-inside: auto; }
 :where(.rt-more:not(.min1150)) .rt-pgrp.long > *, .rt-cols.solo .rt-pgrp.long > * { break-inside: avoid; }
 :where(.rt-more:not(.min1150)) .rt-pgrp.long > .rt-prov, .rt-cols.solo .rt-pgrp.long > .rt-prov { break-after: avoid; }
+/* placed by client.js (packActs) in the columns CSS columns would have
+   them in: CSS columns balanced every row again on each layout, and a
+   window resized over many accounts stuttered (lexrus on X) */
+:where(.rt-more:not(.min1150)) .rt-acts.packed, .rt-cols.solo .rt-acts.packed { columns: auto; position: relative; box-sizing: content-box; height: var(--acts-h, auto); }
+:where(.rt-more:not(.min1150)) .rt-acts.packed > *, .rt-cols.solo .rt-acts.packed > * { position: absolute; left: var(--px, 0); top: var(--py, 0); width: calc(100% / var(--acols, 1)); }
+:where(.rt-more:not(.min1150)) .rt-acts.packed > .long, .rt-cols.solo .rt-acts.packed > .long { height: var(--part-h, auto); }
+:where(.rt-more:not(.min1150)) .rt-acts.packed > .long > *, .rt-cols.solo .rt-acts.packed > .long > * { position: absolute; left: var(--px, 0); top: var(--py, 0); width: 100%; }
 .rt-cols.solo { grid-template-columns: minmax(0, 1fr); }
 .rt-reqs.none { display: block; background: none; border-color: transparent; }
 .rt-reqs.none .empty-state { padding: 14px 12px 18px; font-size: 12px; line-height: 1.6; }
@@ -573,11 +592,15 @@ button.rt-session { cursor: pointer; }
    columns that start at one place down the list */
 .rt-act .wq { display: grid; font-size: 11px; line-height: 17px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
 .rt-act .wq > div { display: flex; flex-wrap: wrap; align-items: center; column-gap: 8px; }
-.rt-act .wq span { min-width: 0; white-space: nowrap; }
-.rt-act .wq .k { flex: 0 0 var(--wk, 3ch); overflow: hidden; }
+.rt-act .wq span { min-width: 0; }
+/* each part no wider than its row (lexrus on X: a width the provider's
+   widest window asked for, wider than a column, ran the reset over the
+   column beside); one wider than the row goes on a line of its own and
+   breaks between its words there, in full */
+.rt-act .wq .k { flex: 0 0 min(var(--wk, 3ch), 100%); overflow-wrap: anywhere; }
 .rt-act .wq .b { flex: 0 0 28px; }
-.rt-act .wq .v { flex: 0 0 auto; min-width: var(--wv, 0); }
-.rt-act .wq .r { flex: 1 0 auto; min-width: var(--wr, 0); max-width: 100%; overflow: hidden; text-overflow: ellipsis; text-align: right; }
+.rt-act .wq .v { flex: 0 0 auto; min-width: min(var(--wv, 0px), 100%); max-width: 100%; }
+.rt-act .wq .r { flex: 1 0 auto; min-width: min(var(--wr, 0px), 100%); max-width: 100%; text-align: right; }
 .rt-act .wq .k, .rt-act .wq .r { color: var(--muted); }
 .rt-act .wq .quota-track { height: 3px; }
 /* rows too narrow for a bar beside what is used (slim, set by
@@ -668,6 +691,11 @@ button.rt-session { cursor: pointer; }
 .rt-gedit .fallback:not(.rt-rules) > .fbl:not(.sorting) > .fbrow > .n, .rt-gaccts > .fbrow > .n { user-select: text; -webkit-user-select: text; }
 .rt-group .rt-gnote { margin-top: 1px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rt-group .mem { margin-top: 2px; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* a member reads as one piece, its provider quiet and its model after,
+   so the list's own comma or arrow is what parts one from the next
+   (tmr11235 on X) */
+.rt-group .mem .mn { color: var(--fg-2); }
+.rt-group.disabled .mem .mn { color: inherit; }
 /* a pattern the group finds models by, and how many it matches now */
 .rt-group .mem.pat code, .rt-pats code { font: var(--code-style, normal) 500 11px/1.5 var(--code-font, var(--code)); font-stretch: var(--code-stretch, 100%); color: var(--fg-2); }
 .rt-group .mem.pat.none, .rt-pats .fbrow.none small { color: var(--amber); }
@@ -786,6 +814,9 @@ body.window .rt-gedit > .bar { --vfoot: 8px; }
   body.web .rt-group > .text { grid-column: 3; grid-row: 1; }
   body.web .rt-group .nm { flex-wrap: wrap; }
   body.web .rt-group .mem { white-space: normal; overflow-wrap: anywhere; }
+  /* wrapped, a member moves to the next line whole, cut short only when
+     it is wider than the card */
+  body.web .rt-group .mem .mbr { display: inline-block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
   body.web .rt-pick { height: auto; min-height: 44px; padding: 8px; font-size: 12.5px; }
   body.web .rt-pick { flex-wrap: wrap; }
   body.web .rt-gedit { grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 12px; }

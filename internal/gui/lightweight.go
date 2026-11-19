@@ -65,6 +65,8 @@ func (h *host) makeMain(url string) *application.WebviewWindow {
 	lowWhileHidden(w)
 	h.mendWebView(w)
 	if mainFrameless(runtime.GOOS) {
+		// resized from Windows' own border too, not the page's edge alone
+		keepResizeFrame(w)
 		// the page's caption buttons follow the window's maximised state
 		// (captionJS); a resize that changes it says so, once
 		var maxed atomic.Bool
@@ -153,7 +155,6 @@ func (h *host) makePanel() *application.WebviewWindow {
 		h.tray.AttachWindow(w).WindowOffset(6)
 	}
 	// the icon stays lit while the panel is open (the Mac's)
-	trayOwnClicks()
 	w.OnWindowEvent(events.Mac.WindowShow, func(*application.WindowEvent) { trayHighlight(true) })
 	w.OnWindowEvent(events.Mac.WindowHide, func(*application.WindowEvent) { trayHighlight(false) })
 	sayWailsHides(w)

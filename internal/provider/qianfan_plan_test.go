@@ -22,6 +22,25 @@ const qianfanResourceBody = `{"success":true,"status":200,"result":{"items":[` +
 	`{"resourceId":"tp-old","planType":"lite","resourceStatus":"Released","billingMode":"credit","usedCredits":"6600","totalCredits":"6600","expiresAt":"2026-10-01T00:00:00Z","autoRenew":false,"apiKey":"bce-v3/ALTAK-old/secret-old"},` +
 	`{"resourceId":"tp-1","planType":"pro","resourceStatus":"Running","billingMode":"credit","usedCredits":"11250.5","totalCredits":45000,"usedTokens":0,"totalTokens":0,"expiresAt":"2026-12-01T00:00:00Z","autoRenew":true,"renewTimeUnit":"month","renewTime":1,"apiKey":"bce-v3/ALTAK-live/secret-live"}]}}`
 
+// qianfanPackBody is the console's tokenPlanPersonal/pack/list reply,
+// built from the fields its Token Plan page reads (the resource
+// micro-app's bundle: packId, name, packType, status, totalCredits,
+// usedCredits, remainingCredits, purchasedAt, expiresAt, isUsable,
+// consumeOrder), not a captured reply: no one here has a Baidu account.
+// Two live gift packs (one in use, one ending later), a gift pack past
+// its end and one with no end (the page counts neither), a bought pack
+// active (the bundle names no packType for these: any but gift and
+// guoqing_*), one bought pack expired, and a guoqing pack the page
+// leaves out of both rows.
+const qianfanPackBody = `{"success":true,"status":200,"result":{"items":[` +
+	`{"packId":"pk-g1","name":"平台赠送积分","packType":"gift","status":"active","totalCredits":5000,"usedCredits":1200,"remainingCredits":3800,"purchasedAt":"2026-11-01 10:00:00","expiresAt":"2026-12-01 10:00:00","isUsable":true,"consumeOrder":1},` +
+	`{"packId":"pk-g2","name":"邀请奖励","packType":"gift","status":"active","totalCredits":"2000","usedCredits":"0","remainingCredits":"2000","purchasedAt":"2026-11-10 00:00:00","expiresAt":"2026-12-15 00:00:00","isUsable":true,"consumeOrder":2},` +
+	`{"packId":"pk-g0","name":"平台赠送积分","packType":"gift","status":"expired","totalCredits":1000,"usedCredits":0,"remainingCredits":1000,"purchasedAt":"2026-10-01 00:00:00","expiresAt":"2026-11-01 00:00:00","isUsable":false,"consumeOrder":0},` +
+	`{"packId":"pk-gx","packType":"gift","status":"active","totalCredits":900,"usedCredits":0,"remainingCredits":900,"isUsable":true,"consumeOrder":3},` +
+	`{"packId":"pk-b1","name":"积分包","packType":"normal","status":"active","totalCredits":10000,"usedCredits":2500,"remainingCredits":7500,"purchasedAt":"2026-11-05 00:00:00","expiresAt":"2027-11-05 00:00:00","isUsable":true,"consumeOrder":4},` +
+	`{"packId":"pk-b0","name":"积分包","packType":"normal","status":"expired","totalCredits":3000,"usedCredits":3000,"remainingCredits":0,"purchasedAt":"2025-11-05 00:00:00","expiresAt":"2026-11-05 00:00:00","isUsable":false,"consumeOrder":0},` +
+	`{"packId":"pk-q1","name":"国庆积分包","packType":"guoqing_pro","status":"active","totalCredits":8000,"usedCredits":0,"remainingCredits":8000,"purchasedAt":"2026-10-01 00:00:00","expiresAt":"2026-12-31 00:00:00","isUsable":true,"consumeOrder":5}]}}`
+
 // fakeQianfanConsole is Baidu Cloud's console: it answers the plan's
 // resource to its one session's cookies, asked as the page asks, and sends
 // anything else to the sign-in page, as the real console does.
@@ -29,7 +48,11 @@ type fakeQianfanConsole struct {
 	srv    *httptest.Server
 	cookie atomic.Value // the Cookie header it takes now
 	body   atomic.Value
+	packs  atomic.Value // pack/list's reply
 	asked  atomic.Int32
+	// renew, when set, is a session the console renews to as it answers:
+	// a reply sets its bce-session, and the old one is taken no longer
+	renew atomic.Value
 }
 
 func newFakeQianfanConsole(t *testing.T) *fakeQianfanConsole {
@@ -37,9 +60,10 @@ func newFakeQianfanConsole(t *testing.T) *fakeQianfanConsole {
 	f := &fakeQianfanConsole{}
 	f.cookie.Store("BDUSS=bd-1; bce-session=s-1; bce-user-info=u-1")
 	f.body.Store(qianfanResourceBody)
+	f.packs.Store(qianfanPackBody)
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.asked.Add(1)
-		if r.Method != http.MethodGet || r.URL.Path != qianfanResourcePath || r.Header.Get("X-Requested-With") != "XMLHttpRequest" {
+		if r.Method != http.MethodGet || r.URL.Path != qianfanResourcePath && r.URL.Path != qianfanPackPath || r.Header.Get("X-Requested-With") != "XMLHttpRequest" {
 			http.NotFound(w, r)
 			return
 		}
@@ -47,7 +71,17 @@ func newFakeQianfanConsole(t *testing.T) *fakeQianfanConsole {
 			http.Redirect(w, r, "https://login.bce.baidu.com/?redirect=x", http.StatusFound)
 			return
 		}
+		if r, _ := f.renew.Load().(string); r != "" {
+			w.Header().Add("Set-Cookie", "bce-session="+r+"; Path=/; Domain=.baidu.com; HttpOnly")
+			w.Header().Add("Set-Cookie", "elsewhere=1; Path=/qianfan/other")
+			f.cookie.Store("BDUSS=bd-1; bce-session=" + r + "; bce-user-info=u-1")
+			f.renew.Store("")
+		}
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == qianfanPackPath {
+			w.Write([]byte(f.packs.Load().(string)))
+			return
+		}
 		w.Write([]byte(f.body.Load().(string)))
 	}))
 	t.Cleanup(f.srv.Close)
@@ -191,14 +225,17 @@ func TestQianfanPlanCard(t *testing.T) {
 		t.Fatal(err)
 	}
 	q := qianfanPlanQuota(ctx, p)
-	if q.Error != "" || q.Plan != "Token Plan Pro" || q.Renew != "auto" || q.Until == nil || len(q.Windows) != 1 || q.Windows[0].Limit != 45000 {
+	if q.Error != "" || q.Plan != "Token Plan Pro" || q.Renew != "auto" || q.Until == nil || len(q.Windows) != 3 || q.Windows[0].Limit != 45000 {
 		t.Fatalf("card: %+v", q)
+	}
+	if q.Windows[1].Name != "Gift credits" || q.Windows[1].Limit != 7000 || q.Windows[2].Name != "Credit packs" || q.Windows[2].Limit != 10000 {
+		t.Fatalf("packs: %+v", q.Windows)
 	}
 	if b, _ := json.Marshal(q); strings.Contains(string(b), "bce-v3") || strings.Contains(string(b), "secret") {
 		t.Fatalf("the plan's key reached the card: %s", b)
 	}
 	kr, err := accountPlanWindows(ctx, p)
-	if err != nil || len(kr.ws) != 1 || kr.plan != "Token Plan Pro" {
+	if err != nil || len(kr.ws) != 3 || kr.plan != "Token Plan Pro" {
 		t.Fatalf("routing's reading: %+v %v", kr, err)
 	}
 
@@ -225,5 +262,200 @@ func TestQianfanPlanCard(t *testing.T) {
 	}
 	if err := forgetQianfan("qf2"); err != nil || QianfanSignedIn("qf2") {
 		t.Fatalf("forgotten: %v", err)
+	}
+}
+
+// A session Baidu ends is marked ended, so the editor asks for a new one
+// (QianfanEnded), and the card still says signed out; a new paste, or a
+// read the console takes again, clears the mark. A cookie the console
+// renews in a reply is kept, so the next read goes with it.
+func TestQianfanSessionEnded(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	forgetPlanQuotas()
+	f := newFakeQianfanConsole(t)
+	ctx := context.Background()
+	p := Provider{ID: "baidu-qianfan", Name: "Baidu Qianfan", Key: "bce-v3/k", Chat: "https://qianfan.baidubce.com/v2/tokenplan/personal"}
+	first := f.cookie.Load().(string)
+	if err := SaveQianfanPaste(ctx, p.ID, first); err != nil || QianfanEnded(p.ID) {
+		t.Fatalf("saved: %v", err)
+	}
+
+	// the console renews bce-session in its reply: magpie keeps the new one
+	f.renew.Store("s-2")
+	if q := qianfanPlanQuota(ctx, p); q.Error != "" {
+		t.Fatalf("renewing read: %+v", q)
+	}
+	if got := loadQianfan()[p.ID].Cookie; got != "BDUSS=bd-1; bce-session=s-2; bce-user-info=u-1" {
+		t.Fatalf("renewed cookie kept as %q", got)
+	}
+	if q := qianfanPlanQuota(ctx, p); q.Error != "" || QianfanEnded(p.ID) {
+		t.Fatalf("read after renewal: %+v", q)
+	}
+
+	// Baidu ends it: the card says so, and the editor asks again
+	f.cookie.Store("BDUSS=someone-else")
+	if q := qianfanPlanQuota(ctx, p); q.Error != errQianfanSession.Error() {
+		t.Fatalf("ended: %+v", q)
+	}
+	if !QianfanEnded(p.ID) || !QianfanSignedIn(p.ID) {
+		t.Fatal("an ended sign-in should be kept, marked ended")
+	}
+	ended := loadQianfan()[p.ID].Ended
+	qianfanPlanQuota(ctx, p)
+	if got := loadQianfan()[p.ID].Ended; got != ended {
+		t.Fatalf("the time it ended moved: %q then %q", ended, got)
+	}
+
+	// a new paste is a new sign-in, not ended
+	if err := SaveQianfanPaste(ctx, p.ID, "BDUSS=someone-else"); err != nil || QianfanEnded(p.ID) {
+		t.Fatalf("new paste: %v ended=%v", err, QianfanEnded(p.ID))
+	}
+
+	// a paste made while an older read was out isn't marked by that read
+	noteQianfan(p.ID, first, true, nil)
+	if QianfanEnded(p.ID) {
+		t.Fatal("a read with the old cookie marked the new sign-in ended")
+	}
+}
+
+func TestMergeQianfanCookies(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	for _, c := range []struct {
+		set  []*http.Cookie
+		want string
+	}{
+		{nil, "a=1; b=2"},
+		{[]*http.Cookie{{Name: "b", Value: "3"}}, "a=1; b=3"},
+		{[]*http.Cookie{{Name: "c", Value: "4", Path: "/api"}}, "a=1; b=2; c=4"},
+		{[]*http.Cookie{{Name: "a", Value: "", MaxAge: -1}}, "b=2"},
+		{[]*http.Cookie{{Name: "b", Value: "x", Expires: past}}, "a=1"},
+		{[]*http.Cookie{{Name: "c", Value: "4", Path: "/qianfan/other"}}, "a=1; b=2"},
+		{[]*http.Cookie{{Name: "c", Value: "4\r\nX: y"}}, "a=1; b=2"},
+	} {
+		if got := mergeQianfanCookies("a=1; b=2", c.set); got != c.want {
+			t.Errorf("%v: %q, want %q", c.set, got, c.want)
+		}
+	}
+}
+
+// The credit packs beside the month, as the console's page sums them
+// (yuushabu_buyinn on X: 赠送积分包 went uncounted): Baidu's gift packs
+// still live in one row, the bought ones active in another, each with
+// when the soonest of what is left runs out. Expired packs, a gift with
+// no end and guoqing packs are left out, as the page leaves them.
+func TestReadQianfanPacks(t *testing.T) {
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	var r struct{ Result json.RawMessage }
+	if err := json.Unmarshal([]byte(qianfanPackBody), &r); err != nil {
+		t.Fatal(err)
+	}
+	ws, spare, err := readQianfanPacks(r.Result, now, true)
+	if err != nil || !spare || len(ws) != 2 {
+		t.Fatalf("%+v %v %v", ws, spare, err)
+	}
+	g, b := ws[0], ws[1]
+	cst := time.FixedZone("CST", 8*3600)
+	if g.Name != "Gift credits" || g.Unit != "credits" || g.Limit != 7000 || g.Amount != 1200 || g.Used < 17.1 || g.Used > 17.2 || !g.Aside ||
+		g.RunsOutAt == nil || !g.RunsOutAt.Equal(time.Date(2026, 12, 1, 10, 0, 0, 0, cst)) || g.RunsOut != 3800 || g.ResetsAt != nil {
+		t.Fatalf("gift: %+v", g)
+	}
+	if b.Name != "Credit packs" || b.Limit != 10000 || b.Amount != 2500 || b.Used != 25 || !b.Aside ||
+		b.RunsOutAt == nil || !b.RunsOutAt.Equal(time.Date(2027, 11, 5, 0, 0, 0, 0, cst)) || b.RunsOut != 7500 {
+		t.Fatalf("bought: %+v", b)
+	}
+
+	// with no plan the gift packs are the account's allowance; bought
+	// ones are spent only under a plan
+	ws, _, _ = readQianfanPacks(r.Result, now, false)
+	if ws[0].Aside || !ws[1].Aside {
+		t.Fatalf("no plan: %+v", ws)
+	}
+
+	// two packs ending together run out together; a pack used up says
+	// nothing runs out; remainingCredits missing is total less used
+	ws, spare, err = readQianfanPacks([]byte(`{"items":[`+
+		`{"packType":"gift","totalCredits":100,"usedCredits":100,"remainingCredits":0,"expiresAt":"2026-11-20 00:00:00","isUsable":true},`+
+		`{"packType":"gift","totalCredits":100,"usedCredits":40,"expiresAt":"2026-11-25 00:00:00","isUsable":true},`+
+		`{"packType":"gift","totalCredits":100,"usedCredits":0,"remainingCredits":100,"expiresAt":"2026-11-25 00:00:00","isUsable":true}]}`), now, true)
+	if err != nil || len(ws) != 1 || ws[0].Amount != 140 || ws[0].Limit != 300 || ws[0].RunsOut != 160 || !spare {
+		t.Fatalf("together: %+v %v %v", ws, spare, err)
+	}
+
+	// none: no rows, and nothing to spend past the month
+	for name, body := range map[string]string{
+		"no packs":    `{"items":[]}`,
+		"no items":    `{}`,
+		"all expired": `{"items":[{"packType":"gift","totalCredits":100,"remainingCredits":100,"expiresAt":"2026-11-01 00:00:00","isUsable":false}]}`,
+	} {
+		if ws, spare, err := readQianfanPacks([]byte(body), now, true); err != nil || len(ws) != 0 || spare {
+			t.Errorf("%s: %+v %v %v", name, ws, spare, err)
+		}
+	}
+	// packs left that can't be spent now hold nothing past the month
+	if _, spare, err := readQianfanPacks([]byte(`{"items":[{"packType":"normal","status":"active","totalCredits":100,"remainingCredits":100,"isUsable":false}]}`), now, true); err != nil || spare {
+		t.Fatalf("unusable: %v %v", spare, err)
+	}
+	// unknown, never none
+	for name, body := range map[string]string{
+		"not JSON":   `<html>`,
+		"no amounts": `{"items":[{"packType":"gift","expiresAt":"2026-12-01 00:00:00"}]}`,
+		"no left":    `{"items":[{"packType":"gift","totalCredits":100,"expiresAt":"2026-12-01 00:00:00"}]}`,
+		"no total":   `{"items":[{"packType":"gift","remainingCredits":50,"expiresAt":"2026-12-01 00:00:00"}]}`,
+	} {
+		if ws, _, err := readQianfanPacks([]byte(body), now, true); err == nil || len(ws) != 0 {
+			t.Errorf("%s: %+v, want an error", name, ws)
+		}
+	}
+}
+
+// The card's pack rows: the month goes on to credits while a pack holds
+// some (Baidu spends them once the month is used up); packs not read are
+// an Unknown row, never none, and the month then holds the account as
+// before; an account with none has the month alone; one with no plan but
+// gift packs shows them.
+func TestQianfanPlanCardPacks(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	forgetPlanQuotas()
+	f := newFakeQianfanConsole(t)
+	ctx := context.Background()
+	p := Provider{ID: "baidu-qianfan", Name: "Baidu Qianfan", Key: "bce-v3/k", Chat: "https://qianfan.baidubce.com/v2/tokenplan/personal"}
+	if err := SaveQianfanPaste(ctx, p.ID, f.cookie.Load().(string)); err != nil {
+		t.Fatal(err)
+	}
+	q := qianfanPlanQuota(ctx, p)
+	if q.Error != "" || len(q.Windows) != 3 || !q.Windows[0].Credits || !q.Windows[1].Aside || !q.Windows[2].Aside {
+		t.Fatalf("card: %+v", q)
+	}
+
+	for name, body := range map[string]string{
+		"refused":  `{"success":false,"message":{"global":"系统繁忙"}}`,
+		"not JSON": `<!doctype html><html>`,
+		"unread":   `{"success":true,"result":{"items":[{"packType":"gift","expiresAt":"2026-12-01 00:00:00"}]}}`,
+	} {
+		f.packs.Store(body)
+		q = qianfanPlanQuota(ctx, p)
+		if q.Error != "" || len(q.Windows) != 2 || q.Windows[0].Credits || q.Windows[0].Name != "Month" ||
+			q.Windows[1].Name != "Credit packs" || !q.Windows[1].Text || q.Windows[1].Display != "Unknown" || !q.Windows[1].Aside {
+			t.Fatalf("%s: %+v", name, q)
+		}
+	}
+
+	f.packs.Store(`{"success":true,"result":{"items":[]}}`)
+	if q = qianfanPlanQuota(ctx, p); q.Error != "" || len(q.Windows) != 1 || q.Windows[0].Credits {
+		t.Fatalf("no packs: %+v", q)
+	}
+
+	// no plan, and gift packs: Baidu spends those straight away
+	f.body.Store(`{"success":true,"result":{"items":[]}}`)
+	f.packs.Store(qianfanPackBody)
+	if q = qianfanPlanQuota(ctx, p); q.Error != "" || len(q.Windows) != 2 || q.Windows[0].Name != "Gift credits" || q.Windows[0].Aside {
+		t.Fatalf("no plan, gift packs: %+v", q)
+	}
+	// no plan, and no packs or none read: no plan
+	for _, body := range []string{`{"success":true,"result":{"items":[]}}`, `{"success":false}`} {
+		f.packs.Store(body)
+		if q = qianfanPlanQuota(ctx, p); q.Error != errQianfanNoPlan.Error() || len(q.Windows) != 0 {
+			t.Fatalf("no plan %s: %+v", body, q)
+		}
 	}
 }

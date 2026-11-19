@@ -661,7 +661,7 @@ func (e *NoModelsError) Error() string {
 type AllHiddenError struct{ Agent string }
 
 func (e *AllHiddenError) Error() string {
-	return "None of magpie's models is left in " + e.Agent + "'s model list: pick one under Model list → Pick on the Agents page, then connect " + e.Agent
+	return "None of magpie's models is left in " + e.Agent + "'s model list: pick one under Model list › Pick on the Agents page, then connect " + e.Agent
 }
 
 func (a *Agent) Connect() error {
@@ -685,6 +685,8 @@ func (a *Agent) Connect() error {
 //     own models in its list (the newest, for Claude Code), through magpie
 //   - "first": magpie has none of the model it is on: the first on the
 //     account it is signed in to, else a subscription's, else the first
+//   - "remote": the models a Remote magpie's same agent is on
+//     (remote_picks.go)
 //
 // Field and Value are the field set and what it was set to, where Connect
 // picked one model ("" for kept, again and joined).
@@ -766,6 +768,10 @@ func (a *Agent) connect() (Connection, error) {
 		if ok, err := a.Join(); ok || err != nil {
 			return Connection{How: "joined"}, err
 		}
+	}
+	// the models the Remote magpie's same agent is on (remote_picks.go)
+	if c, ok, err := a.connectRemote(); ok || err != nil {
+		return c, err
 	}
 	// the field magpie is picked in: the one listing magpie's models (for
 	// Gemini CLI its model, its first field being how it signs in), else one

@@ -31,9 +31,9 @@ var Keys = []string{
 	"theme", "accent", "colorblind", "reduceMotion", "noBird", "lang", "uiFont", "codeFont",
 	// the tray, the Dock and this computer
 	"tray", "dock", "dockWindow", "dockNever", "lightweight", "keepAwake", "keepAwakeDisplay",
-	"noWSLAgents", "sessionTerminal", "signInLinkOnly", "quitNoAsk", "restoreOnQuit",
+	"noWSLAgents", "sessionTerminal", "signInLinkOnly", "quitNoAsk", "restoreOnQuit", "name",
 	// the menu bar's allowance cards
-	"trayUsages", "trayUsage", "trayUsageEvery", "trayNoLogos", "trayNoBird", "trayNoNumber", "trayPace", "trayNoCost", "trayWindows",
+	"trayUsages", "trayUsage", "trayUsageEvery", "trayNoLogos", "trayAnthropicMark", "trayNoBird", "trayNoNumber", "trayPace", "trayNoCost", "trayWindows",
 	// usage and alerts
 	"currency", "totalCurrency", "trayCurrency", "chineseUnits", "dayStart", "usageAlert", "balanceAlert", "resetReminder", "turnDoneAlert", "maskAlert",
 	// network
@@ -46,7 +46,7 @@ var Keys = []string{
 	"workbuddyCheckin", "traeCheckin", "minimaxCheckin", "qoderCheckin", "checkinAt",
 	// models: replies, vision, images, search
 	"replyModel", "noLoopGuard", "claudeLeanPrompt", "claudeNoExtraUsage", "claudePrintMode", "refusalRetries", "retryAfterCap",
-	"vision", "visionEffort", "imageGen", "videoGen", "imageTimeout", "classifyTimeout",
+	"vision", "visionEffort", "imageGen", "videoGen", "imageTimeout", "imageResolution", "classifyTimeout",
 	// what every routing group does that says nothing of its own
 	"groupSink", "groupFirstToken", "groupPatience",
 	"searcher", "searcherThen", "searcherEffort", "searchFirst",
@@ -59,21 +59,22 @@ var Keys = []string{
 // checks a saved value against (a value outside them is refused there,
 // from the window as from the CLI). A setting's "" is its default.
 var Choices = map[string][]string{
-	"theme":          settings.Themes,
-	"lang":           settings.Langs,
-	"tray":           settings.Trays,
-	"currency":       settings.Currencies,
-	"totalCurrency":  settings.TotalCurrencies,
-	"trayCurrency":   settings.TotalCurrencies,
-	"codexWarmup":    {"off", "week", "all"},
-	"claudeWarmup":   {"off", "week", "all"},
-	"trayUsageEvery": ints(settings.TrayEvery),
-	"dayStart":       {"0", "1", "2", "3", "4", "5", "6"},
-	"updateChannel":  {settings.UpdateStable, settings.UpdateDaily},
-	"updateSource":   {settings.UpdateSourceSite, settings.UpdateSourceGitHub},
-	"updateEvery":    ints(settings.UpdateEveries),
-	"searchFirst":    {settings.SearchFirstModel, settings.SearchFirstAPI},
-	"replyModel":     settings.ReplyModels,
+	"theme":           settings.Themes,
+	"lang":            settings.Langs,
+	"tray":            settings.Trays,
+	"currency":        settings.Currencies,
+	"totalCurrency":   settings.TotalCurrencies,
+	"trayCurrency":    settings.TotalCurrencies,
+	"codexWarmup":     {"off", "week", "all"},
+	"claudeWarmup":    {"off", "week", "all"},
+	"trayUsageEvery":  ints(settings.TrayEvery),
+	"dayStart":        {"0", "1", "2", "3", "4", "5", "6"},
+	"updateChannel":   {settings.UpdateStable, settings.UpdateDaily},
+	"updateSource":    {settings.UpdateSourceSite, settings.UpdateSourceGitHub},
+	"updateEvery":     ints(settings.UpdateEveries),
+	"searchFirst":     {settings.SearchFirstModel, settings.SearchFirstAPI},
+	"replyModel":      settings.ReplyModels,
+	"imageResolution": {"1K", "2K", "4K"},
 }
 
 func ints(v []int) []string {
@@ -217,6 +218,10 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	if _, sent := fields["imageTimeout"]; !sent {
 		in.ImageTimeout = cur.ImageTimeout
 	}
+	// nor the resolution an image is drawn at
+	if _, sent := fields["imageResolution"]; !sent {
+		in.ImageResolution = cur.ImageResolution
+	}
 	// nor how long a routing group's classifier is given (#2934)
 	if _, sent := fields["classifyTimeout"]; !sent {
 		in.ClassifyTimeout = cur.ClassifyTimeout
@@ -239,6 +244,11 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	// nor the accent colour, which pages before it never sent
 	if _, sent := fields["accent"]; !sent {
 		in.Accent = cur.Accent
+	}
+	// nor what this magpie is called, which pages before it never sent
+	// (starballl on X): a page that leaves it out keeps it
+	if _, sent := fields["name"]; !sent {
+		in.Name = cur.Name
 	}
 	// nor whether the loading bird is kept off
 	if _, sent := fields["noBird"]; !sent {
@@ -316,6 +326,7 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	in.Proxies = cur.Proxies                           // set on its own (proxies), the password never sent to the page
 	in.RequestArchive = cur.RequestArchive             // the Gateway page's, set on its own
 	in.RequestArchiveMaxMB = cur.RequestArchiveMaxMB   // in settings.json only
+	in.RequestArchiveMB = cur.RequestArchiveMB         // in settings.json only
 	in.ClaudeRunsMost = cur.ClaudeRunsMost             // magpie claude-code runs, or settings.json (#2956)
 	in.GatewayConversations = cur.GatewayConversations // Sessions' explicit recording consent
 	in.RedactRules = cur.RedactRules                   // the masking rules, set on their own
@@ -324,6 +335,7 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	in.RedactModelScore = cur.RedactModelScore         // set on its own (privacy-model)
 	in.RedactModelOff = cur.RedactModelOff             // set on its own (privacy-model)
 	in.RedactModelAuto = cur.RedactModelAuto           // set on its own (masking)
+	in.RedactModelDir = cur.RedactModelDir             // set on its own (privacy-model's folder)
 	in.RedactActions = cur.RedactActions               // set on their own (redact-actions)
 	in.RedactAllow = cur.RedactAllow                   // set on its own (redact-allow)
 	in.DisabledModels = cur.DisabledModels             // set on their own (disabled-models, #1867)
@@ -380,6 +392,7 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	in.CodexTitles = cur.CodexTitles             // set on its own (codex-titles)
 	in.CodexDescriptions = cur.CodexDescriptions // set on its own (codex-descriptions)
 	in.CodexPredictions = cur.CodexPredictions   // and codex-predictions
+	in.CodexSuggestions = cur.CodexSuggestions   // and codex-suggestions
 	// and so is the model Codex's auto-review runs on (codex-auto-review)
 	in.CodexAutoReview = cur.CodexAutoReview
 	// and the models Codex's and Desktop's subagents are put on, set

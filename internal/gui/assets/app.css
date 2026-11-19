@@ -65,8 +65,13 @@
     --line-2: #2c2c32;
     --fg: #ededf1;
     --fg-2: #b9b9c1;
-    --muted: #8b8b94;
-    --faint: #56565f;
+    /* the quiet text, a help line or a caption: 4.5:1 or better on every
+       dark ground it sits on (the page, a card, an editor, a menu), and on
+       the page over a mid-grey background image under appearance.go's
+       veil; --faint a step under --muted (CHENGJIAHEGOXIS on X: Library ›
+       MCP's project help was #56565f, 2.39:1) */
+    --muted: #9c9ca6;
+    --faint: #90909a;
     --ctl-fg: #a1a1aa;
     --accent: #a5b4fc;
     --accent-soft: #2b2c47;
@@ -90,7 +95,7 @@
 :root[data-theme="dark"] {
   --bg: #1a1a1e; --card: #232327; --card-2: #1f1f23; --pill: #2d2d33; --pill-hover: #36363d;
   --seg-track: rgba(255, 255, 255, .035); --seg-thumb: rgba(255, 255, 255, .15); --seg-edge: inset 0 .5px 0 rgba(255, 255, 255, .08), 0 1px 2px rgba(0, 0, 0, .3);
-  --line: #333339; --line-2: #2c2c32; --fg: #ededf1; --fg-2: #b9b9c1; --muted: #8b8b94; --faint: #56565f; --ctl-fg: #a1a1aa;
+  --line: #333339; --line-2: #2c2c32; --fg: #ededf1; --fg-2: #b9b9c1; --muted: #9c9ca6; --faint: #90909a; --ctl-fg: #a1a1aa;
   --accent: #a5b4fc; --accent-soft: #2b2c47; --accent-fg: #14142a; --sel: #33345a;
   --green: #6fd99b; --green-soft: #1e3a2b; --red: #f28b82; --red-soft: #45272a; --amber: #f2b544; --amber-soft: #3f3220;
   --drift: #ff9592; --drift-soft: #3b1219;
@@ -175,9 +180,9 @@ body.linux.panel { --panel-tint: var(--bg); }
 .tint-probe { display: none; background: var(--panel-tint); }
 /* on the frosted panel the surfaces are tints of the backdrop, not flat paint */
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) body.panel { --bg: #1b1c20; --card: #25262c; --card-2: #212227; --line: rgba(255, 255, 255, .07); --line-2: rgba(255, 255, 255, .06); --pill: #2e2f36; --pill-hover: #383942; --pill-line: rgba(255, 255, 255, .11); --pill-shadow: 0 1px 2px rgba(0, 0, 0, .28); --muted: #9c9ca6; --faint: #7c7c87; --card-edge: inset 0 0 0 1px rgba(255, 255, 255, .06); }
+  :root:not([data-theme="light"]) body.panel { --bg: #1b1c20; --card: #25262c; --card-2: #212227; --line: rgba(255, 255, 255, .07); --line-2: rgba(255, 255, 255, .06); --pill: #2e2f36; --pill-hover: #383942; --pill-line: rgba(255, 255, 255, .11); --pill-shadow: 0 1px 2px rgba(0, 0, 0, .28); --muted: #9c9ca6; --faint: #90909a; --card-edge: inset 0 0 0 1px rgba(255, 255, 255, .06); }
 }
-:root[data-theme="dark"] body.panel { --bg: #1b1c20; --card: #25262c; --card-2: #212227; --line: rgba(255, 255, 255, .07); --line-2: rgba(255, 255, 255, .06); --pill: #2e2f36; --pill-hover: #383942; --pill-line: rgba(255, 255, 255, .11); --pill-shadow: 0 1px 2px rgba(0, 0, 0, .28); --muted: #9c9ca6; --faint: #7c7c87; --card-edge: inset 0 0 0 1px rgba(255, 255, 255, .06); }
+:root[data-theme="dark"] body.panel { --bg: #1b1c20; --card: #25262c; --card-2: #212227; --line: rgba(255, 255, 255, .07); --line-2: rgba(255, 255, 255, .06); --pill: #2e2f36; --pill-hover: #383942; --pill-line: rgba(255, 255, 255, .11); --pill-shadow: 0 1px 2px rgba(0, 0, 0, .28); --muted: #9c9ca6; --faint: #90909a; --card-edge: inset 0 0 0 1px rgba(255, 255, 255, .06); }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) body.panel { --bg: #f2f2f5; --card: #ffffff; --card-2: #f8f8fa; --line: rgba(0, 0, 0, .07); --line-2: rgba(0, 0, 0, .06); --pill: #ffffff; --pill-hover: #f4f4f7; --skel: #eeeef2; --skel-hi: #e2e2e8; --pill-line: rgba(0, 0, 0, .12); --pill-shadow: 0 1px 1px rgba(0, 0, 0, .06); --faint: #9a9aa3; --card-edge: 0 0 0 1px rgba(0, 0, 0, .05), 0 1px 2px rgba(0, 0, 0, .04); }
 }
@@ -224,6 +229,7 @@ code { font: var(--code-style, normal) var(--code-weight, 400) 11.5px var(--code
 .row .field .ic-stack .disc > .ic { width: 11px !important; height: 11px !important; }
 .row .field .ic-stack .disc + .disc { margin-left: -4px; }
 .ic.generic svg { width: 100%; height: 100%; }
+.ic.anthropic-mark svg { width: 100%; height: 100%; display: block; }
 
 /* ---- header --------------------------------------------------------------- */
 .top { display: flex; align-items: center; gap: 8px; padding: 0 10px 0 14px; height: 46px; flex: none; position: relative; }
@@ -356,6 +362,7 @@ body.panel .seg { display: none; }
    they don't fit there, in the row rather than over it: halfway between what
    is either side of them, not a third of the room their left and two thirds
    their right (#442) */
+.top.spare #find { display: none; }
 .top.tight .brand > span:not(.logo), .top.tight .update span { display: none; }
 .top.tight .update { width: 22px; padding: 0; justify-content: center; margin-right: 4px; }
 .top.tight .update-hide { right: -5px; }
@@ -520,9 +527,10 @@ body.side-nav #nav button.has-dot.can-fold::after { right: 28px; }
 .nav-sl:first-of-type { padding-top: 2px; }
 /* Settings' tabs, over its button at the sidebar's foot (app.js navSubs),
    close to the button they come from; the foot takes more of a short
-   sidebar while they show */
+   sidebar while they show (.with-sub, set by app.js: Safari before 15.4
+   can't parse :has()) */
 .side-foot > .nav-sub { margin: 6px 0 2px 16px; }
-.side-foot:has(> .nav-sub) { max-height: 80%; }
+.side-foot.with-sub { max-height: 80%; }
 .nav-sub::before { content: ""; position: absolute; left: 0; top: 3px; bottom: 3px; width: 1px; background: var(--line); }
 /* rows keep their size while the list unrolls or folds: squeezed, a strip
    drawn again then (Installed gets its count) marked the selection a third
@@ -558,8 +566,19 @@ body.side-nav #nav button.has-dot.can-fold::after { right: 28px; }
     background: radial-gradient(36px 400px at var(--lx) 50%, var(--hot) 0%, var(--hot) 12%, color-mix(in oklab, var(--hot) 45%, var(--far)) 45%, var(--far) 100%);
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
+  /* the row's icon takes the light too, from its own ink: as bright as the
+     word would be at its middle (--iw, navlamp.js), and with no lag of its
+     own, since the light already moves */
+  :is(.nav-s, #nav button, #prefs) > :is(svg, .nav-ic, .nav-s-ic).lit {
+    --lo: var(--muted);
+    --hi: var(--fg);
+    --hot: color-mix(in oklab, var(--hi) calc(var(--si) * 100%), var(--lo));
+    --far: color-mix(in oklab, var(--fg) calc(var(--si) * 15%), var(--lo));
+    color: color-mix(in oklab, var(--hot) calc(var(--iw) * 100%), var(--far));
+    transition: none;
+  }
 }
-@supports (color: oklch(from red round(l) c h)) { :is(.nav-s, #nav button, #prefs, .side-gw) > span.lit { --hi: oklch(from var(--fg) round(l) 0 h); } }
+@supports (color: oklch(from red round(l) c h)) { :is(.nav-s, #nav button, #prefs, .side-gw) > span.lit, :is(.nav-s, #nav button, #prefs) > :is(svg, .nav-ic, .nav-s-ic).lit { --hi: oklch(from var(--fg) round(l) 0 h); } }
 /* a row pressed darkens, as a Mac sidebar's does: it never shrinks the way a
    button does (.seg button:active, .icon:active below) */
 body.side-nav #side button:active { transform: none; }
@@ -736,6 +755,10 @@ body:not(.mac):not(.web) .modal .editor.framed > .ebody { overflow-y: scroll; pa
 body.web .modal .editor.framed > .ebody { overflow-y: scroll; }
 .list { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; flex: none; }
 body.panel .list { border: 0; border-radius: 10px; box-shadow: var(--card-edge); }
+/* a Settings card with no rows (Allowed addresses, Client certificates and
+   HTTPS while Share on local network is off) is not drawn: its border was a
+   thin line under the card above (fishmagic80 on X) */
+.set-page .list:empty { display: none; }
 .row { display: flex; align-items: center; gap: 9px; min-height: 40px; padding: 5px 9px 5px 11px; }
 body.window .row { min-height: 48px; padding: 7px 12px 7px 14px; gap: 12px; }
 .row + .row, .editor + .row, .row + .editor { border-top: 1px solid var(--line-2); }
@@ -1605,6 +1628,17 @@ body.masked :hover > .acct-eye, body.masked .pq-card:hover .acct-eye, body.maske
 .led-spd-h:hover, .led-spd-h.on { color: var(--fg); }
 .led-spd th[aria-sort="descending"] .led-spd-h::after { content: " ↓"; }
 .led-spd th[aria-sort="ascending"] .led-spd-h::after { content: " ↑"; }
+.led-spd-by .opt { height: 20px; padding: 0 9px; font-size: 11px; }
+.led-spd .led-spd-prov { overflow: hidden; text-overflow: ellipsis; font-size: 11px; font-weight: 400; color: var(--muted); }
+.led-spd.by-prov tbody td { vertical-align: top; }
+.led-spd.by-prov td.nm { min-width: 112px; }
+.led-spd th.act, .led-spd td.act { width: 1px; padding-left: 8px; }
+.led-spd td.off { color: var(--amber); }
+/* always there, quiet until its row is pointed at (skingstyle48487: a
+   button shown only on hover went unfound) */
+.led-spd-check { height: 20px; padding: 0 2px; font-size: 11px; color: var(--muted); }
+.led-spd tr:hover .led-spd-check { color: var(--ctl-fg); }
+.led-spd-check:focus-visible { color: var(--ctl-fg); }
 .led-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; margin-bottom: 8px; }
 .led-bar .grow { flex: 1; }
 .led-by { font-size: 11.5px; color: var(--muted); }
@@ -1712,7 +1746,7 @@ body.masked :hover > .acct-eye, body.masked .pq-card:hover .acct-eye, body.maske
    rule and draws the system's bar under the weeks, not the app's thin thumb
    every other list has (cybercaius on Discord) */
 .heat-scroll { overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; padding-bottom: 4px; }
-.heat-grid { display: grid; grid-template-columns: auto repeat(53, minmax(10px, 1fr)); grid-template-rows: auto repeat(7, auto); gap: 3px; min-width: min-content; max-width: calc(3em + 53 * 21px); font-size: 10px; color: var(--muted); }
+.heat-grid { display: grid; grid-template-columns: auto repeat(var(--wk, 53), minmax(10px, 1fr)); grid-template-rows: auto repeat(7, auto); gap: 3px; min-width: min-content; max-width: calc(3em + var(--wk, 53) * 21px); font-size: 10px; color: var(--muted); }
 .heat-grid i { aspect-ratio: 1; border-radius: 3px; min-width: 0; }
 .heat-grid i:hover { outline: 1px solid var(--fg-2); outline-offset: -1px; }
 /* the days of the week stay at the card's edge as the weeks scroll under them */
@@ -1777,6 +1811,10 @@ body.masked :hover > .acct-eye, body.masked .pq-card:hover .acct-eye, body.maske
 .led-hscroll::-webkit-scrollbar-button, .led-hscroll::-webkit-scrollbar-corner { display: none; }
 .reads-note { margin-top: 12px; display: flex; flex-direction: column; align-items: center; gap: 8px; }
 .reads-note p { margin: 0; }
+.reads-later { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin: 0 0 9px; padding: 8px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+.reads-later[hidden] { display: none; }
+.reads-later p { margin: 0; flex: 1 1 260px; min-width: 0; color: var(--muted); line-height: 1.45; }
+.reads-later-acts { display: flex; gap: 4px; margin-left: auto; }
 .led-none { padding: 18px 16px; color: var(--muted); text-align: center; line-height: 1.5; }
 .led-sk { padding: 11px 14px; }
 .led-sk + .led-sk { border-top: 1px solid var(--line-2); }
@@ -1787,6 +1825,8 @@ body.masked :hover > .acct-eye, body.masked .pq-card:hover .acct-eye, body.maske
 .led tbody tr:hover td { background: var(--card-2, var(--pill)); }
 .led .n { text-align: right; }
 .led .faint { color: var(--faint); }
+/* a dash that says on hover why it has no figure (ohblue on X) */
+.led td.speed.faint[title], .led td.cache-hit.faint[title] { cursor: help; }
 .led .muted { color: var(--muted); }
 .led th, .led .when, .led .model-value { color: var(--fg-2); }
 #ledRoute { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
@@ -2630,7 +2670,7 @@ body .foot .status.lift { white-space: normal; overflow-wrap: anywhere; text-ove
 .effort-control input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.08); }
 .effort-control input[type="range"]:active::-webkit-slider-thumb { transform: scale(.94); }
 .effort-control input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 .5px rgba(0, 0, 0, .18), 0 1px 3px rgba(0, 0, 0, .22), 0 0 0 3px var(--accent-soft); }
-.effort-ends { display: flex; justify-content: space-between; margin-top: 5px; font-size: 10.5px; color: var(--muted); opacity: .8; }
+.effort-ends { display: flex; justify-content: space-between; margin-top: 5px; font-size: 10.5px; color: var(--muted); }
 .pop li.sel { background: var(--sel); }
 .pop li .check { color: var(--accent); display: none; margin-left: auto; flex: none; }
 .pop li.cur .check { display: inline-flex; }
@@ -3340,7 +3380,11 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
    key squeezed by them on a narrow window slid its copy button under the
    pointer that came to drag the row */
 #gatewayKeys .acc > :is(.key-quotas, .key-conc, .key-tier, .key-redact):not(.set) { flex-shrink: 8; }
-#gatewayKeys .acc:not(:hover) > :is(.key-quotas, .key-conc, .key-tier, .key-redact):not(.set, .open, :focus) { max-width: 0; padding: 0; margin-left: -9px; box-shadow: none; }
+/* On a narrow window they keep that room when not hovered, only faded
+   out: four of them (key-redact made four) took ~90px on hover, the key
+   gave it up and its copy button slid under the pointer that came to
+   drag the row, so the drag never started (#6268) */
+@media (min-width: 521px) { #gatewayKeys .acc:not(:hover) > :is(.key-quotas, .key-conc, .key-tier, .key-redact):not(.set, .open, :focus) { max-width: 0; padding: 0; margin-left: -9px; box-shadow: none; } }
 /* the MCP servers a key held to some may use: cut, and gives way first */
 #gatewayKeys .amodels.key-mcp { display: inline-block; flex: 0 1 auto; min-width: 24px; max-width: 180px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* a read-only key's tag, always shown, never a button */
@@ -3381,6 +3425,26 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 /* a menu of actions, where nothing is or can be ticked, keeps no room for
    a tick: its items line up with its heading */
 .proto-menu.pm-bare .pm-tick { display: none; }
+/* Settings' Sidebar pages (navpages.js): each page's row is dragged to its
+   place, the grip at its end showing on the row under the pointer, as an
+   iPhone's list being reordered has it; Providers is always shown */
+.nav-pages-list { position: relative; display: grid; gap: 1px; }
+.nav-pages-menu .pm-item { align-items: center; }
+.nav-pages-menu .pm-words { flex: 1; min-width: 0; }
+.nav-pages-menu .grip { flex: none; display: grid; place-items: center; align-self: stretch; width: 26px; margin: -6px -8px -7px 0; touch-action: none; cursor: grab; opacity: 0; transition: opacity .15s ease; }
+.nav-pages-menu .grip::before { content: ""; width: 6px; height: 11px; background: radial-gradient(circle, var(--muted) .9px, transparent 1.2px) 0 0 / 3px 3.75px; }
+.nav-pages-menu .pm-item:is(:hover, .dragging) .grip { opacity: 1; }
+/* apart: Safari before 15.4 drops a whole selector list with :focus-visible in it */
+.nav-pages-menu .pm-item:focus-visible .grip { opacity: 1; }
+@media (hover: none) { .nav-pages-menu .grip { opacity: 1; } }
+/* a finger gets a grip it can find: 40px wide where the pointer is coarse */
+@media (pointer: coarse) { .nav-pages-menu .grip { width: 40px; } }
+.nav-pages-menu .pm-fixed .pm-tick { opacity: .4; }
+.nav-pages-list.sorting { user-select: none; -webkit-user-select: none; }
+.nav-pages-list.sorting > .pm-item { transition: transform .16s cubic-bezier(.23, 1, .32, 1); cursor: grabbing; }
+.nav-pages-list.sorting > .pm-item.dragging { z-index: 2; background: var(--card-2); box-shadow: 0 0 0 1px var(--line); transition: none; will-change: transform; }
+@media (prefers-reduced-motion: reduce) { .nav-pages-list.sorting > .pm-item { transition: none; } }
+.nav-pages-reset { margin-top: 3px; }
 /* a group's heading in a menu of many: it ticks all of its items */
 .proto-menu .pm-group { margin-top: 3px; }
 .proto-menu .pm-group .pm-name { font-size: 11px; font-weight: 600; color: var(--muted); }
@@ -3658,16 +3722,16 @@ body.side-nav #addSheet .add-tools.afloat > * { pointer-events: auto; --wails-dr
 body.side-nav #addSheet .add-tools.afloat > .find { flex: 0 1 var(--hint-w, 180px); min-width: 120px; }
 /* a narrow window has no room in its bar: the sheet's head stays at the
    top while the sheet is under it, as Settings' does */
-body:not(.side-nav) #addSheet > .row-head { position: sticky; top: 0; z-index: 5; --bleed-l: 12px; --bleed-r: 12px; }
-body.window:not(.side-nav) #addSheet > .row-head { top: -2px; --bleed-l: 16px; --bleed-r: 16px; }
+body:not(.side-nav) #addSheet > .row-head { position: sticky; top: 0; z-index: 5; }
+body.window:not(.side-nav) #addSheet > .row-head { top: -2px; }
 body:not(.side-nav) #addSheet > .row-head::before {
   content: ""; position: absolute; z-index: -1; pointer-events: none;
-  top: -6px; bottom: -6px; left: calc(-1 * var(--bleed-l)); right: calc(var(--bar, 0px) - var(--bleed-r));
+  top: -6px; bottom: -6px; left: -6px; right: -6px; border-radius: 0 0 13px 13px;
   background: color-mix(in srgb, var(--bg) 92%, transparent);
   -webkit-backdrop-filter: saturate(1.6) blur(16px); backdrop-filter: saturate(1.6) blur(16px);
-  box-shadow: 0 1px 0 transparent; transition: box-shadow .18s var(--ease);
+  box-shadow: 0 1px 0 transparent; opacity: 0; transition: opacity .18s var(--ease-out), box-shadow .18s var(--ease);
 }
-body:not(.side-nav) #addSheet > .row-head.stuck::before { box-shadow: 0 1px 0 var(--line-2); }
+body:not(.side-nav) #addSheet > .row-head.stuck::before { opacity: 1; box-shadow: 0 1px 0 var(--line-2); }
 @supports not (color: color-mix(in srgb, red 50%, blue)) { body:not(.side-nav) #addSheet > .row-head::before { background: var(--bg); } }
 /* the provider editor, in a dialog */
 /* the label column is as wide as its longest label, so that label starts
@@ -3718,11 +3782,25 @@ body:not(.side-nav) #addSheet > .row-head.stuck::before { box-shadow: 0 1px 0 va
 .editor .proxy-row input.proxy-url.off { display: none; }
 .editor .proxy-row .gone { display: none; }
 .editor .proxy-row .proxy-saved { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.editor .proxy-row .proxy-test { flex: none; }
+.editor .proxy-row .proxy-saved[hidden] + .proxy-test { display: none; }
+.editor .proxy-pick .hint.err { color: var(--red); }
 .saved-proxy .sub { overflow-wrap: anywhere; }
 .proxy-form { flex-wrap: wrap; }
 .proxy-form .proxy-controls { justify-content: flex-end; flex: 1 1 100%; }
 .proxy-form .proxy-credential { flex: 1 1 10rem; min-width: 0; }
 .proxy-form .sub.err { flex: 1 1 100%; }
+/* an SSH server's form: Proxy | SSH over its fields, and its key and host
+   key folded under Advanced */
+.proxy-form { gap: 8px; }
+.proxy-form .proxy-kind { flex: none; }
+.proxy-form .proxy-advanced { flex: 1 1 100%; min-width: 0; }
+.proxy-advanced summary { margin-left: 0; }
+.proxy-advanced .inner { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; }
+.proxy-advanced textarea.proxy-key { width: 100%; max-width: 100%; box-sizing: border-box; min-height: 64px; padding: 6px 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: inherit; font: 11.5px/1.45 var(--mono, ui-monospace, monospace); resize: vertical; outline: none; }
+.proxy-advanced textarea.proxy-key:focus { border-color: var(--accent); }
+.proxy-hostkey { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.proxy-hostkey .sub { min-width: 0; overflow-wrap: anywhere; font: 11.5px/1.45 var(--mono, ui-monospace, monospace); }
 .editor :is(input.concurrency, input.queue-limit, input.queue-wait)[type] { width: 12em; max-width: 100%; }
 .editor input[type="number"] { -moz-appearance: textfield; }
 .editor input[type="number"]::-webkit-inner-spin-button, .editor input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
@@ -3773,6 +3851,7 @@ body:not(.side-nav) #addSheet > .row-head.stuck::before { box-shadow: 0 1px 0 va
 .stepplan .state { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); line-height: 1.4; }
 .stepplan .steps { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--muted); line-height: 1.5; }
 .stepplan .steps .pair { margin-top: 2px; }
+.stepplan .ended { display: block; margin-bottom: 8px; color: var(--fg); }
 .stepplan .bookmarklet { display: inline-block; padding: 1px 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--fg); background: var(--pill); text-decoration: none; cursor: grab; white-space: nowrap; }
 .editor input[type="text"], .editor input[type="password"], .editor input[type="url"], .editor input[type="number"], .acc .kf input, .acc input.rename-in {
   height: 27px; padding: 0 9px; border-radius: 7px;
@@ -3849,20 +3928,21 @@ body:not(.side-nav) #addSheet > .row-head.stuck::before { box-shadow: 0 1px 0 va
    Connect's five APIs on a narrow one, and Usage → Sessions' agents,
    which #929 left widening the whole page until its last agent's
    filter was only reachable by dragging the page sideways, and Plugins'
-   kinds on GitHub, wider than a 420px window in Japanese */
-.segs.regions, .connect .segs, .pm-bar .segs { max-width: 100%; overflow-x: auto; }
+   kinds on GitHub, wider than a 420px window in Japanese, and Usage's
+   chart metrics, wider than a 375px phone in German (#5869) */
+.segs.regions, .connect .segs, .pm-bar .segs, .led-bar .segs { max-width: 100%; overflow-x: auto; }
 /* no scrollbar-width here: Chromium (WebView2) then drops every
    ::-webkit-scrollbar rule and draws Windows' classic bar, arrows and all,
    under the strip; the app's thin thumb instead, slimmer still */
-:where(body:not(.mac)) :is(.segs.regions, .connect .segs, .pm-bar .segs)::-webkit-scrollbar { height: 6px; }
-:where(body:not(.mac)) :is(.segs.regions, .connect .segs, .pm-bar .segs)::-webkit-scrollbar-thumb { border-width: 1px; }
+:where(body:not(.mac)) :is(.segs.regions, .connect .segs, .pm-bar .segs, .led-bar .segs)::-webkit-scrollbar { height: 6px; }
+:where(body:not(.mac)) :is(.segs.regions, .connect .segs, .pm-bar .segs, .led-bar .segs)::-webkit-scrollbar-thumb { border-width: 1px; }
 /* on a Mac they scroll with no bar, as a Mac's own tab strips do: the
    system's overlay bar showed over the options' lower half for a moment
    after each scroll, and a click there went to the bar, which paged the
    strip sideways and picked nothing (#1620) */
-:where(body.mac) :is(.segs.regions, .connect .segs, .pm-bar .segs) { scrollbar-width: none; }
-:where(body.mac) :is(.segs.regions, .connect .segs, .pm-bar .segs)::-webkit-scrollbar { display: none; }
-.segs.regions .opt, .connect .segs .opt, .pm-bar .segs .opt { flex: none; }
+:where(body.mac) :is(.segs.regions, .connect .segs, .pm-bar .segs, .led-bar .segs) { scrollbar-width: none; }
+:where(body.mac) :is(.segs.regions, .connect .segs, .pm-bar .segs, .led-bar .segs)::-webkit-scrollbar { display: none; }
+.segs.regions .opt, .connect .segs .opt, .pm-bar .segs .opt, .led-bar .segs .opt { flex: none; }
 /* a custom provider's five Base URL APIs wrap to a second row where the
    editor is too narrow for them (#1346); the thumb follows the row */
 .segs.base-apis { max-width: 100%; flex-wrap: wrap; }
@@ -3894,20 +3974,22 @@ body:not(.side-nav) #addSheet > .row-head.stuck::before { box-shadow: 0 1px 0 va
    reads as a control and not as a disabled hint (sylvenPR on X, a 5px ▸ in
    the muted grey); a pointer and a brighter label under it. The chevron
    starts where the fields do (--ed-at), no padding before it. */
-.editor .more summary { font-size: 12px; line-height: 18px; color: var(--fg-2); list-style: none; display: inline-flex; align-items: center; gap: 5px; padding: 3px 0; margin-left: var(--ed-at, 86px); border-radius: 4px; cursor: pointer; transition: color .12s; }
-.editor .more summary::-webkit-details-marker { display: none; }
-.editor .more summary::before { content: ""; flex: none; width: 10px; height: 10px; background: var(--muted); transition: transform .24s var(--ease-out), background-color .12s;
+.editor .more summary, .proxy-advanced summary { font-size: 12px; line-height: 18px; color: var(--fg-2); list-style: none; display: inline-flex; align-items: center; gap: 5px; padding: 3px 0; margin-left: var(--ed-at, 86px); border-radius: 4px; cursor: pointer; transition: color .12s; }
+.editor .more summary::-webkit-details-marker, .proxy-advanced summary::-webkit-details-marker { display: none; }
+.editor .more summary::before, .proxy-advanced summary::before { content: ""; flex: none; width: 10px; height: 10px; background: var(--muted); transition: transform .24s var(--ease-out), background-color .12s;
   -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M3.6 1.6 7 5 3.6 8.4' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
           mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M3.6 1.6 7 5 3.6 8.4' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat; }
-.editor .more[open]:not(.closing) summary::before { transform: rotate(90deg); }
-@media (prefers-reduced-motion: reduce) { .editor .more summary, .editor .more summary::before { transition: none; } }
-.editor .more summary:hover { color: var(--fg); }
-.editor .more summary:hover::before { background: var(--fg-2); }
-.editor .more summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.editor .more[open]:not(.closing) summary::before, .proxy-advanced[open] summary::before { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .editor .more summary, .editor .more summary::before, .proxy-advanced summary, .proxy-advanced summary::before { transition: none; } }
+.editor .more summary:hover, .proxy-advanced summary:hover { color: var(--fg); }
+.editor .more summary:hover::before, .proxy-advanced summary:hover::before { background: var(--fg-2); }
+.editor .more summary:focus-visible, .proxy-advanced summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* its labels are longer (Anthropic 地址, Responses-URL): their column takes
    the longest, on one line, rather than wrap a last 址 under it (#875) */
 .editor .more .inner { display: grid; grid-template-columns: minmax(var(--ed-lab, 72px), max-content) minmax(0, 1fr); gap: 10px 14px; align-items: first baseline; padding-top: 8px; }
 .editor .more .inner label { white-space: nowrap; }
+.editor .more .inner > .adv-head { grid-column: 1 / -1; font-size: 11px; font-weight: 600; color: var(--muted); margin-top: 8px; }
+.editor .more .inner > .adv-head:first-child { margin-top: 0; }
 .editor .warnbox { grid-column: 1 / -1; font-size: 12px; line-height: 1.5; color: var(--fg); background: color-mix(in srgb, var(--amber) 12%, transparent); border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent); border-radius: 8px; padding: 8px 10px; }
 .editor .warnbox.soft { background: none; color: var(--amber); border: 0; padding: 0 0 0 var(--ed-at, 86px); }
 .editor.import .mchips .mchip { cursor: default; }
@@ -4036,6 +4118,7 @@ body:not(.side-nav) #addSheet > .row-head.stuck::before { box-shadow: 0 1px 0 va
 /* how a model answered Test models: a dot after its name */
 .mchip .tdot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--faint); }
 .mchip .tdot.ok { background: var(--green); }
+.mchip .tdot.queued { background: var(--amber); }
 .mchip .tdot.bad { background: var(--red); -webkit-mask: var(--x-mark) center / contain no-repeat; mask: var(--x-mark) center / contain no-repeat; border-radius: 0; transform: scale(1.5); }
 .mchip .tdot.wait { animation: tdot 1s ease-in-out infinite alternate; }
 @keyframes tdot { to { opacity: .25; } }
@@ -4148,21 +4231,23 @@ body:not(.side-nav) #addSheet > .row-head.stuck::before { box-shadow: 0 1px 0 va
 /* with the tabs across the top (the sidebar has them in the title bar) the
    parts' tabs and the search stay at the top of the page while a long part
    (About) scrolls under them, on the frosted strip the Library's and the
-   Plugins' tabs have (.lib-head), a hairline once something is beneath
-   (#2396). The strip is the head's ::before, reaching over the view's
-   padding and the head's margins so no row shows through above or below
-   it; at the page's top it is the page's own colour, nothing moved. The
+   Plugins' tabs have (.lib-head), shown with a hairline once something is
+   beneath (#2396). The strip is the head's ::before, reaching over the
+   head's margins so no row shows through above or below it, 6px out from
+   the tabs (the first sits 7px out) and the search at the sides as at the
+   foot, rounded by their 7px plus those 6px; at the page's top it is not
+   drawn, nothing moved. The
    window's view is padded 2px at the top: the head stops over it */
-body:not(.side-nav) #view-settings .set-head { position: sticky; top: 0; z-index: 5; --bleed-l: 12px; --bleed-r: 12px; }
-body.window:not(.side-nav) #view-settings .set-head { top: -2px; --bleed-l: 16px; --bleed-r: 16px; }
+body:not(.side-nav) #view-settings .set-head { position: sticky; top: 0; z-index: 5; }
+body.window:not(.side-nav) #view-settings .set-head { top: -2px; }
 body:not(.side-nav) #view-settings .set-head::before {
   content: ""; position: absolute; z-index: -1; pointer-events: none;
-  top: -6px; bottom: -6px; left: calc(-1 * var(--bleed-l)); right: calc(var(--bar, 0px) - var(--bleed-r));
+  top: -6px; bottom: -6px; left: -13px; right: -6px; border-radius: 0 0 13px 13px;
   background: color-mix(in srgb, var(--bg) 92%, transparent);
   -webkit-backdrop-filter: saturate(1.6) blur(16px); backdrop-filter: saturate(1.6) blur(16px);
-  box-shadow: 0 1px 0 transparent; transition: box-shadow .18s var(--ease);
+  box-shadow: 0 1px 0 transparent; opacity: 0; transition: opacity .18s var(--ease-out), box-shadow .18s var(--ease);
 }
-body:not(.side-nav) #view-settings .set-head.stuck::before { box-shadow: 0 1px 0 var(--line-2); }
+body:not(.side-nav) #view-settings .set-head.stuck::before { opacity: 1; box-shadow: 0 1px 0 var(--line-2); }
 @supports not (color: color-mix(in srgb, red 50%, blue)) { body:not(.side-nav) #view-settings .set-head::before { background: var(--bg); } }
 .set-q { flex: 0 1 180px; margin-left: auto; min-width: 120px; }
 .set-searching .set-tabs { display: none; }
@@ -4170,7 +4255,19 @@ body:not(.side-nav) #view-settings .set-head.stuck::before { box-shadow: 0 1px 0
 .set-searching .set-miss { display: none !important; }
 .set-searching .set-page::before { content: attr(data-part); display: block; margin: 4px 2px 6px; font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
 .set-none { margin: 18px 2px; font-size: 13px; color: var(--muted); text-align: center; }
+/* what the words are about, found when nothing has them (finder.js): a line over the parts */
+.set-none.set-near { margin: 2px 2px 10px; text-align: start; }
 .set-page > .list:not(:last-child) { margin-bottom: 8px; }
+/* what the search finds on the other pages (finder.js): a part per page
+   after Settings' own, named by it; the place Open goes to is lit there */
+.set-else { display: contents; }
+.set-else[hidden] { display: none; }
+.find-more { margin: 0 2px; }
+body.web .row.pref.find-row { flex-wrap: nowrap; }
+body.web .row.pref.find-row > .who { flex-basis: auto; min-width: 0; }
+.find-lit { animation: flash 1.2s ease-out; border-radius: 6px; }
+/* the tray panel has Settings' button; the window's header finds */
+body.panel #find { display: none; }
 /* Plugins › Built-in: what the list is over its rows, and a row in use
    saying what uses it under its switch, which can't be turned off */
 .feat-say { margin: 2px 4px 10px; font-size: 12px; line-height: 1.45; color: var(--muted); }
@@ -4380,7 +4477,7 @@ input.words.window-in { width: 96px; font-variant-numeric: tabular-nums; }
    sends, who the allow list lets in), a line with a button or link in
    it. A touch screen, with no hover, keeps them all. */
 @media (hover: hover) {
-  :is(#view-settings:not(.set-searching), .editor.roomy .prov-prefs) .row.pref > .who > .sub:not(.err, .bad, .say, .proxy-check, .lib-way, .image-gen-hidden, .sync-sign-in, .no-names, .pv-hits, .feat-why, .vision-not-marked, .video-gen-how, .font-note, .acts, [role="status"], #proxySub):not(#otelSessionsRow *, #allowList *, .disabled-model *) {
+  :is(#view-settings:not(.set-searching), .editor.roomy .prov-prefs) .row.pref > .who > .sub:not(.err, .bad, .say, .proxy-check, .lib-way, .image-gen-hidden, .sync-sign-in, .no-names, .pv-hits, .feat-why, .vision-not-marked, .video-gen-how, .font-note, .acts, [role="status"], #proxySub, :has(> .warn)):not(#otelSessionsRow *, #allowList *, .disabled-model *) {
     --hint: 1; position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
   }
   /* the line held out of sight stays in its row's box: placed against the
@@ -4483,6 +4580,7 @@ input.words.remote-key { width: 160px; }
 .prefs .row.rule-editing .val.rule-add { flex-wrap: wrap; row-gap: 6px; }
 .prefs .row.rule-editing .rule-tail { display: flex; align-items: center; gap: 6px; flex: 1 1 240px; min-width: 0; }
 .row.pref .sub.err { color: var(--red); white-space: normal; }
+.row.pref .sub .pipe-part.err { color: var(--red); }
 /* Download source's way to the docs' Mirrors page, quiet in its line */
 .row.pref .sub .sub-more { padding: 0; color: var(--fg-2); text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); text-underline-offset: 2px; cursor: pointer; transition: color .15s ease; }
 .row.pref .sub .sub-more:hover { color: var(--fg); }
@@ -4513,7 +4611,7 @@ input.words.remote-key { width: 160px; }
 :root[data-theme="dark"] .warm-at input.at { color-scheme: dark; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .warm-at input.at { color-scheme: dark; } }
 @media (max-width: 520px) { .proxy-segs { flex-wrap: wrap; justify-content: flex-end; } }
-/* Settings → Plugins: what a plugin signs in to, or why it didn't load, said whole */
+/* Plugins page: what a plugin signs in to, or why it didn't load, said whole */
 .row.pref.plugin-row .sub, .row.pref.plugin-add .sub { white-space: normal; }
 .row.pref.plugin-row.off .name { color: var(--muted); }
 .row.pref.plugin-add .val { flex-wrap: wrap; justify-content: flex-end; }
@@ -4758,7 +4856,7 @@ body.panel .modal { padding: 16px 12px; }
   body.web .segs .thumb { border-radius: 6px; }
   body.web .segs .opt { height: 28px; padding: 0 11px; font-size: 13px; }
   body.web .segs .opt::after { content: ""; position: absolute; left: 0; right: 0; top: -8px; bottom: -8px; }
-  body.web :is(.segs.regions, .connect .segs, .pm-bar .segs, .ctx-contents-head .segs, .editor.importapps .approw .segs) { overflow-y: hidden; }
+  body.web :is(.segs.regions, .connect .segs, .pm-bar .segs, .led-bar .segs, .ctx-contents-head .segs, .editor.importapps .approw .segs) { overflow-y: hidden; }
   body.web .text { padding: 8px 10px; }
   body.web .copy { min-width: 44px; }
   body.web .fields { width: 100%; grid-template-columns: minmax(0, 1fr) minmax(0, 124px); }
@@ -5071,6 +5169,15 @@ body.panel .modal { padding: 16px 12px; }
 .pu-card .led-bar .segs .opt { height: 20px; padding: 0 8px; font-size: 11px; }
 .pu-card .led-chart .plot { height: 124px; }
 .pu-card .led-rank { margin-top: 4px; }
+/* the recent weeks' heatmap under the chart: the weeks fill the card, no
+   sideways scroll, the days' names plain beside them */
+/* the panel's light pills are its cards' white: a quiet day is a shade off it */
+.pu-heat { position: relative; padding: 8px 10px 6px; border-radius: 11px; background: var(--card); box-shadow: var(--card-edge); --pill: color-mix(in srgb, var(--fg) 7%, var(--card)); }
+.pu-heat[hidden] { display: none; }
+.pu-heat-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 1px 0 6px; font-size: 11.5px; }
+.pu-heat-head b { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pu-heat .heat-grid { max-width: none; min-width: 0; padding-bottom: 4px; }
+.pu-heat .heat-grid .wd { position: static; background: none; box-shadow: none; }
 .pu-none { margin: 0; padding: 12px; border-radius: 11px; background: var(--card); box-shadow: var(--card-edge); font-size: 12px; line-height: 1.55; color: var(--muted); }
 .pu-none b { display: block; color: var(--fg); font-weight: 550; }
 .skeleton.pu-sk { height: 52px; border-radius: 11px; }
@@ -5590,7 +5697,39 @@ body.linux:not(.side-nav) #view-settings .set-head::before,
 body.linux .action-confirm::backdrop { -webkit-backdrop-filter: none; backdrop-filter: none; }
 /* what syncs (#6428): the keys' tick under Providers; a preview's items */
 .editor.sync-form .sync-sub-tick { padding-left: 22px; }
+.editor.sync-form .sync-except { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; }
+.editor.sync-form .sync-except[hidden] { display: none; }
+.sync-except .proto.pick { flex: 0 1 auto; min-width: 0; display: inline-flex; align-items: center; gap: 3px; height: 24px; padding: 0 6px 0 9px; font: inherit; font-size: 12px; color: var(--fg-2); border: 0; border-radius: 7px; background: var(--pill); cursor: default; transition: background .12s, color .12s; }
+.sync-except .proto.pick span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-except .proto.pick svg { flex: none; opacity: .7; transition: transform .15s var(--ease); }
+.sync-except .proto.pick.open svg { transform: rotate(180deg); }
+.sync-except .proto.pick:hover, .sync-except .proto.pick.open { color: var(--fg); background: var(--pill-hover); }
+.sync-except .proto.pick.busy { opacity: .6; }
 .sync-preview .sync-items { display: grid; gap: 2px; margin: -2px 0 8px; padding: 6px 10px; border-radius: 8px; background: var(--pill); font-size: 12.5px; max-height: 180px; overflow-y: auto; }
 .sync-preview .sync-item { display: flex; justify-content: space-between; gap: 12px; min-width: 0; }
 .sync-preview .sync-item span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sync-preview .sync-item .sub, .sync-preview .sync-items > .sub, .sync-preview .lib-confirm.sub { color: var(--muted); }
+
+/* Speed beside Model and Effort (Tengs999 on X): the bolt and what decides it */
+.field.ag-speed .v { display: inline-flex; align-items: center; gap: 3px; }
+.field.ag-speed .v svg, .field.ag-speed .v .bolts { flex: none; color: var(--accent); }
+.field.ag-speed .v path { fill: currentColor; }
+.field.ag-speed .v .bolts { display: inline-flex; }
+.field.ag-speed .v .bolts svg + svg { margin-left: -5px; }
+.field.ag-speed .ag-speed-by { color: var(--faint); font-weight: 400; white-space: pre; }
+
+/* the Usage speed card's check dialog (relaycheck.js) */
+.relay-check > p, .relay-parts { grid-column: 1 / -1; }
+.relay-parts { display: flex; flex-direction: column; gap: 10px; min-width: 0; margin: 4px 0 12px; }
+.relay-part { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.relay-top { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.relay-sum { display: flex; flex-wrap: wrap; gap: 4px 16px; font-weight: 500; }
+.relay-mark { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.relay-mark.ok { background: var(--green); }
+.relay-mark.off { background: var(--amber); }
+.relay-mark.err { background: var(--red); }
+.relay-said { font-weight: 400; font-size: 12px; }
+.relay-line { padding-left: 15px; font-size: 12px; overflow-wrap: anywhere; }
+.relay-line.mono { font-family: var(--code); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.relay-line.err, .relay-part.err { color: var(--red); }
+.relay-wait { font-size: 12px; }

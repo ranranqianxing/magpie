@@ -136,12 +136,12 @@ func TestHubMCPToolsWhole(t *testing.T) {
 	many := manyHubTools(hubOnDemandOver + 2)
 	f := &fakeHub{on: true, tools: map[string][]HubTool{
 		"claude": many, "claude@wsl:Ubuntu": many, "claude-desktop": many, "codex": many, "pi": many, "": many,
-		"droid": many, "droid@wsl:Ubuntu": many, "omp": many,
+		"droid": many, "droid@wsl:Ubuntu": many, "omp": many, "agy": many, "antigravity": many,
 		"gemini": manyHubTools(hubOnDemandOver), "opencode": many,
 	}}
 	withHub(t, f)
 	h := lanGuard(New().Handler())
-	for _, a := range []string{"claude", "claude@wsl:Ubuntu", "claude-desktop", "codex", "pi", "droid", "droid@wsl:Ubuntu", "omp", "gemini"} {
+	for _, a := range []string{"claude", "claude@wsl:Ubuntu", "claude-desktop", "codex", "pi", "droid", "droid@wsl:Ubuntu", "omp", "agy", "antigravity", "gemini"} {
 		if got := listedNames(t, readMCP(t, hubPost(h, a, here, toolsList))); len(got) != len(f.tools[a]) {
 			t.Fatalf("%s listed %v", a, got)
 		}
@@ -246,5 +246,28 @@ func TestHubFindToolsSaysWhatIsBehind(t *testing.T) {
 	find = listedSpecs(t, hubPost(h, "opencode", here, toolsList).Body.String())[hubFindTool]
 	if max := hubLineMax + len(hubFindHow) + hubFindSayMax + 2; runeLen(find) > max || !strings.Contains(find, "server00") {
 		t.Fatalf("with 40 servers find_tools' description is %d characters (at most %d): %s", runeLen(find), max, find)
+	}
+}
+
+// HubFindsItself, which the Library's Tools on demand row names, is every
+// agent hubOnDemand gives every tool whole and no other: its words named
+// four of the six (11-18).
+func TestHubFindsItselfIsWhoGetsEveryTool(t *testing.T) {
+	fresh(t)
+	n := hubOnDemandOver + 1
+	for _, id := range HubFindsItself() {
+		if hubOnDemand(id, n) || hubOnDemand(id+"@wsl:Ubuntu", n) {
+			t.Fatalf("%s is named as searching itself but is given its tools on demand", id)
+		}
+	}
+	for id := range hubSearchesItself {
+		if !slices.Contains(HubFindsItself(), id) {
+			t.Fatalf("%s is given every tool but not named", id)
+		}
+	}
+	for _, id := range []string{"opencode", "gemini", "kimi", "qwen", "goose", "crush", "copilot", "cursor"} {
+		if !hubOnDemand(id, n) {
+			t.Fatalf("%s is given every tool but not named", id)
+		}
 	}
 }

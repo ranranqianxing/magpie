@@ -295,6 +295,18 @@ call magpie had routed was counted again as a local session's whatever
 provider id ZCode wrote beside it (nori_tsukiji on X). Verification:
 `TestZCodeCallsPairWithTheGatewaysRecords`.
 
+Pairing needs the tokens and end time to agree, so a routed call they don't
+(a try the gateway and ZCode count differently) was still listed twice. A
+call whose provider is the gateway is left out of ZCode's calls before any
+pairing: the id magpie writes (`magpie`), and any provider the user added by
+hand whose base URL in `config.json` or `provider_config.json` is this
+machine (loopback, `localhost`, one of its addresses) at the gateway's port
+(`zcodeGateway`, `gatewayBase`; jiangshangmuyun on X: "new-provider" at
+`127.0.0.1:3425`, one call listed as "new-provider · Local session" among
+the gateway's rows). It reads the configuration as it is now, as
+`workbuddyGateway` does. Verification: `TestZCodeHandAddedGatewayProvider`,
+`TestGatewayBase`.
+
 The Claude subscription bridge's own Claude Code runs save their sessions
 in a Claude folder the readers list (the user's own, or a saved account's
 under `claude-accounts`), often in the caller's project. They aren't the
@@ -369,7 +381,7 @@ list the session), and `HasGatewayConversations` counts it.
 Implementation: [`internal/sessions/gateway_delete.go`](../../internal/sessions/gateway_delete.go),
 `Restore` in [`internal/sessions/manage.go`](../../internal/sessions/manage.go), and
 [`internal/gui/sessions_manage.go`](../../internal/gui/sessions_manage.go).
-An agent whose sessions magpie cannot delete (OpenCode, Cline, Grok, Kimi, Hermes:
+An agent whose sessions magpie cannot delete (OpenCode, Cline, Kimi, Hermes:
 rows in the agent's own database or store) and whose command is no longer on
 PATH (`cliGone`) is forgettable (_SekiBetu_ on X): its rows get Delete, which
 only hides them through the same hidden list (`sessions.Forget`, trash note
@@ -377,6 +389,36 @@ marked `forgot`; the agent's own files are not touched), and no Resume
 (`resumeFor`). Restore unhides. With the command installed nothing changes.
 Tests: `TestUninstalledAgentSessionsAreForgotten`,
 `TestManageDeleteOfAnUninstalledAgentTakesItOffTheList`, `sessions-forget.test.cjs`.
+Grok Build's sessions are deletable too (#3003 asked; #4595 had them listed
+with no Delete): a session is its folder, so `sessions.Delete` moves the whole
+of it under `<GROK_HOME>/sessions/<url-encoded cwd>/<id>/` — `updates.jsonl`,
+`summary.json`, the locks and the `terminal/` output Grok Build writes beside
+them — and its subagents' folders, which are folders of their own beside it
+and which `grokFiles` folds into the session it ran in. What is outside them
+stays: another session's folder, the `prompt_history.jsonl` of the cwd, and
+the index. Grok Build also copies each session's text into
+`<GROK_HOME>/sessions/session_search.sqlite` (`session_docs`, one row a
+session, over the FTS5 `session_docs_fts` its own triggers keep in step), so
+that file is the one copy of the text a folder delete would leave behind and
+its search would go on finding: `grokSearchRowsDrop` deletes the session's
+row and its subagents', waiting on Grok's own write lock
+(`BEGIN IMMEDIATE`, busy timeout 5 s), before any file is moved. A row that
+can't be taken out stops the delete, so the session stays whole rather than
+half gone; no index, or one without those tables, deletes as before. The rows
+are kept, every column as Grok Build had them, in the trash entry's
+`grok_search.json` (not in the note the Trash page lists, the text can be
+large); Restore puts them back (`INSERT OR IGNORE`, so a row Grok Build wrote
+again meanwhile is kept, and an index that can't be written doesn't stop the
+restore), and a delete that fails after dropping them puts them back too.
+Implementation:
+[`grok_search.go`](../../internal/sessions/grok_search.go), the `grok` branch
+of `sessionPaths` and `Delete` in
+[`manage.go`](../../internal/sessions/manage.go); tests
+`TestGrokDeleteRestore`, `TestGrokDeleteLeavesTheSessionWhenItsIndexRowCantGo`,
+`TestGrokSearchRowsDrop`, `TestGrokSearchRowsComeBackWhole` and
+`TestGrokSessionDeleteOnThePage`. The schema (session_docs: session_id, cwd,
+updated_at, title, content, content_hash; some versions add an offset column)
+was read from Grok Build 1.0.67's own index and binary.
 A deleted Codex session also leaves the Codex app's list (zhuddan on Discord).
 The app (ChatGPT.app's Codex, 26.x) lists threads from its own catalog,
 `<CODEX_HOME>/sqlite/codex.db` (`codex-dev.db` for a non-prod build), table
@@ -441,6 +483,20 @@ covers them), and `sessions/manage` carries the same as `reads`. While
 `asked` is false the Sessions page shows the consent (`consentCard` in
 the sessions plugin): each agent found with a switch, off; Allow selected
 saves `all: false` with each agent picked or not, Allow all `all: true`.
+A choice with `all` false reads no agent it doesn't name. An agent off
+and found here is `new` in `found` unless it was turned off on its own:
+a post without `all` that sets it `false` (Keep off, a Settings ›
+Privacy row, `magpie sessions read off <agent>`) records it in
+`sessionReads.kept`, and one that sets it `true` takes it out. So an
+agent found after the first choice, and one left off in that choice's
+list (Antigravity 2.0 beside agy CLI: baysonfox on X, whose app calls
+made without magpie were counted nowhere), are asked about once more:
+on the Sessions page (`laterCard`: Show their sessions sends each
+`true`, Keep off `false`) and above Usage › Requests' rows (`readsLater`
+in the usage plugin's `page.js`: Count / Don't count, the same posts).
+An agent turned off in Settings before `kept` existed has no entry and
+is asked once (`TestSessionReadsUncheckedAgentAskedAgain`,
+`TestSessionReadsTurnedOffNotAskedAgain`).
 Settings › Privacy, *Agents' session history* (`renderSessionReads` in
 the sessions plugin's `settings.js`), has *Agents found later* (`all`, sent with each listed agent
 at the value its row shows) and a row per agent.
@@ -504,6 +560,26 @@ Codex's newest rollout's last line before magpie restarts Codex
 `TestFreshInstallReadsNoAgentUntilAllowed`,
 `TestSettleReadsKeepsWhatWasThere`, `TestSessionReadsRoutes`,
 `sessions-reads.test.cjs`.
+
+LiveAgent's sessions (#6741,
+[`liveagent.go`](../../internal/sessions/liveagent.go)) are K-brain's
+`<root>/sessions/<project>/<id>/session.jsonl` (older ones right under
+`sessions`; `.runs` and `.deleted-history` are skipped), the root found by
+the rule `agent.liveAgentDir` uses (`sessions.LiveAgentDirIn`:
+`$LIVEAGENT_HOME`, `$K_BRAIN_HOME`, `~/.liveagent/data-dir.json`,
+`~/.liveagent`). K-brain rewrites the whole file, so it is parsed whole.
+Its first line, `session_meta`, gives the id, title, cwd and the running
+totals (`usage_in` with cache reads and writes in it, `usage_cached`,
+`usage_out`, `model_usage` by `"<model> @ <provider>"`); each reply's own
+`usage` counts on its day, and what the totals hold beyond those replies
+(a compaction's call, a rewound reply) plus `sub_usage` counts on the last
+message's day. A fork's copies (`seq` up to `fork_seq`) are its source's
+and count in neither. A subagent's session (`task-<parent>-<task>`,
+`task_id` set) is filed under its parent with its tools but no tokens:
+they are the parent's `sub_usage`. There is no Calls reader, as the
+gateway's own record of LiveAgent's calls carries no session, and no
+resume command or delete. Tests: `TestLiveAgentSessions` (the issue's
+literal `session_meta`), `TestLiveAgentTranscript`, `TestLiveAgentRoot`.
 
 ## Local Gateway Conversation Recording
 
@@ -884,7 +960,14 @@ Code's (#1779; its sessions are on the Sessions page too, from the same
 `TestCodeBuddySessionsListedUnderTheirName`), MiniMax Code's (#1605), Kimi Code's (#1607,
 [`calls_kimi.go`](../../internal/sessions/calls_kimi.go)) and Pi's,
 Raft's Pi agents' and omp's, here and in WSL (#1951,
-[`calls_pi.go`](../../internal/sessions/calls_pi.go)). Each skips the
+[`calls_pi.go`](../../internal/sessions/calls_pi.go)), and Qoder's and
+Qoder CN's (`~/.qoder`, `~/.qoder-cn`), read as Claude Code's are
+(`ccCallAgent`; eating_dream on X). Qoder writes a reply on its own models
+(`auto` among them) with every count 0 unless `QODER_EXPOSE_TOKEN_USAGE`
+is set (qodercli 1.1.0 on, and the app's worker), and with the reply's
+`credits`: such a call has no tokens and no price, and its `Credits` are
+summed as a plan's credits are; a reply written with no usage at all is no
+call (`TestQoderCalls`, `TestDirectQoderCallsByCredits`). Each skips the
 calls the agent made through magpie's own entry, which the gateway logged
 with the account that answered: Kimi Code's are the ones whose
 `usage.record` model begins `magpie/`. Kimi Code's calls are its
@@ -970,6 +1053,15 @@ picks it up from any folder; when agy is set to use magpie it is the
 agent's launch command (the gateway's variables and `--model`) with
 `--conversation` after it (`sessions.AgyStart`, set by package agent).
 Subagents (`parent_conversation_id`) and agy in WSL are not read.
+agy's calls are also read from the profile T3 Code gives each of its
+Antigravity instances (`t3AgyDirs`): T3 Code runs `agy acp --gemini-dir
+<profile> --app-data-dir antigravity-acp` on the instance's own Google
+sign-in, the profile under `<T3 Code's folder>/userdata/providers/antigravity/`
+(or `dev/…` for its dev server; the folder is `$T3CODE_HOME` or `~/.t3`,
+`appdir.T3Code`), and those requests go to Google, not through the gateway
+(zzzkl on X; `TestAgyCallsInT3Code`, on what agy 1.5.10 wrote run that way).
+`Found` lists agy for those folders too. The Sessions page doesn't list
+them: `agy --conversation` would look in agy's own folder.
 Verification: `TestAgySessions`, `TestAgyTitleLater`, `TestAgyGrows`,
 `TestAgyTranscript`, `TestAgyFolder`, `TestAgyRowOnly`, on conversations agy 1.3.5 and 1.4.7
 wrote in a sandbox.
@@ -987,10 +1079,22 @@ including response folding and gateway matching. Insiders session ids
 have an `insiders-` prefix in magpie, leaving stable ids unchanged and
 keeping equal UUIDs in the two stores from sharing a session or call id.
 The files themselves are not renamed. Sessions stay read-only with no
-terminal resume command; encrypted conversation text is not read.
+terminal resume command. The database's step text is encrypted and not
+read; what was said is read from the plain-text transcript the app writes
+beside it, `brain/<id>/.system_generated/logs/transcript_full.jsonl` in the
+same store (`antigravityTranscript`), in agy's format and through agy's
+reader (`agyTranscript`): the user's turns, the replies, each tool call and
+its result, on the session viewer, search and the Markdown export
+(@yansheng1003 on X: only the title and preview showed). Its size and time
+are counted into the session file's with the `-wal`'s, so a step it adds
+reads the session again. A conversation with no transcript is
+`ErrNoTranscript`, as before.
 Verification: `TestAntigravityInsidersSessions` covers Insiders alone,
 both stores with the same UUID, per-model tokens, call ids, summary refresh
 and turning the existing reading choice off, using #2190's real step bytes.
+`TestAntigravityAppTranscript` reads a conversation the app's 2.30 language
+server had with a read_file call (testdata/antigravity-2.30-tools) from
+stable, Insiders and a WSL distro's store; `TestAntigravityAppNoTranscript`.
 
 A read of every call decodes each file's cached shard, and over a long
 history that is tens of thousands of files (#2278: 68k shards, 415 MB).
@@ -1008,6 +1112,24 @@ writes rebuilt the whole ledger, and the app grew to 85 GB. Verification:
 `TestConcurrentCallsShareOneRead`, `TestAgentCallsReadsOneAgent`,
 `TestCodexModelEffort*` in `codex_effort_shared_test.go` (the codex-only
 answer equals the whole ledger's), and `sessions-overview-once.test.cjs`.
+
+The calls a Sessions read rides along for an idle Claude Code session
+(not changed within the hour) it reads from the start go to a pack
+(`calls-v15/*.pack`), not to a shard of the session's own: one file for
+every such session the pass read, written when the pass ends (and every
+32 MB, and in `Saved`), with each session's frames as its shard would
+hold them and an index with a CRC at its end. A session being written
+keeps its shard and `.rev`, which the lines it gains are appended to.
+A session's own shard, which any later read of it writes whole (a pack is never appended to), is read before the pack. A
+pack that can't be read whole is as if it were not there, and its
+sessions are read again; the hourly sweep removes a pack none of whose
+sessions is listed. Before this, a cold read of 12,000 sessions made
+~21,000 files, and on Windows Defender scanned each as it closed: a
+cold page took 20.7 to 31.7 s on xiaomi-gpu, against 5.7 to 5.9 s with
+the pack, and 2.0 to 2.2 s on a restart (shangyuan0818 on X). See
+[`internal/sessions/call_pack.go`](../../internal/sessions/call_pack.go),
+`TestColdSessionsReadWritesOnePack`, `TestPackedCallsServeRequests` and
+`TestPackedSessionGrows`.
 
 ### Calls an app reports itself
 

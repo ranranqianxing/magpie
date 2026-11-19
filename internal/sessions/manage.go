@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,14 +31,18 @@ import (
 // when it deletes an empty draft itself; zachzhao1984 on Discord) and
 // Antigravity CLI's (agy: a conversation's brain folder, conversations/<id>.db
 // and annotations/<id>.pbtxt, what agy's own delete removes; ysm119 on
-// Discord). agy's conversation_summaries.db and jetbox_summaries_proto.pb,
+// Discord) and Grok Build's (a session's folder whole, and its subagents'
+// folders beside it, whose text Grok Build also copied into
+// session_search.sqlite: that index's rows go first, grokSearchRowsDrop,
+// and a session whose row can't be taken out stays where it is; #3003).
+// agy's conversation_summaries.db and jetbox_summaries_proto.pb,
 // which it keeps open, keep the row, and agy lists no conversation whose
-// files are gone, as a restore brings it back to its /resume list.
+// files are gone, as a restore brings it back to its /resume list. A
+// restored Grok Build session is whole again, and the index rows it dropped
+// (kept whole in the trash entry's grok_search.json) go back with it.
 // Hermes's, Alma's and OpenMausBot's are rows in a database the agent keeps open and
 // writes, so they are only listed, and so are OpenCode's and ZCode's, and
-// Cline's, whose sessions.db lists a session whose files are gone. Grok
-// Build's are folders, but it copies each session's text into
-// session_search.sqlite, which a delete would leave behind. Kimi Code's are
+// Cline's, whose sessions.db lists a session whose files are gone. Kimi Code's are
 // folders, but session_index.jsonl, which Kimi writes, names each one. A
 // Claude Desktop (Cowork) session is a Claude Code folder inside a session
 // Desktop keeps and lists itself. The agents' indexes are left as they are: Codex's
@@ -83,7 +88,7 @@ type AgentCount struct {
 // those kept as files of their own, in a layout magpie knows whole.
 func Deletable(agent string) bool {
 	switch agent {
-	case "claude", "qoder", "qoder-cn", "workbuddy", "workbuddy-ai", "codebuddy", "codex", "pi", "raft", "cindy", "omp", "cursor", "dsh", "droid", "agy":
+	case "claude", "qoder", "qoder-cn", "workbuddy", "workbuddy-ai", "codebuddy", "codex", "pi", "raft", "cindy", "omp", "cursor", "dsh", "droid", "agy", "grok":
 		return true
 	}
 	return false
@@ -133,8 +138,32 @@ func agentCounts(all []file) []AgentCount {
 	// as listAgent lists them, from the parses kept: a copy of a
 	// conversation is not a session of its own (ccCopies)
 	copies := ccCopies(all)
+	// a Codex subagent thread whose parent is gone is no row
+	// (keptSubagents), from the parses kept
+	var codex []file
+	for _, f := range all {
+		if f.agent == "codex" {
+			codex = append(codex, f)
+		}
+	}
+	var orphans map[string]bool
+	if len(codex) > 0 {
+		identities := codexIdentitySnapshot(codex)
+		parents := map[string]string{}
+		for _, f := range codex {
+			id := strings.TrimPrefix(f.key, "codex:")
+			parents[id] = ""
+			if i, ok := identities[id]; ok && i.Role == codexRoleSubagent {
+				parents[id] = i.ParentSession
+			}
+		}
+		orphans = orphanSubagents(parents)
+	}
 	for _, f := range all {
 		if copies[f.key] != "" {
+			continue
+		}
+		if f.agent == "codex" && orphans[strings.TrimPrefix(f.key, "codex:")] {
 			continue
 		}
 		if n[f.agent] == nil {
@@ -354,24 +383,40 @@ func listAgentWith(agent string, all []file, quick bool) []Managed {
 // history whose request action you are assessing…", flandern). Their calls
 // are still counted by Usage.
 func keptSubagents(out []Managed) []Managed {
-	ids := make(map[string]bool, len(out))
+	parents := make(map[string]string, len(out))
 	for _, m := range out {
-		ids[m.ID] = true
+		parents[m.ID] = ""
+		if m.Role == codexRoleSubagent {
+			parents[m.ID] = m.ParentSession
+		}
 	}
+	gone := orphanSubagents(parents)
+	if len(gone) == 0 {
+		return out
+	}
+	return slices.DeleteFunc(out, func(m Managed) bool { return gone[m.ID] })
+}
+
+// orphanSubagents are the Codex subagent threads keptSubagents takes off
+// the list: parents holds every thread by id, with the thread it is a
+// subagent of ("" for none). One whose parent is not there, or is such a
+// thread itself, goes. The list and its tab's count both ask it, so the
+// count is the rows the tab shows (lurx98 on X: Codex 6, then 0 rows).
+func orphanSubagents(parents map[string]string) map[string]bool {
+	gone := map[string]bool{}
 	for {
-		kept := make([]Managed, 0, len(out))
 		dropped := false
-		for _, m := range out {
-			if m.Role == codexRoleSubagent && !ids[m.ParentSession] {
-				delete(ids, m.ID)
-				dropped = true
+		for id, parent := range parents {
+			if gone[id] || parent == "" {
 				continue
 			}
-			kept = append(kept, m)
+			if _, ok := parents[parent]; !ok || gone[parent] {
+				gone[id] = true
+				dropped = true
+			}
 		}
-		out = kept
 		if !dropped {
-			return out
+			return gone
 		}
 	}
 }
@@ -501,11 +546,30 @@ func Delete(agent, id string) (Trashed, error) {
 	if agent == "agy" && agyHeld(filepath.Join(agyDataDir(fs), "presence", id+".lock")) {
 		return Trashed{}, ErrActive
 	}
+	// Grok Build's search index keeps a copy of the text of every session
+	// going, a subagent's under its own id: those rows go before a file
+	// does, so a delete that can't take them out moves nothing and the
+	// session is whole rather than gone from the list and found by search
+	var grokRows []grokSearchRow
+	if agent == "grok" {
+		var err error
+		if grokRows, err = grokSearchRowsDrop(append([]string{id}, subIDs(fs, id)...)); err != nil {
+			return Trashed{}, err
+		}
+	}
+	// a delete that stops after that puts the rows back
+	undone := func() { grokSearchPut(grokRows) }
 	t := Trashed{Agent: agent, ID: id, Title: s.Title, Cwd: s.Cwd, Last: s.Last, Deleted: now}
 	name := now.UTC().Format("20060102T150405.000000000") + "-" + id
 	dir := filepath.Join(TrashDir(), agent, name)
 	t.Key = agent + "/" + name
 	if err := os.MkdirAll(filepath.Join(dir, "files"), 0o700); err != nil {
+		undone()
+		return Trashed{}, err
+	}
+	if err := grokSearchKeep(dir, grokRows); err != nil {
+		os.RemoveAll(dir)
+		undone()
 		return Trashed{}, err
 	}
 	for i, p := range paths {
@@ -517,6 +581,7 @@ func Delete(agent, id string) (Trashed, error) {
 				move(filepath.Join(dir, "files", back.Name), back.From)
 			}
 			os.RemoveAll(dir)
+			undone()
 			return Trashed{}, err
 		}
 		t.Items = append(t.Items, m)
@@ -529,7 +594,7 @@ func Delete(agent, id string) (Trashed, error) {
 	}
 	for _, f := range fs {
 		delete(cache, f.path)
-		delete(ccUUIDMemo, f.path)
+		ccUUIDDrop(f.path)
 	}
 	saveCache()
 	wslForget(fs)
@@ -593,6 +658,20 @@ func sessionPaths(agent, id string, fs []file) []string {
 			add(p)
 		}
 		add(filepath.Join(dir, "annotations", id+".pbtxt"))
+		return out
+	}
+	if agent == "grok" {
+		// a session is its folder: updates.jsonl, summary.json, the locks
+		// Grok Build writes beside them, prompt_context.json, terminal/ and
+		// the rest of what it kept there. Its subagents' sessions are
+		// folders of their own beside it (grokFiles folds them into this
+		// one), so each moves whole as well. What the cwd's folder holds
+		// for every session there (prompt_history.jsonl) stays.
+		for _, f := range fs {
+			if d := filepath.Dir(f.path); !contains(out, d) {
+				add(d)
+			}
+		}
 		return out
 	}
 	if agent == "dsh" {
@@ -892,6 +971,10 @@ func Restore(key string) (Trashed, error) {
 	// by itself
 	if t.Agent == "codex" && len(t.CodexCatalog) > 0 {
 		restoreCodexCatalog(t.CodexCatalog)
+	}
+	// Grok Build's search finds it again
+	if t.Agent == "grok" {
+		grokSearchPut(grokSearchKept(dir))
 	}
 	os.RemoveAll(dir)
 	wslRelistNow(t.Items)

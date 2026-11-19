@@ -149,6 +149,8 @@ var featured = []MarketServer{
 		"Projects, deployments and logs on Vercel, and its documentation.", true),
 	remoteServer("neon", "Neon", "Neon", gh("neondatabase"), "https://mcp.neon.tech/mcp",
 		"Serverless Postgres on Neon: projects, branches and SQL.", true),
+	remoteServer("coderabbit", "CodeRabbit", "CodeRabbit", gh("coderabbitai"), "https://mcp.coderabbit.ai/",
+		"CodeRabbit's reviews, pull requests, coding tasks and Triage, as you. For an organization in the EU region, edit the address to https://mcp.eu.coderabbit.ai/.", true),
 	remoteServer("cloudflare-docs", "Cloudflare Docs", "Cloudflare", gh("cloudflare"), "https://docs.mcp.cloudflare.com/mcp",
 		"Search Cloudflare's documentation.", false),
 	remoteServer("microsoft-learn", "Microsoft Learn", "Microsoft", gh("microsoft"), "https://learn.microsoft.com/api/mcp",
@@ -181,7 +183,7 @@ const selfServerName = "magpie-image"
 // agents picked for it.
 func selfServer() MarketServer {
 	m := localServer(selfServerName, "Magpie Image", "Magpie", "https://usemagpie.ai/favicon.png", "https://usemagpie.ai",
-		"Generate and edit images with the image model set in Magpie (Settings → Models → Images), and make short videos with a video model set up in Magpie (Grok Imagine, Seedance), saved in the project.", magpieCommand, []string{"mcp", "image"})
+		"Generate and edit images with the image model set in Magpie (Settings › Models › Images), and make short videos with a video model set up in Magpie (Grok Imagine, Seedance), saved in the project.", magpieCommand, []string{"mcp", "image"})
 	m.OptIn = true
 	return m
 }
@@ -213,7 +215,7 @@ const searchServerName = "magpie-web-search"
 // its own, so it is given only to the agents picked for it.
 func searchServer() MarketServer {
 	m := localServer(searchServerName, "Magpie Web Search", "Magpie", "https://usemagpie.ai/favicon.png", "https://usemagpie.ai",
-		"Search the web with the search set in Magpie (Settings → Models → Web search), and read a page by its URL.", magpieCommand, []string{"mcp", "search"})
+		"Search the web with the search set in Magpie (Settings › Models › Web search), and read a page by its URL.", magpieCommand, []string{"mcp", "search"})
 	m.OptIn = true
 	return m
 }
@@ -233,7 +235,7 @@ const visionServerName = "magpie-vision"
 // agents picked for it.
 func visionServer() MarketServer {
 	m := localServer(visionServerName, "Magpie Image Recognition", "Magpie", "https://usemagpie.ai/favicon.png", "https://usemagpie.ai",
-		"Read an image (a file, a URL, a screenshot) with the image recognition model set in Magpie (Settings → Models → Images), for a model that can't see.", magpieCommand, []string{"mcp", "vision"})
+		"Read an image (a file, a URL, a screenshot) with the image recognition model set in Magpie (Settings › Models › Images), for a model that can't see.", magpieCommand, []string{"mcp", "vision"})
 	m.OptIn = true
 	return m
 }
@@ -329,6 +331,7 @@ var homepages = map[string]string{
 	"stripe":          "https://docs.stripe.com/mcp",
 	"vercel":          "https://vercel.com/docs/mcp/vercel-mcp",
 	"neon":            "https://neon.com/docs/ai/neon-mcp-server",
+	"coderabbit":      "https://docs.coderabbit.ai/api/mcp",
 	"cloudflare-docs": "https://github.com/cloudflare/mcp-server-cloudflare",
 	"microsoft-learn": "https://github.com/MicrosoftDocs/mcp",
 	"huggingface":     "https://huggingface.co/settings/mcp",
@@ -977,13 +980,18 @@ type MarketSkill struct {
 // magpie-community/plugins, beside its plugins. magpie-setup has an agent
 // set magpie up as the user asks, through its commands (Leyuu_5 on X: so
 // many features that an AI could do the setting up); magpie-quota reads
-// what magpie quota tells (ttmouse on X).
+// what magpie quota tells (ttmouse on X); magpie-sessions searches and
+// reads every agent's sessions through magpie sessions search and show
+// (yansheng1003 on X).
 var featuredSkills = []MarketSkill{{
 	Source: "magpie-community/plugins", SkillID: "magpie-setup", Name: "magpie-setup", Official: true, Featured: true,
 	Description: "Set magpie up as you ask, through its own commands: add keys and subscriptions, point agents at models, build routing groups with fallbacks and time-of-day rules, give devices gateway keys with budgets, and share MCP servers and instructions with every agent.",
 }, {
 	Source: "magpie-community/plugins", SkillID: "magpie-quota", Name: "magpie-quota", Official: true, Featured: true,
 	Description: "Check how much is left of the user's AI subscriptions, coding plans and API key balances through magpie: each usage window's percent used and when it resets, each key's balance, and wait until a subscription has allowance again.",
+}, {
+	Source: "magpie-community/plugins", SkillID: "magpie-sessions", Name: "magpie-sessions", Official: true, Featured: true,
+	Description: "Search what was said in every coding agent's sessions on this computer through magpie, Claude Code's, Codex's and the others', and read the session a hit is in: find an earlier conversation, decision or fix.",
 }}
 
 type skillsShEntry struct {

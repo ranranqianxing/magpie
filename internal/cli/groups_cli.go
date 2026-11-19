@@ -95,6 +95,8 @@ const groupUsage = `usage:
            * is any run of characters, / too, over the provider/model id in any case (openrouter/*:free,
            *-free, opencode-zen/*), or re:<regexp> matching the whole id, in any case too (re:openrouter/.*:(free|beta));
            (?-i) in the regexp makes case matter (re:(?-i)openrouter/.*:FREE).
+           free: before a pattern keeps only the models it matches that their last catalog marks free
+           (free:workbuddy/*): the vendor's free flag as last read, not a promise of no charge.
            Quote it for the shell. The group keeps the pattern, not its models: one the vendor adds joins,
            one it drops leaves. The models you name come first, in your order, then those the patterns
            match, in the order magpie models lists them; one both named and matched keeps its named place.
@@ -143,6 +145,7 @@ const groupUsage = `usage:
        magpie group set deepseek-anywhere routing=cheap  # the provider it costs least on now first (DeepSeek's off-peak hours)
        magpie group set free-pool routing=drain          # one account until it is used up, then the next, never back
        magpie group set checkins routing=expiring        # free quota first, the soonest to expire first; paid only when none is left
+       magpie group set mixed routing=fit                # the smallest context window that holds the request first; the big ones kept for long requests
        magpie group pick opus-anywhere copilot/claude-opus-5.5
        magpie claude group/opus-anywhere`
 
@@ -163,6 +166,7 @@ var routingNames = []struct {
 	{provider.Cheapest, "cheap", []string{"cheapest", "cheapest-first", "price", "cost"}},
 	{provider.Drain, "drain", []string{"until-used-up", "use-up", "sticky"}},
 	{provider.FreeExpiring, "expiring", []string{"free-expiring", "free-expiry", "free-soonest", "soonest-free"}},
+	{provider.SmallFirst, "fit", []string{"small-first", "smallest-first", "small-context-first", "context"}},
 	{provider.Manual, "manual", []string{"pick", "picked", "pinned"}},
 }
 
