@@ -149,6 +149,7 @@ line; agents connected to magpie lose it when it quits.
 | Qoder (CLI)  | `~/.qoder/settings.json` (`$QODER_CONFIG_DIR`) | model, effort (a `magpie` custom provider; needs a Qoder plan with BYOK) |
 | Qoder CN (CLI) | `~/.qoder-cn/settings.json` (`$QODERCN_CONFIG_DIR`) | model, effort (as Qoder; its own accounts, a Qoder CN plan with BYOK) |
 | Grok Build   | `~/.grok/config.toml` (`$GROK_HOME`) | model, effort |
+| Kigi         | `~/.kigi/config.toml` (`$KIGI_SHARE_DIR`) | model, effort (Grok Build's tables; Kigi is its fork) |
 | Grok App     | `agent-home/config.toml` in its data folder (`$GROK_APP_HOME`, else `~/Library/Application Support/com.grokapp.grok-app`, `%APPDATA%\grokapp\grok-app\data`, `$XDG_DATA_HOME/grok-app`, or `~/.grok-app`) | model (a `[model.magpie]` custom provider under Accounts, with magpie's models and their effort levels in `app_models`; the route, `[models] default`, stays until the user presses Use on magpie there (one of the App's own routes picked in magpie is written as the route, and magpie's channel goes); a route an older magpie set to `magpie` is put back once; Disconnect drops the channel and puts the route back only if it is still `magpie`, else the one it was on before Connect if none is left; a model or default effort picked in the App kept; instructions, MCP and skills are the Library's Grok App row on agent-home; RTK has no hook for it or for Grok Build) |
 | ZCode        | `~/.zcode/v2/provider_config.json` and `config.json`, under the data folder moved in ZCode's settings (`dataBaseDir`); `~` is `$HOME` when set, on Windows too, as ZCode reads it before `%USERPROFILE%` | provider (magpie's models in ZCode's picker) |
 | WorkBuddy    | `~/.workbuddy/models.json` (`$WORKBUDDY_CONFIG_DIR`) | provider (magpie's models in WorkBuddy's picker) |
@@ -2271,7 +2272,7 @@ result for every request: who went first, and why.
    of a window (100% In order). *Stays: Strict* does, and asks no other:
    the conversation stays on its account, resting, spent or past its cap,
    and its errors go to the agent.
-   With *Stays: Session* or *Strict* under Smart, Least used first or
+   With *Stays: Session* or *Strict* under Quota first, Least used first or
    Use before expiry, a new conversation goes to the account the fewest other
    conversations of the last 30 minutes are on (of those not resting and
    under 90%), so sessions side by side each keep an account of their own;
@@ -2281,13 +2282,13 @@ So routing decides who goes first only for a conversation nobody has
 answered yet. An account that has used 90% goes behind the others for new
 conversations, but a conversation already on it stays there until 98%.
 
-**The routings.** Smart, Least used first and Use before expiry go by the share
+**The routings.** Quota first, Least used first and Use before expiry go by the share
 used of the fullest window that counts the model, the 5-hour window
-included. Smart and Use before expiry put an account behind the others once a
+included. Quota first and Use before expiry put an account behind the others once a
 window is at 90% or more, and behind those once one is at 98% or more,
 each of these groups ordered by the share used.
 
-- **Smart** (the default): of the accounts under 90%, the one whose
+- **Quota first** (the default): of the accounts under 90%, the one whose
   allowance renews soonest goes first, because what it has left is lost at
   the reset. It is not load balancing: every new conversation goes to that
   account too, the others showing "one renewing sooner goes first" on the
@@ -2350,7 +2351,7 @@ each of these groups ordered by the share used.
   counts. Accounts whose
   pace is within a tenth of the highest in their band count as alike, and
   among them the one magpie sent the fewest tokens lately goes first. A
-  Claude or ChatGPT account not known goes first once, as in Smart (a
+  Claude or ChatGPT account not known goes first once, as in Quota first (a
   ChatGPT one while another is known); another unknown account counts as
   a fresh week. A ChatGPT account whose usage
   page can't be read is known from the week its answers tell, until a
@@ -2388,16 +2389,16 @@ each of these groups ordered by the share used.
   are kept for the long requests only they can take. A member whose window
   the request is longer than is left out before it is asked, as under every
   routing, and asked only once every one with room is out of its
-  allowance. Members of one size go as Smart orders them, a member all but
+  allowance. Members of one size go as Quota first orders them, a member all but
   used up still goes after those with room, and one whose window isn't
   known goes after every known one. The window is the one you set for the
   model, else the model list's. The Routing page says why the first went
   first: "Composer 2.5's 200K context window is the smallest that holds
   this request".
 
-The routings besides Smart are the built-in plugin `rotation` (Routing
+The routings besides Quota first are the built-in plugin `rotation` (Routing
 strategies in Plugins › Built-in). It stays on while a provider or group is
-routed by one of them. Turned off, the pickers offer Smart alone, and a
+routed by one of them. Turned off, the pickers offer Quota first alone, and a
 provider or group still set to one of them is tried in its listed order.
 
 Your own routing groups are the built-in plugin `groups` (Routing groups in
@@ -2413,12 +2414,12 @@ depends on the routing:
 | --- | --- |
 | In order | Everything: the first takes every request it can. |
 | In turn | Where the rotation goes next. |
-| Smart | Only between accounts whose windows all renew in the same hours, or whose shares used are equal. |
+| Quota first | Only between accounts whose windows all renew in the same hours, or whose shares used are equal. |
 | Least used first | Only between accounts with the same share used and the same tokens sent lately. |
 | Use before expiry | Only between accounts in the same pace band that magpie sent the same tokens lately, in practice none since magpie started. |
 | Speed first | Only between those within a tenth of each other's speed, and among those not measured lately. |
 | Cheapest first | Only between those that cost the same now, and among those with no known price. |
-| Small context first | Only between those whose context windows are the same size, after Smart's order, and among those whose window isn't known. |
+| Small context first | Only between those whose context windows are the same size, after Quota first's order, and among those whose window isn't known. |
 
 For Claude Code and Codex, *Make first* also signs the agent in to that
 account, because the account the agent is signed in to is first. With
@@ -2819,6 +2820,18 @@ ASCII, so an account named in other letters (`北冥`) is sent percent-encoded
 (`X-Magpie-Account: %E5%8C%97%E5%86%A5`, JavaScript's `encodeURIComponent`);
 magpie decodes it, and a value that isn't such an encoding is the name as
 written.
+
+`GET /v1/magpie/accounts` lists the accounts and API keys of every
+provider, those whose vendor tells no quota included, by identifiers only:
+`provider`, `id` (a signed-in account's login id, a key's fingerprint,
+never the key), `kind` (`account` or `key`), `label`, `user`, `plan`, `on`
+and `pin`, `"<provider>/<id>"`. `?provider=<id>` lists one provider's.
+`X-Magpie-Account: <pin>` (or the id alone) pins a request to that
+account or key. It is asked as `/v1/magpie/quotas` is: this machine, or
+another with a key of a gateway shared on the local network; a read-only
+key may read it, and a key held to a budget, models or accounts only when
+its owner lets it be told quotas, and then only of the accounts it may
+use.
 
 A status bar can show where a turn went before its first token arrives:
 send `X-Magpie-Session: <id>` with the requests (an agent's own session
@@ -3780,7 +3793,7 @@ uses the service's gateway.
 
 ### Docker
 
-`docker build` makes a server image: the terminal-only binary on Debian 12
+`docker build` makes a server image: the terminal-only binary on Debian 13
 slim, with bash and curl, so a vendor's `curl … | bash` installer runs and
 the CLI it installs (Cursor's, Devin's, Grok Build) finds the glibc it links,
 as the plugins' Bun does, and a terminal opens in the container (`docker exec -it magpie bash`, or a

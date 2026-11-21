@@ -91,6 +91,7 @@ Picking a model writes it into the agent’s own config file. Only the keys magp
 | Codex | `~/.codex/config.toml`: a `[model_providers.magpie]` table and the model, with the list in `magpie-models.json`. Your ChatGPT sign-in is left alone |
 | OpenCode, MiMo Code, DevEco Code, Pi, Crush | A `magpie` provider entry, and `magpie/provider/model` |
 | Open Code Review | `~/.opencodereview/config.json`: a `magpie` custom provider, made the one `ocr` uses |
+| Kigi | `~/.kigi/config.toml`: a `[model."magpie/…"]` table per model, the one picked made the default |
 | AtomCode | `~/.atomcode/config.toml`: a `magpie` provider account and one model entry per catalog model |
 | Snow CLI | `~/.snow/profiles/magpie.json`: a `magpie` profile, made the active one (Snow App takes it in with "Sync Snow CLI API config") |
 | QwenPaw | A `magpie` provider in `~/.qwenpaw.secret/providers/custom/magpie.json`, and each agent's `active_model` in its `agent.json`. Restart QwenPaw after the first connect |
@@ -9029,7 +9030,7 @@ You can also choose what one rate limited (429) while it still has quota does: K
 
 ## Routings
 
-- **Smart.** (default): the first takes requests while it has quota to spare; when it runs low, the one with the most left takes over. One out of credit sits out half an hour, one out of quota until it resets, one rate limited as long as the vendor asks, and one that fails a minute, longer each time it fails again.
+- **Quota first.** (default): the first takes requests while it has quota to spare; when it runs low, the one with the most left takes over. One out of credit sits out half an hour, one out of quota until it resets, one rate limited as long as the vendor asks, and one that fails a minute, longer each time it fails again.
 - **In order.** : requests go to the first; the next takes over when the one before runs out of quota, hits a rate limit or fails.
 - **In turn.** : each message you send goes to the next one, round the list; the agent’s tool calls for it stay on the same one. A move costs some prompt cache; with Stays on Session, a whole conversation stays on one instead.
 - **Least used first.** : a subscription by the share of its allowance used, a key by the tokens it served in the last hours.
@@ -10530,7 +10531,7 @@ The card shows how many tokens billion-context saved, in its own count: the net 
 - Never a file, entry or skill of yours with the same name. The page shows the clash and lets you choose.
 - Anything it replaces goes to the backups first.
 
-Projects can get skills and MCP servers too, in the project’s own folders (such as `.claude/skills`, `.agents/skills`, `.mcp.json` or `.codex/config.toml`). From a terminal, `magpie library project add .` adds the folder you are in, `magpie library project skill add . pdf docx` gives it skills, `magpie library project skill rm . pdf` takes one away, and `magpie library project skills .` lists them.
+Projects can get skills and MCP servers too, in the project’s own folders (such as `.claude/skills`, `.agents/skills`, `.mcp.json` or `.codex/config.toml`). From a terminal, `magpie library project add .` adds the folder you are in, `magpie library project skill add . pdf docx` gives it skills, `magpie library project skill rm . pdf` takes one away, and `magpie library project skills .` lists them. `magpie library project plugin on . superpowers` turns on, for this folder alone, a plugin Claude Code has installed (or a plugin in the library), `magpie library project plugin off . superpowers` turns it off again, and `magpie library project plugin .` lists which are on.
 
 A project can have instructions of its own as well, so your shared instructions keep only what holds everywhere. On the Instructions page, open a project under the shared text and write what only it needs. magpie puts it between its two marker lines in the file each agent reads in that project: `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, Cursor and most others, `GEMINI.md` for Gemini CLI. The rest of the file stays yours. A file magpie makes is kept out of git, and turning an agent off takes its part out again. From a terminal: `magpie library project instructions . text "Use pnpm here."`, and `… agents claude,codex` or `… agents none`.
 
@@ -10779,7 +10780,7 @@ Run magpie on a server or a NAS that has no desktop: its gateway serves your mod
 | **Volume** | `/config`: providers, keys, sign-ins, plugins and usage |
 | **User** | nonroot (uid 65532) |
 
-The image holds magpie’s terminal-only build on Debian 12 slim, with bash for a terminal in the container and curl for the installers of the CLIs some subscriptions sign in with (Cursor, Devin, Grok Build). It runs `magpie serve` (the gateway alone) unless given another command. The container finds no agents to wire, so magpie in it is a gateway: the agents that use it run elsewhere.
+The image holds magpie’s terminal-only build on Debian 13 slim, with bash for a terminal in the container and curl for the installers of the CLIs some subscriptions sign in with (Cursor, Devin, Grok Build). It runs `magpie serve` (the gateway alone) unless given another command. The container finds no agents to wire, so magpie in it is a gateway: the agents that use it run elsewhere.
 
 ## Run it
 
@@ -11174,7 +11175,7 @@ On this machine the gateway takes any key. Send `magpie-<your-app-id>` (`Authori
 
 ### Models
 
-`GET /v1/models` lists what the user has turned on: `id` (`provider/model`, or a routing group’s name, sent as it is), `display_name`, `owned_by` (the provider), `reasoning` and `supported_reasoning_levels` (`[{"effort":"low"},…]`, and the same as plain names in `reasoning_levels`), `context_window` and `max_output_tokens` when known, and `modalities` when magpie knows whether it takes images. List them from there rather than shipping a list: the user adds and removes providers in magpie. Reasoning is asked in your API’s own field (`reasoning_effort`, `reasoning.effort`, Anthropic’s `thinking` or `output_config.effort`). `?format=text` gives the ids one a line. The list holds chat models alone: ask for image and video models with `?kind=image,video` (or `?kind=all`). Each is marked `"kind": "image"` or `"video"` and is made on `/v1/images/generations` or `/v1/videos`, not a chat route. Cherry Studio, which can’t ask and tells an image model from a chat one by its id, is listed every kind.
+`GET /v1/models` lists what the user has turned on: `id` (`provider/model`, or a routing group’s name, sent as it is), `display_name`, `owned_by` (the provider), `reasoning` and `supported_reasoning_levels` (`[{"effort":"low"},…]`, and the same as plain names in `reasoning_levels`), `context_window` and `max_output_tokens` when known, and `modalities` when magpie knows whether it takes images. List them from there rather than shipping a list: the user adds and removes providers in magpie. Reasoning is asked in your API’s own field (`reasoning_effort`, `reasoning.effort`, Anthropic’s `thinking` or `output_config.effort`). `?format=text` gives the ids one a line. The list holds chat models alone: ask for image, video, embedding and rerank models with `?kind=image,video,embedding,rerank` (or `?kind=all`). Each is marked `"kind": "image"`, `"video"`, `"embedding"` or `"rerank"` and goes to `/v1/images/generations`, `/v1/videos`, `/v1/embeddings` or `/v1/rerank`, not a chat route. Cherry Studio, which can’t ask and tells an image or embedding model from a chat one by its id, is listed every kind.
 
 A vendor’s own fields: `/v1/images/generations` and `/v1/videos` take OpenAI’s fields and pass the others on to a vendor that takes them, such as Volcengine Ark’s `content` (reference video and audio, `draft_task`), `ratio`, `resolution`, `duration: -1`, `tools`, `watermark` and `sequential_image_generation`, and a video’s answer carries Ark’s own fields (`content.last_frame_url`, `usage`). For the rest of a vendor’s API use `/v1/magpie/native/<provider>/<path>`: `GET`, `POST`, `PUT`, `PATCH` or `DELETE`, with `<path>` joined to the provider’s host (not its base URL), in the vendor’s own shape on the user’s key for that provider, a stream as it comes; Ark’s task list is `GET /v1/magpie/native/ark/api/v3/contents/generations/tasks`. It serves a provider added with an API key, not a subscription or sign-in, and Ark’s short paths (`images/generations`, `contents/generations/tasks`) still work under the key’s base. It takes the same gateway key as every route, and a key held to models, accounts or a budget is refused it.
 
@@ -11615,6 +11616,32 @@ OpenCode’s `chat.headers` hook runs for every request. Its `input.sessionID` i
 "chat.headers": async (input, output) => {
   if (input.model.providerID === "acme") output.headers["x-acme-session"] = input.sessionID
 }
+```
+
+### The agent that asked
+
+`input.caller` is the agent the request came from: its id, the name people know it by, and `via`, the computers it came through when another magpie passed it on with a Remote magpie provider, the agent’s computer first. `via` is empty for an agent on this computer. A request passed on names the agent on the first computer, never the magpie in between. `input.agent` stays `"build"`, as in OpenCode, and OpenCode never sets `caller`, so check that it is there.
+
+```
+{ agent: "claude", name: "Claude Code", via: ["MacBook-Pro"] }
+```
+
+Your `fetch` gets the same as `x-magpie-caller-agent`, `x-magpie-caller-name` and `x-magpie-caller-via` (comma-separated) in `init.headers`, each percent-encoded (`decodeURIComponent`). magpie takes these headers off what your plugin sends, so the vendor never sees them, and the request it gets is the same whoever asked.
+
+### One account, by its id
+
+To test whether one account or key works, list them all and send a request pinned to one. `GET /v1/magpie/accounts` names every account and API key of every provider, whether or not its vendor tells a quota: its provider, `id` (a key’s is a fingerprint, never the key), `kind` (`account` or `key`), `label`, `on` and `pin`. No key or token is in it. `?provider=<id>` lists one provider’s. Send `pin` as `X-Magpie-Account` and only that account is tried: no routing, no failover, and its failure comes back as the vendor said it.
+
+```
+const base = "http://" + process.env.MAGPIE_ADDR
+const { data } = await (await fetch(base + "/v1/magpie/accounts")).json()
+// [{ provider: "openai", id: "3f9a1c02d4", pin: "openai/3f9a1c02d4", kind: "key", label: "sk-p…x9Qa", on: true }, …]
+const res = await fetch(base + "/v1/chat/completions", {
+  method: "POST",
+  headers: { authorization: "Bearer magpie", "content-type": "application/json",
+    "x-magpie-account": encodeURIComponent(data[0].pin) },
+  body: JSON.stringify({ model: "openai/gpt-5.5", messages: [{ role: "user", content: "ping" }] }),
+})
 ```
 
 ## Sign-in state

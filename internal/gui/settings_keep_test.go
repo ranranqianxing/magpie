@@ -233,12 +233,14 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 	was.SearcherThen = []string{"fake/m1", "fake/m2"} // set in its own row
 	was.RouterNote = "Los Angeles"                    // the Library's servers/hub-note
 	was.RouterAllTools = true                         // the Library's servers/hub-tools
+	was.RouterNoCode = true                           // the Library's servers/hub-code
 	was.BusyLoad = 150                                // the Routing page's busy-load
 	was.MTLS = true                                   // Network and sharing's settings/mtls
 	was.Wallpaper = 1700000000000                     // Settings > General's Background image, appearance/wallpaper
 	was.HTTPS = true                                  // Network and sharing's settings/https
 	was.OnTop = true                                  // the title bar's pin, window/ontop
 	was.ImageResolution = "4K"                        // Settings > Images' Resolution row, sent by that row alone
+	was.RedactModelDir = "/Volumes/models"            // Privacy's Advanced › models folder, moved by its own route
 	was.Name = "Tokyo box"                            // Network and sharing's Advanced › Name, sent by its own row alone
 	// Settings > Usage's Bark row has its own route (settings/bark)
 	was.BarkServer, was.BarkKey, was.BarkDaily = "https://bark.example.com", "kept", "21:30"

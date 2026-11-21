@@ -327,6 +327,11 @@ type Settings struct {
 	// one that runs it (gateway.hubOnDemand; ArvinCharl on X: the tools
 	// filled the context). This computer's own (KeepOwn).
 	RouterAllTools bool `json:"routerAllTools,omitempty"`
+	// RouterNoCode takes the router's code mode away: on by default, every
+	// agent given the router is also given run_code, which runs a script
+	// that calls its tools and gives back only what the script returns
+	// (gateway.hubCodeOn). This computer's own (KeepOwn).
+	RouterNoCode bool `json:"routerNoCode,omitempty"`
 	// Name is what this magpie is called, said in its web page's browser
 	// tab as "<name> · magpie", to tell several deployed ones apart
 	// (starballl on X). "" is MAGPIE_NAME, else none (InstanceName). This
@@ -517,6 +522,13 @@ type Settings struct {
 	// fallbacks take the request. Off, as by default, such an account is
 	// sent requests and Anthropic decides whether extra usage pays.
 	ClaudeNoExtraUsage bool `json:"claudeNoExtraUsage,omitempty"`
+	// ClaudeRegionHold holds a Claude subscription's requests, and the
+	// Claude Code runs magpie starts for its accounts, while the network
+	// way out they would take is in a region Anthropic doesn't list as
+	// supported (internal/egress, @alterxyz4 on X). A way out not known
+	// (the lookup failed) holds nothing. Off, as by default, magpie only
+	// warns.
+	ClaudeRegionHold bool `json:"claudeRegionHold,omitempty"`
 	// ClaudePrintMode runs a Claude subscription's Claude Code as `claude
 	// -p` always. Off, as by default, a model request runs in Claude
 	// Code's interactive mode, as a person runs it, and never as -p: the
@@ -1783,11 +1795,32 @@ var CompactAgents = []string{"codex", "claude", "grok"}
 
 // ForAgent is s as the agent of that kind reads Long conversations: its
 // own AgentCompact in CompactAt and FullContext, when it has one.
+//
+// Grok Build with none of its own, under magpie's default for every agent
+// (no size typed, so WorkingWindow), runs to the whole window, where Grok
+// Build compacts at a percent of its own (GrokOwnCompact). WorkingWindow
+// is Codex's, what OpenAI tells it for its own models; written into Grok
+// Build as a percent it compacted a 1M model at 27% and a 512K one at 53%
+// (@taktoshilite on X). A size the user typed, for every agent or for
+// Grok Build, still holds. Kigi, a fork of Grok Build, compacts at the
+// same 85% of its own and is told the same way.
 func (s Settings) ForAgent(kind string) Settings {
 	if c, ok := s.AgentCompacts[kind]; ok {
 		s.CompactAt, s.FullContext = c.At, c.Full
+	} else if (kind == "grok" || kind == "kigi") && s.CompactAt == 0 {
+		s.FullContext = true
 	}
 	return s
+}
+
+// GrokOwnCompact says Grok Build runs to the whole window only because it
+// has no Long conversations of its own and every agent's is magpie's
+// default (ForAgent): it compacts where Grok Build itself does, 85% of the
+// window unless the user's [session] says otherwise (grok-build's
+// DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT; xAI's own models come with 80).
+func (s Settings) GrokOwnCompact() bool {
+	_, own := s.AgentCompacts["grok"]
+	return !own && s.CompactAt == 0 && !s.FullContext
 }
 
 // Compact is where a conversation on a longer window is compacted when
@@ -1836,7 +1869,7 @@ func (s *Settings) KeepOwn(cur Settings) {
 	s.NoAccountDiscovery = cur.NoAccountDiscovery
 	s.LAN, s.AllowIPs, s.MTLS, s.HTTPS = cur.LAN, cur.AllowIPs, cur.MTLS, cur.HTTPS
 	s.DesktopGateway = cur.DesktopGateway // an address of this computer
-	s.RouterNote, s.RouterAllTools = cur.RouterNote, cur.RouterAllTools
+	s.RouterNote, s.RouterAllTools, s.RouterNoCode = cur.RouterNote, cur.RouterAllTools, cur.RouterNoCode
 	s.Name = cur.Name // what this magpie is called
 	s.FetchPrivate = cur.FetchPrivate
 	s.SessionTerminal = cur.SessionTerminal
@@ -2441,6 +2474,18 @@ func SetRouterAllTools(on bool) error {
 		return err
 	}
 	s.RouterAllTools = on
+	return save(s, true)
+}
+
+// SetRouterNoCode sets RouterNoCode alone, from what the file holds now.
+// A settings file that can't be read is left as it is, with the error.
+func SetRouterNoCode(off bool) error {
+	defer lockFile()()
+	s, err := loadChecked()
+	if err != nil {
+		return err
+	}
+	s.RouterNoCode = off
 	return save(s, true)
 }
 

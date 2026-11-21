@@ -33,7 +33,7 @@ func init() {
 	usage.Agents = func() []usage.Known {
 		var out []usage.Known
 		for _, a := range Clients() {
-			out = append(out, usage.Known{ID: a.ID, Names: append([]string{a.ID}, a.Aliases...), UA: a.UA})
+			out = append(out, usage.Known{ID: a.ID, Name: a.Name, Names: append([]string{a.ID}, a.Aliases...), UA: a.UA})
 		}
 		return out
 	}
@@ -382,6 +382,7 @@ func onMachineAll(home, cfg string) []*Agent {
 		qoder(home),
 		qoderCN(home),
 		grok(home),
+		kigi(home),
 		grokApp(home),
 		zcode(home),
 		workbuddy(home),

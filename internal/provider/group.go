@@ -1470,6 +1470,9 @@ func membersFound(entries []Entry, find entryOf, all []Group, g Group, off func(
 			}
 			model, effort := memberEffortIn(entries, id)
 			p, m, ok := resolveIn(entries, model)
+			if ok && unpicked(find, p, m) {
+				m = listedSpelling(entries, p.ID, m)
+			}
 			if !ok || unpicked(find, p, m) && (also == nil || !also(p, m)) {
 				continue // none serves it, or the user unchecked it (#3911)
 			}
@@ -1520,6 +1523,22 @@ func unpicked(find entryOf, p Provider, m string) bool {
 	return len(p.Models) > 0 && find(p.ID, m) < 0 && !p.DecidesModel(m)
 }
 
+// listedSpelling is provider pid's model m as its list spells it, where
+// the two differ only in case (DeepSeek-V4-Pro for deepseek-v4-pro), else
+// m. A member saved in another case than the provider lists its model by
+// (a model typed in, a list fetched again in the vendor's own case) was
+// taken for one the user unticked, and a group of only such members
+// left every agent's picker with no word of why (@CHENGJIAHEGOXIS on X).
+// Asked only once the exact one is missing.
+func listedSpelling(entries []Entry, pid, m string) string {
+	for i := range entries {
+		if e := &entries[i]; e.Provider.ID == pid && e.Model != m && strings.EqualFold(e.Model, m) {
+			return e.Model
+		}
+	}
+	return m
+}
+
 // ResolveRoute is Resolve for a model a route names, a routing group's
 // member or a provider's fallback, as routing reaches it: not one the
 // user unchecked (unpicked). A request naming the model itself goes by
@@ -1536,6 +1555,9 @@ func ResolveRoute(id string) (Provider, string, bool) {
 			}
 		}
 		return -1
+	}
+	if ok && unpicked(find, p, m) {
+		m = listedSpelling(entries, p.ID, m)
 	}
 	if !ok || unpicked(find, p, m) {
 		return Provider{}, "", false
@@ -2063,7 +2085,7 @@ func SaveGroup(g Group) error {
 	if err := cleanDecisionGroup(&g, groupsIn(entries)); err != nil {
 		return err
 	}
-	if g.Routing != Ordered && g.Routing != Rotate && g.Routing != LeastUsed && g.Routing != Pace && g.Routing != Weighted && g.Routing != FreeFirst && g.Routing != Fastest && g.Routing != Cheapest && g.Routing != Drain && g.Routing != FreeExpiring && g.Routing != SmallFirst && g.Routing != Manual && !PluginRouting(g.Routing) {
+	if !GroupRouting(g.Routing) {
 		g.Routing = ""
 	}
 	if !slices.Contains(Affinities, g.Affinity) {
@@ -2526,6 +2548,9 @@ func RenameGroup(from, to string) error {
 		return fmt.Errorf("there is a group %q already", to)
 	}
 	found := slices.ContainsFunc(foundGroups(providerEntries()), func(o Group) bool { return o.ID == from })
+	// what agents' lists know it by before: a found group's auto/<model>
+	// too, which the renamed group no longer answers to
+	refs := groupRefs(g)
 	g.ID, g.Auto, g.Hidden = to, false, false
 	g.Former = append(slices.DeleteFunc(slices.Clone(g.Former), func(id string) bool { return id == from || id == to }), from)
 	f.Groups = slices.DeleteFunc(f.Groups, func(o Group) bool { return o.ID == from })
@@ -2586,27 +2611,54 @@ func RenameGroup(from, to string) error {
 	if err := store(f); err != nil {
 		return err
 	}
-	return renameGroupPicks(old, now)
+	return renameGroupPicks(from, refs, now)
+}
+
+// groupRefs are the refs an agent's list names g by: group/<id>, and a
+// found group's auto/<model> (Group.Ref) besides.
+func groupRefs(g Group) []string {
+	out := []string{GroupPrefix + g.ID}
+	if r := g.Ref(); r != out[0] {
+		out = append(out, r)
+	}
+	return out
+}
+
+// GroupRefs are the refs an agent's list names the group id by now:
+// group/<id>, and a found group's auto/<model> besides. None for no such
+// group.
+func GroupRefs(id string) []string {
+	g, ok := groupOf(groupsIn(providerEntries()), strings.ToLower(strings.TrimSpace(id)))
+	if !ok {
+		return nil
+	}
+	return groupRefs(g)
 }
 
 // renameGroupPicks moves what each agent's list says of a group to its new
 // id, as renameModelPrefs does a provider's models: picked for an agent
-// shown only its picks, taken out, put in an order, sent fast. Left under
-// the old id, a group picked for Pi was off in Pi's list after its rename
-// (#2289, eachann1024), the id it was picked by no longer in the catalog.
-func renameGroupPicks(old, now string) error {
+// shown only its picks, taken out, put in an order, sent fast, and the
+// names an agent's list is narrowed to (Visible), as Rename does a
+// provider's. Left under the old id, a group picked for Pi was off in
+// Pi's list after its rename (#2289, eachann1024), the id it was picked
+// by no longer in the catalog. old are every ref the lists knew the group
+// by (groupRefs): a found group is picked by its auto/<model>, and one
+// made the user's under another id was gone from Codex's list
+// (@CHENGJIAHEGOXIS on X), picked by a ref nothing answered to.
+func renameGroupPicks(from string, old []string, now string) error {
 	s := settings.Load()
 	moved := false
+	was := func(id string) bool { return slices.Contains(old, id) }
 	// the hidden and the picked are kept sorted (sortedIDs); an order is
 	// the user's own
 	for i, m := range []map[string][]string{s.HiddenModels, s.PickedModels, s.OrderedModels, s.FastPicks} {
 		for agent, ids := range m {
-			if !slices.Contains(ids, old) {
+			if !slices.ContainsFunc(ids, was) {
 				continue
 			}
 			var out []string
 			for _, id := range ids {
-				if id == old {
+				if was(id) {
 					id = now
 				}
 				if !slices.Contains(out, id) {
@@ -2617,6 +2669,27 @@ func renameGroupPicks(old, now string) error {
 				out = sortedIDs(out)
 			}
 			m[agent], moved = out, true
+		}
+	}
+	// a visibility names a group by its id, group/<id> or auto/<model>
+	// (Entry.Names), in any case
+	to := strings.TrimPrefix(now, GroupPrefix)
+	for agent, names := range s.Visible {
+		var out []string
+		changed := false
+		for _, n := range names {
+			switch {
+			case strings.EqualFold(n, from):
+				n, changed = to, true
+			case slices.ContainsFunc(old, func(r string) bool { return strings.EqualFold(n, r) }):
+				n, changed = now, true
+			}
+			if !slices.ContainsFunc(out, func(o string) bool { return strings.EqualFold(o, n) }) {
+				out = append(out, n)
+			}
+		}
+		if changed {
+			s.Visible[agent], moved = out, true
 		}
 	}
 	if !moved {
