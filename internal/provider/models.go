@@ -102,7 +102,9 @@ func (p Provider) available() []catalog.Model {
 		// a model the provider's catalog doesn't list reads as it does
 		// under the other providers serving it (GLM-5-Turbo, not
 		// glm-5-turbo, beside ZCode's)
-		return catalog.Named(catalog.Decorate(live, known))
+		// a relay's ids of one model at each effort as that model, with
+		// those efforts (effort_variants.go)
+		return catalog.Named(p.foldEffortVariants(catalog.Decorate(live, known)))
 	}
 	if p.IsAzure() {
 		// an Azure resource serves its deployments alone, named as the
@@ -221,6 +223,11 @@ func (p Provider) liveByID(model string) []catalog.Model {
 	own := p.OwnModelID(model)
 	ms := catalog.LiveByIDShared(p.ID, own)
 	if own == model {
+		if len(ms) == 0 && p.foldsEfforts() {
+			// a relay's effort family, whose own id it may not list:
+			// its default member's (effort_variants.go)
+			return p.liveFamily(model)
+		}
 		return ms
 	}
 	out := slices.Clone(ms)
@@ -404,8 +411,14 @@ func liveIDs(id string) map[string]bool {
 	for _, m := range ms {
 		out[m.ID] = true
 	}
-	// picks are of the ids the user lists them by (SetModelID)
-	return modelIDsOf(id).ids(out)
+	// picks are of the ids the user lists them by (SetModelID), and of a
+	// relay's effort families (effort_variants.go)
+	out = modelIDsOf(id).ids(out)
+	all := sharedAll()
+	if i := slices.IndexFunc(all, func(p Provider) bool { return p.ID == id }); i >= 0 {
+		out = all[i].withFamilyIDs(out)
+	}
+	return out
 }
 
 // dropGonePicks takes out of the saved provider's picks those before had
@@ -859,6 +872,7 @@ func (p Provider) fetchOne(ctx context.Context) (fetched, error) {
 		return fetched{ms, base, nil, nil}, nil
 	}
 	var errs []string
+	var refused *catalog.ListError // the first list the vendor answered with an error status
 	var out []catalog.Model
 	byID := map[string]int{}
 	add := func(m catalog.Model) {
@@ -969,6 +983,9 @@ func (p Provider) fetchOne(ctx context.Context) (fetched, error) {
 			if !slices.Contains(errs, err.Error()) {
 				errs = append(errs, err.Error())
 			}
+			if le := (*catalog.ListError)(nil); errors.As(err, &le) && refused == nil {
+				refused = le
+			}
 			dead = append(dead, protoBase)
 			continue
 		}
@@ -1005,7 +1022,7 @@ func (p Provider) fetchOne(ctx context.Context) (fetched, error) {
 		}
 		// the endpoints are kept as they were: a vendor with no list (or one
 		// that wants what the key can't give) still serves the models typed in
-		return fetched{}, errorf("%s — type its model ids in by hand, or give the URL its list is at", strings.Join(errs, "; "))
+		return fetched{}, catalog.ListsFailed{Msg: fmt.Sprintf("%s — type its model ids in by hand, or give the URL its list is at", strings.Join(errs, "; ")), Status: refused}
 	}
 	if len(dead) > 0 {
 		kept, saved := p.keepDeadSides(dead, sides)
@@ -1718,6 +1735,24 @@ func (p Provider) Serving(model string) func(KeyAccount) bool {
 	}
 	// the vendor's lists name the model by its own id (SetModelID)
 	keys, found := x.of[p.OwnModelID(model)]
+	if !found {
+		// a relay's effort family: the keys listed any of its ids
+		// (effort_variants.go)
+		if f, ok := p.family(model); ok {
+			keys = map[string]bool{}
+			for _, id := range f.members() {
+				ks, ok := x.of[id]
+				if ok && len(ks) == 0 {
+					keys = nil // one of them listed to every key
+					break
+				}
+				for k := range ks {
+					keys[k] = true
+				}
+				found = found || ok
+			}
+		}
+	}
 	return func(k KeyAccount) bool {
 		id := keyID(k.Key)
 		return !found || len(keys) == 0 || !x.listed[id] || keys[id]
@@ -3045,7 +3080,7 @@ func tariffOf(s settings.Settings, p Provider, known bool, model string) (catalo
 		pr.Peak = k
 	}
 	// what the provider bills against it (#819)
-	if ok && p.PriceRate > 0 {
+	if ok && (p.PriceRate > 0 || p.zeroRate) {
 		pr = pr.Times(p.PriceRate)
 	}
 	if ok && p.cacheWritesAlike() {

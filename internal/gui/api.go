@@ -192,6 +192,23 @@ type fieldJSON struct {
 	// List is, in place of Options, which of the state's OptionLists the
 	// field offers, from 1 (shareOptions); 0 when Options is its own
 	List int `json:"list,omitempty"`
+	// Unserved are the user's routing groups a model field that offers
+	// groups doesn't, each with why (provider.UnservedGroups): its
+	// picker shows them, not to be picked
+	Unserved []unservedJSON `json:"unserved,omitempty"`
+}
+
+// unservedJSON is a routing group a model field doesn't offer: its value
+// as the field would take it, and why it isn't offered.
+type unservedJSON struct {
+	Value string   `json:"value"`
+	Label string   `json:"label"`
+	Icons []string `json:"icons,omitempty"`
+	Ref   string   `json:"ref"`
+	Why   string   `json:"why"`
+	// Pick: the gateway serves it, only the agent's lists leave it out;
+	// picked, it is put back in them (provider.ShowFor) and set
+	Pick bool `json:"pick,omitempty"`
 }
 
 type agentJSON struct {
@@ -2278,6 +2295,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 	// Settings › Proxy's Test (#2076): the address Cloudflare sees a request
 	// from through the proxy in force, and without it
 	mux.HandleFunc("POST /api/proxy/check", handleProxyCheck)
+	mux.HandleFunc("POST /api/egress/check", handleEgressCheck)
 	proxyRoutes(mux)
 	mux.HandleFunc("POST /api/pipelines/check", handlePipelineCheck)
 	mux.HandleFunc("POST /api/relay-check", handleRelayCheck)

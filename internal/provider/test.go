@@ -38,6 +38,9 @@ type Result struct {
 	// otherAPI: the vendor said the model isn't served on the API asked
 	// (catalog.WrongEndpoint), so another may be asked instead
 	otherAPI bool
+	// modelGone: the vendor said it serves this key not the model asked,
+	// on any API (modelUnservedHere), so another model may be asked
+	modelGone bool
 	// Queued is the vendor's queue message when a plugin's model was
 	// queued instead of answered (Qoder's "queued the request for ...").
 	// The model is served, so the test is OK: it waits where an agent's
@@ -46,12 +49,121 @@ type Result struct {
 	// V1 is the base the request was answered at once the /v1 it was
 	// typed without was added (missingV1): the editor's URL takes it
 	V1 string `json:"v1,omitempty"`
+	// Unserved: the vendor serves this key nothing on this API, whatever
+	// the model (catalog.APIRefused: sub2api's "This group does not allow
+	// /v1/messages dispatch"). Not a failure of the key: the gateway asks
+	// its models on its other APIs.
+	Unserved bool `json:"unserved,omitempty"`
+	// Region is the region of the provider's preset the key was taken
+	// at, once refused at the one it was tested at (testOtherPlace): the
+	// editor moves the provider there.
+	Region string `json:"region,omitempty"`
 }
 
 // Test sends the smallest possible request to each endpoint the vendor
 // serves, signed with a key made for it and asking for a model that key
 // sees, and reports what came back.
 func (p Provider) Test(ctx context.Context) []Result {
+	out := p.test(ctx)
+	if rs := p.testOtherPlace(ctx, out); rs != nil {
+		return rs
+	}
+	return out
+}
+
+// testPreset is the preset a provider's regions are read from (Preset):
+// a var, for a test's regions at its own servers.
+var testPreset = Preset
+
+// testOtherPlace is the test at the other place of the provider's preset,
+// China's or Global's, when the key was refused at this one (401) and is
+// taken there: a vendor whose two places keep their own accounts turns a
+// key of the other away as invalid (Sidrune AI's global.sidrune.ai, Axo
+// 11-20: "Invalid API key" on every endpoint for a China key). Its
+// results say the region (Result.Region), for the editor to move there.
+// Nil when the key is refused there too, or the preset has no such pair.
+func (p Provider) testOtherPlace(ctx context.Context, out []Result) []Result {
+	if !keyRefused(out) {
+		return nil
+	}
+	for _, q := range p.atOtherPlace() {
+		rs := q.test(ctx)
+		if !slices.ContainsFunc(rs, func(x Result) bool { return x.OK }) {
+			continue
+		}
+		for i := range rs {
+			rs[i].Region = q.placeID
+		}
+		return rs
+	}
+	return nil
+}
+
+// placed is the provider put at another region of its preset, with that
+// region's id.
+type placed struct {
+	Provider
+	placeID, placeName string
+}
+
+// atOtherPlace is the provider at each region of its preset that is the
+// other place than the one it is at, China's for Global's and Global's
+// for China's (placeOf): a vendor's two places keep their own accounts.
+// None when it has no preset with such a pair, or is at no place.
+func (p Provider) atOtherPlace() []placed {
+	if p.Preset == "" {
+		return nil
+	}
+	pr := testPreset(p.Preset)
+	if pr == nil || len(pr.Regions) < 2 {
+		return nil
+	}
+	at := p.regionOf(pr)
+	if at == nil || placeOf(*at) == "" {
+		return nil
+	}
+	var out []placed
+	for _, r := range pr.Regions {
+		if placeOf(r) == "" || placeOf(r) == placeOf(*at) {
+			continue
+		}
+		q := p
+		q.atRegionOf(pr, r)
+		out = append(out, placed{q, r.ID, r.Name})
+	}
+	return out
+}
+
+// MoveToKeyPlace moves a provider whose model list refused its key (a
+// 401, listErr from its Fetch) to the other place of its preset whose
+// list takes the key, and saves it there: a Sidrune AI key of China's
+// typed into a provider at Global (Axo, 11-20). It says the name of the
+// region moved to, or "" when none takes the key, and the provider as
+// saved.
+func MoveToKeyPlace(ctx context.Context, p Provider, listErr error) (Provider, string) {
+	le := (*catalog.ListError)(nil)
+	if !errors.As(listErr, &le) || le.Status != http.StatusUnauthorized {
+		return p, ""
+	}
+	for _, q := range p.atOtherPlace() {
+		if _, err := q.List(ctx); err != nil {
+			continue
+		}
+		if err := Save(q.Provider); err != nil {
+			return p, ""
+		}
+		return q.Provider, q.placeName
+	}
+	return p, ""
+}
+
+// keyRefused says no endpoint answered and one refused the key itself.
+func keyRefused(rs []Result) bool {
+	return !slices.ContainsFunc(rs, func(x Result) bool { return x.OK }) &&
+		slices.ContainsFunc(rs, func(x Result) bool { return x.Status == http.StatusUnauthorized })
+}
+
+func (p Provider) test(ctx context.Context) []Result {
 	ctx = withUnreached(p.ownRequests(p.Via(ctx), probelog.KindTest))
 	if p.DecideOnly() {
 		return p.testDecide(ctx)
@@ -104,7 +216,30 @@ func (p Provider) Test(ctx context.Context) []Result {
 		}
 		url, body := tiny(q, proto, UpstreamName(p, model))
 		ctx, b := q.tested(p.loggedAs(ctx, q), url, body)
-		out = append(out, probe(ctx, q, proto, url, b, model, testWait))
+		r := probe(ctx, q, proto, url, b, model, testWait)
+		// a model the vendor lists and serves this key on no account
+		// (sub2api's 404 "… is not supported by any configured account in
+		// this group") says nothing of the key: the next model it sees is
+		// asked, a few at most
+		for tried := []string{model}; r.modelGone && len(tried) < testModels; {
+			next := p.testModel(q, proto, tried...)
+			if next == "" {
+				break
+			}
+			tried = append(tried, next)
+			if len(p.KeysOn()) == 0 {
+				q = p.routedTo(next)
+			}
+			url, body := tiny(q, proto, UpstreamName(p, next))
+			ctx, b := q.tested(p.loggedAs(ctx, q), url, body)
+			r = probe(ctx, q, proto, url, b, next, testWait)
+		}
+		if le := (*catalog.ListError)(nil); model == "" && errors.As(listErr, &le) && le.Status == http.StatusUnauthorized {
+			// no model to ask, the list having refused the key: the
+			// refusal is what the key is told, not the list's absence
+			r.Status, r.Error = le.Status, cmp.Or(le.Msg, le.StatusText)
+		}
+		out = append(out, r)
 	}
 	if len(out) == 0 && p.zenPublic() {
 		out = append(out, Result{Protocol: Chat, Error: zenPublicNone})
@@ -689,7 +824,7 @@ const zenPublicNone = "no free model of OpenCode Zen is listed for this API: the
 // is served on, or none (z'x on Discord: Test asked public for
 // claude-fable-5 on Messages, gemini-3-flash on Gemini and big-pickle on
 // Responses, and every one failed, though big-pickle answers on chat).
-func (p Provider) testModel(q Provider, proto Protocol) string {
+func (p Provider) testModel(q Provider, proto Protocol, skip ...string) string {
 	k := q.first()
 	// a model the key's vendor lists it, and the user lets it serve
 	// (AccountModels, #474), as routing has it
@@ -724,7 +859,7 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 				if public && !p.OpenCodeFree(m.ID) {
 					continue
 				}
-				if !p.DecidesModel(m.ID) && !off(p.ID, m.ID) && want(m.ID) && sees(m.ID) {
+				if !p.DecidesModel(m.ID) && !off(p.ID, m.ID) && !slices.Contains(skip, m.ID) && want(m.ID) && sees(m.ID) {
 					return m.ID
 				}
 			}
@@ -1046,8 +1181,31 @@ func probeOnce(ctx context.Context, p Provider, proto Protocol, url string, body
 		return r
 	}
 	r.otherAPI = catalog.WrongEndpoint(res.StatusCode, b)
+	r.Unserved = catalog.APIRefused(res.StatusCode, b)
+	r.modelGone = !r.otherAPI && !r.Unserved && modelUnservedHere(res.StatusCode, b)
 	return r
 }
+
+// modelUnservedHere is a refusal of the model asked as one the vendor
+// doesn't serve the key, the key itself good: sub2api's 404 "Model
+// \"gpt-5.6\" is not supported by any configured account in this group"
+// for a model its /v1/models lists (Sidrune AI, Axo 11-20). The words are
+// ModelUnserved's, the gateway's for resting that model alone, with none
+// of a sign-in's beside them.
+func modelUnservedHere(status int, body []byte) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity:
+	default:
+		return false
+	}
+	words := catalog.Words(body)
+	return ModelUnserved.Match(words) && !signInWords.Match(words)
+}
+
+// testModels is how many models a test of one endpoint asks at most, the
+// first and the next ones when each is refused as a model the key isn't
+// served (Result.modelGone).
+const testModels = 3
 
 // streams reports whether a request body asks for a stream.
 func streams(body []byte) bool {
@@ -1172,6 +1330,15 @@ func APIError(b []byte, fallback string) string {
 		return apiError(b, fallback) + " — " + HarnessOnlyHint
 	}
 	return apiError(b, fallback)
+}
+
+// VendorWords is what a vendor's error body says in its own words, as
+// APIError reads them but with none of magpie's hints after them: the
+// error's message (with its type and code when the message is only a
+// status line), or the body itself cut short. "" for a body that says
+// nothing (empty), for the caller to say so.
+func VendorWords(b []byte) string {
+	return strings.TrimPrefix(apiError(b, ""), ": ")
 }
 
 // cmdGoNoAPI is Command Code's Provider API refusing a Go plan's key:

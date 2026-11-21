@@ -221,6 +221,9 @@ button.row.lib-hubfolded:hover { background: var(--pill); }
 .lib-srclink:hover { color: var(--fg); text-decoration: underline; text-underline-offset: 2px; }
 /* kept in ~/.agents/skills: moved into the library on a click (tnt1223) */
 .lib-src > .lib-handover { flex: 0 2 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; height: auto; border: 0; background: none; font-size: 11px; color: var(--accent); padding: 0 2px; margin-left: 4px; border-radius: 3px; white-space: nowrap; }
+/* a native row's plugin or package: shows only what it declares */
+.lib-srcpick { font: inherit; color: var(--muted); background: none; border: 0; padding: 0; height: auto; border-radius: 3px; cursor: pointer; }
+@media (hover: hover) and (pointer: fine) { .lib-srcpick:hover { color: var(--fg); text-decoration: underline; text-underline-offset: 2px; } }
 .lib-src > .lib-handover:hover { text-decoration: underline; text-underline-offset: 2px; }
 .lib-confirm.lib-muted { color: var(--muted); }
 
@@ -235,9 +238,14 @@ button.row.lib-hubfolded:hover { background: var(--pill); }
 .lib-tag.warn::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 /* what a check for updates found, beside a skill's name */
 .lib-row .name .lib-tag { height: 17px; padding: 0 6px; margin-left: 7px; font-size: 10.5px; font-weight: 500; vertical-align: 1px; }
+/* a tag that can be clicked wraps under a long name instead of being cut off
+   by its ellipsis, where a narrow window or a long translation needs it */
+.lib-row .name:has(> .lib-tag.link) { white-space: normal; text-overflow: clip; overflow-wrap: anywhere; }
 .lib-tag.lib-new { color: var(--accent); background: var(--accent-soft); }
 .lib-tag.lib-new::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .lib-tag.lib-new.link { cursor: pointer; }
+.lib-tag.lib-bundle.link { cursor: pointer; }
+@media (hover: hover) and (pointer: fine) { .lib-tag.lib-bundle.link:hover { color: var(--fg); } }
 .lib-tag.lib-new.link:hover { background: color-mix(in srgb, var(--accent) 22%, var(--accent-soft)); }
 .lib-tag.lib-unchecked { color: var(--faint); font-weight: 400; }
 .lib-tag.lib-unchecked.link { cursor: pointer; }
@@ -416,10 +424,9 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-icon { width: 26px; height: 26px; padding: 0; display: inline-grid; place-items: center; }
 .lib-rowacts.busy { opacity: 1; }
 .lib-icon.busy, .lib-icon.busy:disabled { opacity: 1; color: var(--muted); }
-.lib-icon.busy svg { animation: lib-spin .8s linear infinite; }
-@keyframes lib-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .lib-icon.busy svg { animation: lib-pulse 1.2s ease infinite alternate; } }
-@keyframes lib-pulse { to { opacity: .35; } }
+/* busy: app.js glyphBusy has put the spinner's arc in place of the glyph */
+.lib-icon.busy svg > * { transform-box: view-box; transform-origin: 50% 50%; animation: spin .8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .lib-icon.busy svg > * { animation: none; } }
 
 /* the skill finder */
 .lib-install { margin-bottom: 4px; }
@@ -698,6 +705,12 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-project .lib-projskill { border-top: 1px solid var(--line-2); }
 .lib-projfoot { margin: 0; padding: 8px 12px 10px 49px; border-top: 1px solid var(--line-2); }
 .lib-projfoot + .lib-projfoot { border-top: 0; padding-top: 0; }
+.lib-projown { border-top: 1px solid var(--line-2); }
+.lib-projownhead { padding: 8px 12px 2px 49px; font-size: 11px; color: var(--muted); }
+.lib-projownrow { opacity: .8; }
+.lib-projpi { border-top: 1px solid var(--line-2); }
+.lib-projpiadd { display: flex; gap: 8px; padding: 8px 12px 10px 49px; border-top: 1px solid var(--line-2); }
+.lib-projpiadd input { min-width: 0; }
 
 /* the library's skills: a card for each GitHub repository they came from,
    and one for those on this computer, folded to its heading line */
@@ -986,3 +999,5 @@ input.lib-memq:focus, input.lib-memtags:focus, input.lib-memwhy:focus { border-c
 .lib-rulefile { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex-wrap: wrap; }
 .lib-rulefile > .note { flex: none; font-size: 12px; color: var(--fg-2); }
 .lib-rulefile > .lib-path { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+/* the box keeping a removed skill's folder in the backups, under what the sheet says */
+.lib-editor label.tick.lib-keepbox { grid-column: 1 / -1; font-size: 12.5px; }

@@ -558,6 +558,9 @@ type View struct {
 	Rules        []RuleView      `json:"rules"`
 	RuleAgents   []RuleAgentView `json:"ruleAgents"`
 	FoundServers []Found         `json:"foundServers"`
+	// FoundHooks are the hooks the agents run that magpie didn't give
+	// them (hooks_found.go)
+	FoundHooks []FoundHook `json:"foundHooks"`
 	// Plugins are the plugins kept as one item each (plugin.go)
 	Plugins     []PluginView `json:"plugins"`
 	Skills      []SkillView  `json:"skills"`
@@ -568,13 +571,16 @@ type View struct {
 	NewSkills []NewSkill `json:"newSkills"`
 	// CheckFolders is whether a check looks in folders the user added
 	// skills from, which the page then offers with no remote skill
-	CheckFolders bool              `json:"checkFolders,omitempty"`
-	Projects     []ProjectView     `json:"projects"`
-	Instructions *InstructionsView `json:"instructions"`
-	Dir          string            `json:"dir"`
-	Backups      string            `json:"backups"`
-	SkillGroups  []SkillGroup      `json:"skillGroups"`
-	CopySkills   bool              `json:"copySkills"` // the library gives skills as copies (#896)
+	CheckFolders bool          `json:"checkFolders,omitempty"`
+	Projects     []ProjectView `json:"projects"`
+	// ClaudeInstalled are the plugins Claude Code has installed itself,
+	// which a project can turn on for its folder (project_claude_plugins.go)
+	ClaudeInstalled []ClaudePluginView `json:"claudeInstalled"`
+	Instructions    *InstructionsView  `json:"instructions"`
+	Dir             string             `json:"dir"`
+	Backups         string             `json:"backups"`
+	SkillGroups     []SkillGroup       `json:"skillGroups"`
+	CopySkills      bool               `json:"copySkills"` // the library gives skills as copies (#896)
 	// SharedSkills: every skill on here is in ~/.agents/skills too
 	// (skills_shared.go), at SharedDir
 	SharedSkills bool   `json:"sharedSkills"`
@@ -597,6 +603,9 @@ type View struct {
 	// HubAllTools: every agent is given the router's tools whole, none on
 	// demand (settings' RouterAllTools, gateway.hubOnDemand)
 	HubAllTools bool `json:"hubAllTools"`
+	// HubCode: the router gives every agent run_code beside its tools
+	// (settings' RouterNoCode, gateway.hubCodeOn)
+	HubCode bool `json:"hubCode"`
 	// HubFindsItself names the agents given every tool whole, as they
 	// search their tools themselves, and HubOnDemandOver how many tools an
 	// agent is given whole at most (gateway.HubFindsItself,
@@ -687,7 +696,7 @@ func readView(problems []Problem, glance bool) (*View, error) {
 	// the agents are found once for the whole read: finding them looks
 	// through every agent's folders, in WSL too (#1624)
 	targets, asleep := targetsAsleep(false)
-	v := &View{Agents: []AgentView{}, Servers: []ServerView{}, Skills: []SkillView{}, FoundSkills: []FoundSkill{}, Instructions: l.instructionsView(targets, asleep), Dir: Dir(), Backups: BackupDir(), CopySkills: l.CopySkills, SharedSkills: l.SharedSkills, SharedDir: sharedSkillsDir(), AutoUpdateSkills: l.AutoUpdateSkills, MCPHub: l.MCPHub, SkillRouter: l.SkillRouter, HubPath: gateway.HubMCPPath, HubNote: settings.Shared().RouterNote, HubName: gateway.HostName(), HubAllTools: settings.Shared().RouterAllTools, HubFindsItself: hubFindsItself(), HubOnDemandOver: gateway.HubOnDemandOver, Partial: glance}
+	v := &View{Agents: []AgentView{}, Servers: []ServerView{}, Skills: []SkillView{}, FoundSkills: []FoundSkill{}, Instructions: l.instructionsView(targets, asleep), Dir: Dir(), Backups: BackupDir(), CopySkills: l.CopySkills, SharedSkills: l.SharedSkills, SharedDir: sharedSkillsDir(), AutoUpdateSkills: l.AutoUpdateSkills, MCPHub: l.MCPHub, SkillRouter: l.SkillRouter, HubPath: gateway.HubMCPPath, HubNote: settings.Shared().RouterNote, HubName: gateway.HostName(), HubAllTools: settings.Shared().RouterAllTools, HubCode: !settings.Shared().RouterNoCode, HubFindsItself: hubFindsItself(), HubOnDemandOver: gateway.HubOnDemandOver, Partial: glance}
 	// each agent's skills folder as it really is, links followed: the
 	// agents reading the same one get copies together (copyWhy)
 	skillsAt := map[*Target]string{}
@@ -866,9 +875,13 @@ func readView(problems []Problem, glance bool) (*View, error) {
 	for i := range v.FoundServers {
 		v.FoundServers[i].Icon = serverIcon(l, v.FoundServers[i].Server)
 	}
+	v.FoundHooks = foundHooksOf(l, targets)
 	v.NewSkills = newSkills(l)
 	v.CheckFolders = l.addedFromFolders()
 	v.Projects = projectViews(l, problems)
+	if v.ClaudeInstalled = ReadClaudeInstalled(); v.ClaudeInstalled == nil {
+		v.ClaudeInstalled = []ClaudePluginView{}
+	}
 	v.SkillGroups = l.skillGroups()
 	v.CheckDue = checkDue(l)
 	if glance {

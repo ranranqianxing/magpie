@@ -108,10 +108,15 @@ func noRests() {
 	restingUntil.m = map[string]time.Time{}
 	restingUntil.note = map[string]Rest{}
 	restingUntil.lifted = map[string]time.Time{}
+	restingUntil.renewAsked = nil
 	restingUntil.Unlock()
 	codexHolds.Lock()
 	codexHolds.m = nil
 	codexHolds.Unlock()
+	limitNotices.Lock()
+	limitNotices.m = map[string]LimitNotice{}
+	limitNotices.Unlock()
+	noticesDropped.Store(false)
 }
 
 func post(t *testing.T, path, body string) (int, string) {
@@ -454,6 +459,9 @@ func TestWrongEndpoint(t *testing.T) {
 		// WandAPI's 404 for gpt-6.1-terra, its 181 bytes as sent (equinox0253
 		// on X, 11-13): the entry protocol named in other words
 		{404, wandAPINoSource, true},
+		// sub2api's 403 for a group not let dispatch Messages (Sidrune AI,
+		// 11-20)
+		{403, sub2apiNoDispatch, true},
 		// new-api's words for a model no channel serves (written from
 		// memory, not from the report): the model, not the API
 		{400, `{"error":{"message":"当前分组 default 下对于模型 gone 无可用渠道"}}`, false},

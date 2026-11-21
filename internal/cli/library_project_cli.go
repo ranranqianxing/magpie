@@ -21,11 +21,43 @@ const libraryProjectUsage = `magpie library project [--json]      the projects (
   magpie library project skill rm <dir> <skill…>   take skills out of it
   magpie library project skill agents <dir> <skill> <a,b…|none>   the agents it has the skill for
   magpie library project copy <dir> on|off copies of its skills in place of links to the library's
+  magpie library project server [list] <dir> [--json]   its MCP servers and the agents each is for
+  magpie library project server add <dir> <server…> [agents=a,b…]   give it library servers: by default for the agents
+                                     its servers are for already, or, with none yet, every agent here that reads a
+                                     project's MCP file
+  magpie library project server rm <dir> <server…>   take servers out of it
+  magpie library project server agents <dir> <server> <a,b…|none>   the agents it has the server for
+  magpie library project subagent [list] <dir> [--json]   its subagents and the agents each is for
+  magpie library project subagent add <dir> <subagent…> [agents=a,b…]   the same for library subagents
+  magpie library project subagent rm <dir> <subagent…>   take subagents out of it
+  magpie library project subagent agents <dir> <subagent> <a,b…|none>   the agents it has the subagent for
+  magpie library project hook [list] <dir> [--json]   its own hooks and the agents each is for
+  magpie library project hook add <dir> <hook…> [agents=a,b…]   give it library hooks, one at a time, written into
+                                     .claude/settings.local.json and .codex/hooks.json beside what's there
+  magpie library project hook rm <dir> <hook…>   take them out, only the entries magpie wrote
+  magpie library project hook agents <dir> <hook> <a,b…|none>   the agents it has the hook for
+  magpie library project plugin [list] <dir> [--json]   the library's plugins and Claude Code's own, and which are on
+  magpie library project plugin on <dir> <plugin…> [agents=a,b…]   turn plugins on in it: a library plugin's parts go
+                                     where its agents read the project's own (by default the agents its plugins are
+                                     for already, or every agent here that reads one); a plugin Claude Code installed
+                                     (name@marketplace, or its name alone when only one has it) is turned on in
+                                     .claude/settings.local.json, for this project alone
+  magpie library project plugin off <dir> <plugin…>   turn them off: only what magpie wrote for them comes out
+  magpie library project pi [list] <dir> [--json]   its packages for Pi (.pi/settings.json) and the project's own
+  magpie library project pi add|on <dir> <source…>   give it packages for Pi: npm:<name>[@version] or a git source; Pi
+                                     installs them when it next starts there
+  magpie library project pi off <dir> <source…>   keep them listed but loading nothing; on turns them on again
+  magpie library project pi rm <dir> <source…>   take them out, only what magpie wrote
+  magpie library project pi adopt <dir> <source…>   switch a package the project declares itself, left as written
   magpie library project instructions <dir> [--json]   its own instructions, the agents they're for and the files
   magpie library project instructions <dir> text <text…>|--file <f>|-   set them ("" takes them out); written, between
                                      magpie's two marker lines, into the project file each agent reads: by default for
                                      the agents the shared instructions are on for, else every agent here that reads one
   magpie library project instructions <dir> agents <a,b…|none>   the agents whose project file they're written into
+  magpie library project export <dir> [file]   what the project has, and the hooks, subagents and sources that
+                                     takes, as JSON (to the file, or printed): no key, sign-in or other project
+  magpie library project apply <file|-> <dir>   give a folder (made a project) what an export has: added to what
+                                     it has already, so again changes nothing; what this library lacks is named
                                      <dir> may be relative, or "." for the folder you're in. A skill that couldn't be
                                      placed (a folder there that isn't magpie's is left as it is) is named, and the
                                      command exits with status 1.
@@ -127,8 +159,22 @@ func libraryProjectCmd(args []string) error {
 			return usage()
 		}
 		return projectSkillCmd(rest[0], rest[1:], usage)
+	case "server", "mcp":
+		return projectKindCmd(projectServers, rest, usage)
+	case "subagent":
+		return projectKindCmd(projectSubagents, rest, usage)
+	case "hook":
+		return projectKindCmd(projectHooks, rest, usage)
+	case "plugin", "plugins":
+		return projectPluginCmd(rest, usage)
+	case "pi":
+		return projectPiCmd(rest, usage)
 	case "instructions", "instr":
 		return projectInstrCmd(rest, usage)
+	case "export":
+		return projectExportCmd(rest, usage)
+	case "apply", "import":
+		return projectApplyCmd(rest, usage)
 	}
 	return fmt.Errorf("no library project command %q\n  %s", args[0], libraryProjectUsage)
 }

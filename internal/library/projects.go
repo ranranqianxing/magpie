@@ -65,6 +65,10 @@ type Project struct {
 	// (project_subagents.go)
 	Subagents  map[string][]string `json:"subagents,omitempty"`
 	AgentFiles []SubagentFile      `json:"agentFiles,omitempty"`
+	// Hooks are the library's hooks the project has on their own, and for
+	// which agents, written into each agent's project hooks file like
+	// those of its plugins (HookRecs; project_plugins.go)
+	Hooks map[string][]string `json:"hooks,omitempty"`
 	// Instr is the project's own instructions, InstrAgents the agents
 	// whose project file they're written into, InstrFiles the files
 	// magpie wrote them in (project_instructions.go)
@@ -77,6 +81,20 @@ type Project struct {
 	// agent, the hook entries magpie wrote in the project's file for them
 	Plugins  map[string][]string    `json:"plugins,omitempty"`
 	HookRecs map[string][]HookEntry `json:"hookRecs,omitempty"`
+	// ClaudePlugins are the plugins Claude Code has installed that the
+	// project turns on for itself, ClaudeWrote the enabledPlugins keys
+	// magpie wrote for them in .claude/settings.local.json, the only
+	// ones it takes out (project_claude_plugins.go)
+	ClaudePlugins []string `json:"claudePlugins,omitempty"`
+	ClaudeWrote   []string `json:"claudeWrote,omitempty"`
+	// Pi are the Pi packages the project wants in its .pi/settings.json by
+	// source ("on" or "off"), PiRecs the entries magpie wrote or adopted
+	// (project_pi.go)
+	Pi     map[string]string `json:"pi,omitempty"`
+	PiRecs []PiRec           `json:"piRecs,omitempty"`
+	// reshaped: claudePlugins or pi was read in another build's shape
+	// (project_shapes.go)
+	reshaped bool
 }
 
 // projectSkillsDirs is where, in a project, each agent reads skills of its
@@ -151,7 +169,7 @@ func (l *Library) syncProjects(res *Result) {
 
 func (l *Library) syncProject(p *Project, res *Result) {
 	if fi, err := os.Stat(p.Dir); err != nil || !fi.IsDir() {
-		if len(p.Skills) > 0 || len(p.Servers) > 0 || len(p.Subagents) > 0 || len(p.Plugins) > 0 || len(p.ServersOff) > 0 || len(p.SkillsOff) > 0 || p.Instr != "" && len(p.InstrAgents) > 0 || p.holds() {
+		if len(p.Skills) > 0 || len(p.Servers) > 0 || len(p.Subagents) > 0 || len(p.Plugins) > 0 || len(p.Hooks) > 0 || len(p.ClaudePlugins) > 0 || len(p.Pi) > 0 || len(p.ServersOff) > 0 || len(p.SkillsOff) > 0 || p.Instr != "" && len(p.InstrAgents) > 0 || p.holds() {
 			res.Problems = append(res.Problems, Problem{Agent: p.Dir, What: "project:", Error: "the folder is gone"})
 		}
 		return
@@ -246,6 +264,8 @@ func (l *Library) syncFolder(p *Project, res *Result, hubs map[string]*Server) {
 	l.syncProjectSubagents(p, func(what string, err error) { fail(what, err) })
 	l.syncProjectInstr(p, fail)
 	l.syncProjectHooks(p, fail)
+	l.syncProjectClaudePlugins(p, fail)
+	l.syncProjectPi(p, fail)
 	p.tidy()
 }
 
@@ -545,7 +565,7 @@ func RemoveProject(dir string, keep bool) (*Result, error) {
 			l.Projects = slices.DeleteFunc(l.Projects, func(x *Project) bool { return x == p })
 			return nil
 		}
-		p.Skills, p.Servers, p.ServersOff, p.SkillsOff, p.Subagents, p.InstrAgents, p.Plugins = nil, nil, nil, nil, nil, nil, nil
+		p.Skills, p.Servers, p.ServersOff, p.SkillsOff, p.Subagents, p.InstrAgents, p.Plugins, p.ClaudePlugins, p.Hooks, p.Pi = nil, nil, nil, nil, nil, nil, nil, nil, nil, nil
 		l.syncProject(p, &Result{})
 		if !p.holds() && p.Claude == nil && !slices.ContainsFunc(p.Trees, (*Project).holds) {
 			l.Projects = slices.DeleteFunc(l.Projects, func(x *Project) bool { return x == p })
@@ -642,7 +662,19 @@ type ProjectView struct {
 	// Plugins are the library's plugins the project has, for the agents
 	// named
 	Plugins map[string][]string `json:"plugins"`
-	Missing bool                `json:"missing,omitempty"` // the folder is gone
+	// ClaudePlugins are the plugins Claude Code has installed that the
+	// project turns on for itself
+	ClaudePlugins []string `json:"claudePlugins"`
+	// Pi are the Pi packages the project has by magpie (#7249)
+	Pi []ProjectPiView `json:"pi"`
+	// Hooks are the library's hooks the project has on their own, for
+	// the agents given
+	Hooks map[string][]string `json:"hooks"`
+	// Own are, by kind (skills, servers, hooks, subagents), what the
+	// project's own files already give agents and magpie didn't place:
+	// read-only (#7245)
+	Own     map[string][]OwnResource `json:"own,omitempty"`
+	Missing bool                     `json:"missing,omitempty"` // the folder is gone
 	// Problems are, by skill ("" for the project's own), what couldn't be done
 	Problems map[string]string `json:"problems,omitempty"`
 }
@@ -684,11 +716,19 @@ func projectViews(l *Library, problems []Problem) []ProjectView {
 		for k, a := range p.Plugins {
 			v.Plugins[k] = append([]string{}, a...)
 		}
+		v.ClaudePlugins = append([]string{}, p.ClaudePlugins...)
+		v.Pi = append([]ProjectPiView{}, p.piViews()...)
+		v.Hooks = map[string][]string{}
+		for k, a := range p.Hooks {
+			v.Hooks[k] = append([]string{}, a...)
+		}
 		for _, t := range p.Trees {
 			v.Trees = append(v.Trees, t.Dir)
 		}
 		if fi, err := os.Stat(p.Dir); err != nil || !fi.IsDir() {
 			v.Missing = true
+		} else {
+			v.Own = p.ownResources()
 		}
 		for _, x := range problems {
 			if x.Agent == p.Dir {

@@ -405,6 +405,26 @@ func trustWork(binary claudeCLI, configDir, work string) {
 	}
 }
 
+// trustCaller records, in a saved account's config directory (configDir,
+// "" for the account Claude Code is signed in to, whose ~/.claude.json
+// magpie never writes), that Claude Code may work in the caller's folder
+// work, before a run there. The shim answers the trust question yes in a
+// saved account all the same (claudetui.TrustEnv), and Claude Code then
+// records just this, so the entry is the one the answer leaves: recorded
+// first, the run isn't asked at all. @ahz2ygnhjmIJ0E0 (X, Claude Code
+// 2.1.329) had folders their own ~/.claude.json trusts, while the saved
+// accounts' files had them only here and there; each run of an account
+// that didn't was asked, and a question the shim didn't read (2.1.329's
+// "Quick safety check") waited out 45s on every account in turn.
+func trustCaller(binary claudeCLI, configDir, work string) {
+	if configDir == "" || work == "" {
+		return
+	}
+	if err := provider.ClaudeTrustFolder(configDir, claudeTrustKeys(binary, work)...); err != nil {
+		log.Printf("claude: the caller's folder not recorded as trusted for %s: %v", configDir, err)
+	}
+}
+
 // trustGOOS is the system claudeTrustKeys keys for; a var for tests.
 var trustGOOS = runtime.GOOS
 
@@ -584,14 +604,57 @@ func claudeResult(b []byte) (claudeRun, bool) {
 // has no use for the handler. --settings is not one of the sources
 // --setting-sources controls, so this applies however the user's settings
 // read.
-const disableDeepLinkSettings = `{"disableDeepLinkRegistration":"disable"}`
+var disableDeepLinkSettings = withAnthropicModels(`{"disableDeepLinkRegistration":"disable"}`)
+
+// claudeModelEnv are the variables Claude Code picks a model by: the main
+// one, each tier's (what its alias, haiku in the warm-up, resolves to) and
+// what /model says of it, the small fast model, the subagents' and the auto
+// mode classifier's. Where magpie wires Claude Code to itself they hold
+// magpie's routing names (claude/claude-haiku-5-5, group/opus-5-5[1m]),
+// while a run on an account goes to Anthropic, which knows none of them.
+// One in magpie's environment, or in ~/.claude.json's env, which Claude
+// Code reads whatever --setting-sources says (2.1.327), sent the warm-up's
+// haiku as claude/claude-haiku-5-5: Anthropic answered "There's an issue
+// with the selected model" and the 5-hour window never opened
+// (@ahz2ygnhjmIJ0E0 on X).
+var claudeModelEnv = func() []string {
+	out := []string{"ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+		"CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_AUTO_MODE_MODEL"}
+	for _, tier := range []string{"OPUS", "SONNET", "HAIKU", "FABLE"} {
+		for _, s := range []string{"", "_NAME", "_DESCRIPTION", "_SUPPORTED_CAPABILITIES"} {
+			out = append(out, "ANTHROPIC_DEFAULT_"+tier+"_MODEL"+s)
+		}
+	}
+	return out
+}()
+
+// withAnthropicModels is the --settings JSON object settings with each of
+// claudeModelEnv set empty in its env: --settings outranks both the
+// environment and ~/.claude.json, and an empty one is Claude Code's own
+// default, so an alias is Anthropic's model and an id stays as given.
+func withAnthropicModels(settings string) string {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(settings), &m); err != nil {
+		panic(err)
+	}
+	env := map[string]string{}
+	for _, k := range claudeModelEnv {
+		env[k] = ""
+	}
+	m["env"] = env
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
 
 // claudeRunSettings is a run's settings: no deep link, and the thinking
 // shown as a summary. -p has --thinking-display, but the interactive mode
 // (interactiveArgs drops that flag) shows none unless showThinkingSummaries
 // is on, so a client saw no thinking at all (DIYgod on X, #5379). It costs
 // no quota.
-const claudeRunSettings = `{"disableDeepLinkRegistration":"disable","showThinkingSummaries":true}`
+var claudeRunSettings = withAnthropicModels(`{"disableDeepLinkRegistration":"disable","showThinkingSummaries":true}`)
 
 func claudeUsageArgs() []string {
 	return []string{"-p", "/usage", "--output-format", "json",

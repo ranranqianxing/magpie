@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -65,6 +66,11 @@ type Plugin struct {
 	MCP       []string `json:"mcp,omitempty"`
 	Hooks     []string `json:"hooks,omitempty"`
 	Subagents []string `json:"subagents,omitempty"`
+	// Extensions are the Pi extensions a Pi package declares (package.json
+	// pi.extensions), as paths in its folder. They are Pi's to load, from
+	// the package entry a project giving the plugin to Pi gets (#7267), so
+	// magpie writes nothing for them
+	Extensions []string `json:"extensions,omitempty"`
 	// Left are the parts of the plugin magpie doesn't carry, and why
 	Left []PluginLeft `json:"left,omitempty"`
 	// Installed is when it was installed or last updated
@@ -112,11 +118,74 @@ type plLoaded struct {
 	servers                    []*Server
 	hooks                      []*Hook
 	agents                     []*Subagent
+	extensions                 []string // a Pi package's, relative to its folder
 	left                       []PluginLeft
 }
 
 func (p *plLoaded) parts() int {
-	return len(p.skills) + len(p.servers) + len(p.hooks) + len(p.agents)
+	return len(p.skills) + len(p.servers) + len(p.hooks) + len(p.agents) + len(p.extensions)
+}
+
+// piPackageExtensions are the extensions a Pi package declares in
+// package.json pi.extensions, as Pi resolves them (package-manager.js): a
+// file is itself, a folder its index.ts/index.js or package.json's own
+// pi.extensions, else each extension in it; a glob matches files in the
+// package; "!" leaves out what matches. A folder that isn't a Pi package, or
+// declares none, has none: Pi loads no extensions/ folder of a package with
+// a "pi" object that doesn't name it.
+func piPackageExtensions(dir string) []string {
+	if !piManifest(dir) {
+		return nil
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "package.json"))
+	var pkg struct {
+		Pi struct {
+			Extensions []string `json:"extensions"`
+		} `json:"pi"`
+	}
+	if json.Unmarshal(stripBOM(raw), &pkg) != nil {
+		return nil
+	}
+	var files, drops []string
+	for _, e := range pkg.Pi.Extensions {
+		switch {
+		case strings.HasPrefix(e, "!") || strings.HasPrefix(e, "-"):
+			drops = append(drops, strings.TrimPrefix(filepath.ToSlash(e[1:]), "./"))
+		case strings.HasPrefix(e, "+"):
+		case piIsPattern(e):
+			for _, f := range piExpand(dir, e) {
+				if fi, err := os.Stat(f); err == nil && fi.Mode().IsRegular() {
+					files = append(files, f)
+				}
+			}
+		default:
+			d, ok := inside(dir, e)
+			if !ok {
+				continue
+			}
+			if fi, err := os.Stat(d); err != nil {
+				continue
+			} else if fi.IsDir() {
+				files = append(files, piDirEntries(d)...)
+			} else {
+				files = append(files, d)
+			}
+		}
+	}
+	var out []string
+	for _, f := range files {
+		rel, err := filepath.Rel(dir, f)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			continue
+		}
+		rel = filepath.ToSlash(rel)
+		if slices.ContainsFunc(drops, func(x string) bool { return rel == x || piGlob(x).MatchString(rel) }) {
+			continue
+		}
+		out = append(out, rel)
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 func readJSONFile(p string) (map[string]any, error) {
@@ -178,7 +247,7 @@ func pluginSlug(s string) string {
 
 // isPlugin is whether dir looks like a plugin's folder.
 func isPlugin(dir string) bool {
-	for _, p := range []string{".claude-plugin/plugin.json", "skills", "agents", "commands", "hooks/hooks.json", ".mcp.json"} {
+	for _, p := range []string{".claude-plugin/plugin.json", ".codex-plugin/plugin.json", "skills", "agents", "commands", "hooks/hooks.json", ".mcp.json"} {
 		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(p))); err == nil {
 			return true
 		}
@@ -199,13 +268,41 @@ func readPlugin(dir, hint, force string, over map[string]any) (*plLoaded, error)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
+	// Codex's own manifest (#7255) names the same parts the same way: skills,
+	// mcpServers, hooks. Claude Code's fields win where both name one, so a
+	// part is carried once. Its hooks are read apart below: they are Codex's.
+	var codexHooks any
+	if cx, err := readJSONFile(filepath.Join(dir, ".codex-plugin", "plugin.json")); err == nil {
+		codexHooks = cx["hooks"]
+		for k, v := range cx {
+			if _, ok := man[k]; !ok && k != "hooks" {
+				man[k] = v
+			}
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
 	for k, v := range over {
 		if _, ok := man[k]; !ok {
 			man[k] = v
 		}
 	}
-	if !isPlugin(dir) && len(man) == 0 {
-		return nil, fmt.Errorf("no Claude Code plugin in %s: it has no .claude-plugin/plugin.json, skills, agents, hooks or .mcp.json", dir)
+	// a Pi package's package.json names it, says what it is and its version
+	// where no plugin manifest does: its name holds however the package is
+	// fetched (#7267)
+	if piManifest(dir) {
+		if pkg, err := readJSONFile(filepath.Join(dir, "package.json")); err == nil {
+			for _, k := range []string{"name", "description", "version"} {
+				if _, ok := man[k]; !ok && plStr(pkg[k]) != "" {
+					man[k] = pkg[k]
+				}
+			}
+		}
+	}
+	// a Pi package (package.json with a "pi" object) is one too (#7267):
+	// one with only extensions has nothing else here
+	if !isPlugin(dir) && len(man) == 0 && !piManifest(dir) {
+		return nil, fmt.Errorf("no plugin in %s: it has no .claude-plugin/plugin.json, .codex-plugin/plugin.json, skills, agents, hooks, .mcp.json or a Pi package.json", dir)
 	}
 	name := pluginSlug(force)
 	if name == "" {
@@ -220,7 +317,8 @@ func readPlugin(dir, hint, force string, over map[string]any) (*plLoaded, error)
 	if name == "" {
 		return nil, errors.New("the plugin has no name")
 	}
-	p := &plLoaded{name: name, description: strings.Join(strings.Fields(plStr(man["description"])), " "), version: plStr(man["version"])}
+	p := &plLoaded{name: name, description: strings.Join(strings.Fields(plStr(man["description"])), " "), version: plStr(man["version"]),
+		extensions: piPackageExtensions(dir)}
 	root, sub := pluginDir(name), pluginSub(name)
 	leave := func(what, why string) { p.left = append(p.left, PluginLeft{What: what, Why: why}) }
 
@@ -292,6 +390,7 @@ func readPlugin(dir, hint, force string, over map[string]any) (*plLoaded, error)
 
 	// MCP servers
 	var mcpDocs []map[string]any
+	mcpRead := filepath.Join(dir, ".mcp.json")
 	if m, err := readJSONFile(filepath.Join(dir, ".mcp.json")); err == nil {
 		mcpDocs = append(mcpDocs, m)
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -300,7 +399,8 @@ func readPlugin(dir, hint, force string, over map[string]any) (*plLoaded, error)
 	for _, v := range manifestList(man["mcpServers"]) {
 		switch x := v.(type) {
 		case string:
-			if d, ok := inside(dir, x); ok {
+			// a manifest naming ./.mcp.json names the file already read
+			if d, ok := inside(dir, x); ok && filepath.Clean(d) != mcpRead {
 				if m, err := readJSONFile(d); err == nil {
 					mcpDocs = append(mcpDocs, m)
 				} else {
@@ -344,6 +444,34 @@ func readPlugin(dir, hint, force string, over map[string]any) (*plLoaded, error)
 	n := 0
 	for _, doc := range hookDocs {
 		hooks, left := plHooksOf(doc, name, root, sub, &n)
+		p.hooks = append(p.hooks, hooks...)
+		p.left = append(p.left, left...)
+	}
+	// the hooks Codex's manifest names (a path, a list of paths or the hooks
+	// themselves) are Codex's own, as written: its events and matchers, given
+	// to Codex alone
+	for _, v := range manifestList(codexHooks) {
+		var doc map[string]any
+		switch x := v.(type) {
+		case string:
+			d, ok := inside(dir, x)
+			if !ok {
+				leave(x, "the path leaves the plugin's folder")
+				continue
+			}
+			m, err := readJSONFile(d)
+			if err != nil {
+				leave(x, err.Error())
+				continue
+			}
+			doc = m
+		case map[string]any:
+			doc = x
+		}
+		if doc == nil {
+			continue
+		}
+		hooks, left := plHooksOfAgent(doc, name, root, sub, &n, "codex")
 		p.hooks = append(p.hooks, hooks...)
 		p.left = append(p.left, left...)
 	}
@@ -541,6 +669,14 @@ func toolKind(m string) (string, bool) {
 // is the portable one; any other is given to Claude Code alone, as
 // written.
 func plHooksOf(doc map[string]any, bundle, root string, sub func(string) string, n *int) ([]*Hook, []PluginLeft) {
+	return plHooksOfAgent(doc, bundle, root, sub, n, "")
+}
+
+// plHooksOfAgent is plHooksOf for a hooks file one agent's own manifest
+// names: agent is that agent ("codex"), and each hook keeps its event and
+// matcher as the file wrote them, as that agent's own event, which no other
+// agent is given. "" is the portable reading.
+func plHooksOfAgent(doc map[string]any, bundle, root string, sub func(string) string, n *int, agent string) ([]*Hook, []PluginLeft) {
 	m, _ := doc["hooks"].(map[string]any)
 	if m == nil {
 		m = doc
@@ -579,7 +715,14 @@ func plHooksOf(doc map[string]any, bundle, root string, sub func(string) string,
 				if t, ok := hm["timeout"].(float64); ok && t > 0 && t <= 86400 {
 					x.Timeout = int(t)
 				}
-				if portable, ok := claudeEvents[ev]; ok {
+				if agent == "codex" {
+					if !slices.Contains(codexHookSpec("").native, ev) {
+						left = append(left, PluginLeft{What: ev + " hook", Why: "Codex has no event called " + ev})
+						*n--
+						continue
+					}
+					x.Event, x.Matcher = "codex:"+ev, matcher
+				} else if portable, ok := claudeEvents[ev]; ok {
 					k, tools := toolKind(matcher)
 					if slices.Contains(toolEvents, portable) && tools {
 						x.Event, x.Matcher = portable, k
@@ -587,7 +730,7 @@ func plHooksOf(doc map[string]any, bundle, root string, sub func(string) string,
 						x.Event = portable
 					}
 				}
-				if x.Event == "" {
+				if x.Event == "" && agent == "" {
 					if !slices.Contains(claudeHookEvents, ev) {
 						left = append(left, PluginLeft{What: ev + " hook", Why: "Claude Code has no event called " + ev})
 						*n--
@@ -642,6 +785,7 @@ type PluginCandidate struct {
 	MCP         int    `json:"mcp"`
 	Hooks       int    `json:"hooks"`
 	Subagents   int    `json:"subagents"`
+	Extensions  int    `json:"extensions,omitempty"`
 	// Remote: it is fetched from another repository when installed, so
 	// its parts aren't counted
 	Remote bool `json:"remote,omitempty"`
@@ -682,7 +826,7 @@ func resolvePluginRoot(input string) (root, tmp string, err error) {
 		if !fi.IsDir() {
 			// .claude-plugin/marketplace.json or plugin.json
 			dir = filepath.Dir(dir)
-			if filepath.Base(dir) == ".claude-plugin" {
+			if filepath.Base(dir) == ".claude-plugin" || filepath.Base(dir) == ".codex-plugin" {
 				dir = filepath.Dir(dir)
 			}
 		}
@@ -730,16 +874,44 @@ func fetchSourceRoot(input string) (root, tmp string, src Source, err error) {
 	return sub, tmp, src, nil
 }
 
+// rootName is the name a plugin at root goes by when nothing in it names it:
+// its folder's, or, for the top of a repository downloaded into tmp, the
+// repository's (#7269). The download's folder is a new temp name on every
+// fetch, and a bundle named after it was a second bundle on each update.
+func rootName(input, root, tmp string) string {
+	if tmp == "" || filepath.Clean(root) != filepath.Clean(tmp) {
+		return filepath.Base(root)
+	}
+	repo := ""
+	if src, ok := githubSource(input); ok {
+		repo = src.Repo
+	} else if src, ok, err := gitSource(input); ok && err == nil {
+		repo = src.Repo
+		if u, err := url.Parse(repo); err == nil && u.Scheme != "" {
+			repo = u.Path
+		} else if _, after, ok := strings.Cut(repo, ":"); ok {
+			repo = after // user@host:group/repo.git
+		}
+	}
+	parts := strings.FieldsFunc(repo, func(r rune) bool { return r == '/' || r == '\\' })
+	for i := len(parts) - 1; i >= 0; i-- {
+		if n := strings.TrimSuffix(parts[i], ".git"); n != "" {
+			return n
+		}
+	}
+	return ""
+}
+
 // findPlugins reads the plugins at root: a marketplace's entries, or the
-// one plugin there.
-func findPlugins(root string) (*PluginProbe, error) {
+// one plugin there, which goes by hint when nothing in it names it.
+func findPlugins(root, hint string) (*PluginProbe, error) {
 	p := &PluginProbe{root: root, Candidates: []PluginCandidate{}}
 	mk, err := readJSONFile(filepath.Join(root, ".claude-plugin", "marketplace.json"))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
 	if mk == nil {
-		pl, err := readPlugin(root, filepath.Base(root), "", nil)
+		pl, err := readPlugin(root, hint, "", nil)
 		if err != nil {
 			return nil, err
 		}
@@ -826,7 +998,7 @@ func marketSource(s map[string]any) (Source, string) {
 
 func candidateOf(pl *plLoaded, dir string, over map[string]any) PluginCandidate {
 	return PluginCandidate{Name: pl.name, Description: pl.description, Version: pl.version,
-		Skills: len(pl.skills), MCP: len(pl.servers), Hooks: len(pl.hooks), Subagents: len(pl.agents),
+		Skills: len(pl.skills), MCP: len(pl.servers), Hooks: len(pl.hooks), Subagents: len(pl.agents), Extensions: len(pl.extensions),
 		Left: pl.left, dir: dir, over: over}
 }
 
@@ -842,7 +1014,7 @@ func ProbePlugins(input string) (*PluginProbe, error) {
 	if err != nil {
 		return nil, err
 	}
-	p, err := findPlugins(root)
+	p, err := findPlugins(root, rootName(input, root, tmp))
 	if err != nil {
 		if tmp != "" {
 			os.RemoveAll(tmp)
@@ -876,7 +1048,7 @@ func InstallPlugins(input string, names, agents []string) (*Result, error) {
 		return nil, err
 	}
 	defer cleanup()
-	return installPlugins(p, input, names, agents)
+	return installPlugins(p, input, names, agents, "")
 }
 
 // pluginProbeFor is the probe of input, from the one the page just made when it
@@ -888,18 +1060,24 @@ func pluginProbeFor(input string) (*PluginProbe, func(), error) {
 		probes.Unlock()
 		if e != nil {
 			if _, err := os.Stat(e.tmp); err == nil {
-				if p, err := findPlugins(e.p.root); err == nil {
+				if p, err := findPlugins(e.p.root, rootName(input, e.p.root, e.tmp)); err == nil {
 					p.Source = input
 					return p, func() {}, nil
 				}
 			}
 		}
 	}
+	return fetchPluginProbe(input)
+}
+
+// fetchPluginProbe is the probe of input from a new download, never the
+// one a probe kept; cleanup removes it.
+func fetchPluginProbe(input string) (*PluginProbe, func(), error) {
 	root, tmp, err := resolvePluginRoot(input)
 	if err != nil {
 		return nil, nil, err
 	}
-	p, err := findPlugins(root)
+	p, err := findPlugins(root, rootName(input, root, tmp))
 	if err != nil {
 		if tmp != "" {
 			os.RemoveAll(tmp)
@@ -914,7 +1092,8 @@ func pluginProbeFor(input string) (*PluginProbe, func(), error) {
 	}, nil
 }
 
-func installPlugins(p *PluginProbe, input string, names, agents []string) (*Result, error) {
+// as is the name an update keeps for the one plugin, "" otherwise.
+func installPlugins(p *PluginProbe, input string, names, agents []string, as string) (*Result, error) {
 	var picked []PluginCandidate
 	switch {
 	case len(names) == 0 && len(p.Candidates) == 1:
@@ -960,7 +1139,7 @@ func installPlugins(p *PluginProbe, input string, names, agents []string) (*Resu
 		// a marketplace's name for it is its folder's: read with it, so
 		// its parts name that folder, not the one its manifest's name
 		// would have
-		force := ""
+		force := as
 		if len(p.Candidates) > 1 || c.Remote {
 			force = c.Name
 		}
@@ -969,7 +1148,7 @@ func installPlugins(p *PluginProbe, input string, names, agents []string) (*Resu
 			return nil, fmt.Errorf("%s: %w", c.Name, err)
 		}
 		if pl.parts() == 0 {
-			return nil, fmt.Errorf("%s has no skills, MCP servers, hooks or subagents magpie can give an agent", pl.name)
+			return nil, fmt.Errorf("%s has no skills, MCP servers, hooks, subagents or extensions for Pi magpie can give an agent", pl.name)
 		}
 		ones = append(ones, one{c, pl, d})
 	}
@@ -1002,7 +1181,8 @@ func installPlugins(p *PluginProbe, input string, names, agents []string) (*Resu
 func installPlugin(l *Library, pl *plLoaded, dir, input, pick string, agents []string) ([]Problem, error) {
 	old := l.plugin(pl.name)
 	b := &Plugin{Name: pl.name, Description: pl.description, Version: pl.version, Source: input, Pick: pick,
-		Agents: orNone(slices.Compact(slices.Sorted(slices.Values(agents)))), Installed: time.Now().Format(time.RFC3339)}
+		Agents: orNone(slices.Compact(slices.Sorted(slices.Values(agents)))), Installed: time.Now().Format(time.RFC3339),
+		Extensions: pl.extensions}
 	if old != nil {
 		b.Agents, b.Off = old.Agents, old.Off
 		if len(agents) > 0 {
@@ -1118,7 +1298,7 @@ func installPlugin(l *Library, pl *plLoaded, dir, input, pick string, agents []s
 		l.Subagents = append(l.Subagents, s)
 		b.Subagents = append(b.Subagents, n)
 	}
-	if len(b.Skills)+len(b.MCP)+len(b.Hooks)+len(b.Subagents) == 0 {
+	if len(b.Skills)+len(b.MCP)+len(b.Hooks)+len(b.Subagents)+len(b.Extensions) == 0 {
 		os.RemoveAll(pluginDir(pl.name))
 		return nil, errors.New("every part of it clashes with the library's own: " + skipped[len(skipped)-1].Error)
 	}
@@ -1256,12 +1436,24 @@ func UpdatePlugin(name string) (*Result, error) {
 	if b.Pick != "" {
 		names = []string{b.Pick}
 	}
-	p, cleanup, err := pluginProbeFor(b.Source)
+	// an update fetches the source again, never the download a probe of it
+	// kept: one looked up before a new commit was pushed is that commit's,
+	// and the update said it was done while the plugin stayed as it was
+	// until magpie restarted (jinpwng on X, a Pi package from git)
+	p, cleanup, err := fetchPluginProbe(b.Source)
 	if err != nil {
 		return nil, err
 	}
 	defer cleanup()
-	return installPlugins(p, b.Source, names, nil)
+	// the bundle keeps its name: it is what the projects and agents have it
+	// by, and its folder what a project's Pi package entry names (#7269). A
+	// name derived again can differ: a bundle named before by its
+	// download's temp folder, or a manifest that renamed the plugin.
+	if b.Pick == "" && len(p.Candidates) == 1 {
+		p.Candidates[0].Name = name
+		return installPlugins(p, b.Source, nil, nil, name)
+	}
+	return installPlugins(p, b.Source, names, nil, "")
 }
 
 // ---- the page --------------------------------------------------------------

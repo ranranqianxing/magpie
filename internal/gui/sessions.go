@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"runtime/debug"
@@ -54,14 +55,7 @@ type sessionsJSON struct {
 // page and a detail (MergeExternal) never read them, and copying every
 // session's days for each poll of an open Sessions page was ~1.8 GB in 4
 // minutes over ~720k calls (#2776). The stats add them (gatewayDays).
-func gatewayExternal(g usage.GatewaySession) sessions.ExternalSession {
-	e := sessions.ExternalSession{Agent: g.Agent, ID: g.ID, Start: g.Start, Last: g.Last, Tokens: g.Tokens, Cost: g.Cost, Unpriced: g.Unpriced}
-	e.Models = make([]sessions.ExternalModel, 0, len(g.Models))
-	for _, m := range g.Models {
-		e.Models = append(e.Models, sessions.ExternalModel{Model: m.Model, Tokens: m.Tokens, Cost: m.Cost, Priced: m.Priced})
-	}
-	return e
-}
+func gatewayExternal(g usage.GatewaySession) sessions.ExternalSession { return g.External() }
 
 // gatewayDays is a gateway session's usage by day, as the stats count it.
 func gatewayDays(g usage.GatewaySession) []sessions.ExternalDayUsage {
@@ -90,21 +84,7 @@ func gatewayListed(g usage.GatewaySession, title func(agent, id string) string) 
 // ~150 MB, and each was looked for in the store of what was asked
 // (GatewayTitler).
 func listedExternal(nativeKeys map[string]bool, n int) []sessions.ExternalSession {
-	hidden := sessions.GatewayHidden()
-	title := sessions.GatewayTitler()
-	var ext []sessions.ExternalSession
-	usage.EachGatewaySession(nativeKeys, func(g usage.GatewaySession) bool {
-		if len(ext) == n {
-			return false
-		}
-		// one a list leaves out (externalSessions) takes no room; nor does
-		// one that spent nothing, with no file behind it (SpentNothing)
-		if g.Agent != "" && g.ID != "" && !hidden(g.Agent, g.ID, g.Last) && !g.SpentNothing() {
-			ext = append(ext, gatewayListed(g, title))
-		}
-		return true
-	})
-	return ext
+	return usage.ListedGateway(nativeKeys, n)
 }
 
 func gatewaySession(g usage.GatewaySession) sessions.Session {
@@ -458,6 +438,42 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 			return
 		}
 		if err := agentTerminal(run, name, settings.Shared().SessionTerminal); err != nil {
+			fail(rw, err)
+			return
+		}
+		rw.WriteHeader(http.StatusNoContent)
+	})
+	// agents/reveal shows an agent's settings file, the one magpie writes,
+	// in the file manager, from its row's menu (InkCoalW on X: its whole
+	// file at hand, as CC Switch has it). The page sends only the agent's
+	// id; the path is the agent's as detected, never one the page names.
+	mux.HandleFunc("POST /api/agents/reveal", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Agent string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		if isWeb(w) {
+			fail(rw, errors.New("showing a file is only for the desktop app"))
+			return
+		}
+		path := ""
+		for _, a := range agent.Detected() {
+			if a.ID == in.Agent {
+				path = a.Path
+			}
+		}
+		if path == "" {
+			fail(rw, errors.New("no settings file for this agent"))
+			return
+		}
+		var err error
+		if _, e := os.Stat(path); e == nil {
+			err = revealIn(w, path)
+		} else {
+			err = w.OpenFolder(filepath.Dir(path))
+		}
+		if err != nil {
 			fail(rw, err)
 			return
 		}
