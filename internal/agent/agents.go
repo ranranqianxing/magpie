@@ -224,6 +224,11 @@ var others = []*Agent{
 	// Sessions lists those as Raft's (internal/sessions/raft.go), while
 	// their requests say "pi (…)" and are Pi's
 	{ID: "raft", Name: "Raft", Icon: "generic"},
+	// CatPaw (Meituan's CatPaw IDE) runs its agent on its own models;
+	// Sessions lists its conversations (internal/sessions/catpaw.go). Its
+	// icon is the app's own, CatPawAI.icns of catpawai.dmg, cut to its tile
+	// (KenyonCode on X)
+	{ID: "catpaw", Name: "CatPaw", Icon: "catpaw"},
 	// Magpie Memory reading conversations into memories: its requests are
 	// made as memdistill.Agent, by its token and never a User-Agent, and
 	// drawn with the brain the Library's Memory tab has (the owner, 11-12)
@@ -979,6 +984,11 @@ func piModelOn(m catalog.Model, gw string, native bool, on string) map[string]an
 			e["compat"] = map[string]any{"forceAdaptiveThinking": true}
 		}
 	case !native:
+	case slices.Contains(m.APIs, string(provider.Gemini)):
+		// first, as a Gemini model a relay also serves on Messages is
+		// listed there too (provider.AgentGemini); Pi's own folder has
+		// it taken out (piAsked)
+		e["api"], e["baseUrl"] = "google-generative-ai", gw+"/v1beta"
 	case slices.Contains(m.APIs, string(provider.Responses)):
 		// strict left out of a tool of a turn asked there is taken as a
 		// strict-mode schema, every property required, optional ones
@@ -991,8 +1001,6 @@ func piModelOn(m catalog.Model, gw string, native bool, on string) map[string]an
 		if gateway.AsksAdaptively(m.ID) {
 			e["compat"] = map[string]any{"forceAdaptiveThinking": true}
 		}
-	case slices.Contains(m.APIs, string(provider.Gemini)):
-		e["api"], e["baseUrl"] = "google-generative-ai", gw+"/v1beta"
 	}
 	if m.Images {
 		e["input"] = []string{"text", "image"}

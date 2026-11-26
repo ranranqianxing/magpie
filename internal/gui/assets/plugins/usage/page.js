@@ -1538,8 +1538,13 @@ const hiddenRows = () => new Set(state.settings?.usageWindowsHidden || []);
 function withoutHiddenRows(q) {
   const hid = hiddenRows();
   if (!hid.size || q.error || !q.windows?.length) return q;
-  const ws = q.windows.filter((w) => !hid.has(windowHideKey(q, windowGroup(w))));
-  return ws.length && ws.length < q.windows.length ? { ...q, windows: ws } : q;
+  const gone = (w) => hid.has(windowHideKey(q, windowGroup(w)));
+  const ws = q.windows.filter((w) => !gone(w));
+  if (!ws.length || ws.length === q.windows.length) return q;
+  // a window's credits a day go with its row (Will on Discord: Kiro's
+  // us-east-1 rows hidden, their days still drawn)
+  const pools = [q.daily, ...(q.moreDaily || [])].filter((d) => d && !q.windows.some((w) => w.name === d.window && gone(w)));
+  return { ...q, windows: ws, daily: pools[0], moreDaily: pools.slice(1) };
 }
 // hiddenRowList: the rows the Overview leaves out, one a provider and group,
 // those of a card with every row named showing again excepted
@@ -3418,7 +3423,7 @@ const ledHitText = (h) => h === null ? "" : hitPct(h);
 const ledHitTip = (r) => cacheHitTip({ input: r.in, cache_read: r.cache_read, cache_write: r.cache_write });
 const LED_COLS = [
   ["Time"], ["Agent"], ["Requested"], ["Provider · account"], ["Sent", "", true], ["Served"], ["Effort", "", true],
-  ["In", "n"], ["Out", "n"], ["Cache write", "n", true], ["Cache read", "n", true], ["Cache hit rate", "n", 2, "The share of the prompt read from the cache"], ["Cost", "n"], ["TTFT", "n", 2, "Time to first token"], ["Duration", "n"], ["Speed", "n", 0, "Output tokens a second after the first, over the streamed replies"], ["Status"],
+  ["In", "n", 0, "Input not read from or written to the cache. Where the cache columns are left out, the whole prompt"], ["Out", "n"], ["Cache write", "n", true], ["Cache read", "n", true], ["Cache hit rate", "n", 2, "The share of the prompt read from the cache"], ["Cost", "n"], ["TTFT", "n", 2, "Time to first token"], ["Duration", "n"], ["Speed", "n", 0, "Output tokens a second after the first, over the streamed replies"], ["Status"],
 ];
 
 // a window under a second after a wait over four times longer: the reply came
@@ -3824,9 +3829,10 @@ function renderLedger() {
   const table = el("table", "led");
   const head = el("tr");
   const optCls = (opt) => opt === 2 ? " lc-opt2" : opt ? " lc-opt" : "";
+  const uncachedIn = !!state.settings?.inUncached;
   for (const [name, cls, opt, tip] of LED_COLS) {
     const th = el("th", (cls || "") + optCls(opt), t(name));
-    if (tip) th.title = t(tip);
+    if (tip) th.title = t(uncachedIn && name === "In" ? "Input not read from or written to the cache" : tip);
     head.append(th);
   }
   table.append(el("thead"), el("tbody"));
@@ -3940,7 +3946,20 @@ function renderLedger() {
     td(r.wire || r.model || "—", "model " + (r.model ? "model-value" : "faint"), r.source === "log" && r.model ? t("Model recorded in the local session log; the outbound HTTP request was not captured.") : r.wire ? r.model + " → " + r.wire : r.model);
     td(ledServed(r), "model");
     td(r.effort || "—", r.effort ? "" : "faint");
-    td(fmtN(r.in || 0), "n", exactN(r.in));
+    // Claude Code's in is what its prompt cache didn't hold, often 2 or 4
+    // tokens of a long prompt; where a narrow window leaves the cache
+    // columns out, the cell says the whole prompt instead, so a turn of a
+    // long message doesn't read as 2 (shangyuan0818 on X)
+    // Settings › Usage › In without cache keeps it the vendor's in
+    // everywhere, as it was before (JonahFu on X)
+    const cachedIn = r.cache_unknown || uncachedIn ? 0 : (r.cache_read || 0) + (r.cache_write || 0);
+    if (cachedIn > 0) {
+      const whole = (r.in || 0) + cachedIn;
+      // the whole is drawn from data-all (app.css), so the cell's text
+      // stays the vendor's in, as every other count's does
+      const c = td(el("span", "in-own", fmtN(r.in || 0)), "n in-split", tipOf(ledNum(r.in || 0), t("Prompt {all}: {in} new · {read} cache read · {write} cache write", { all: ledNum(whole), in: ledNum(r.in || 0), read: ledNum(r.cache_read || 0), write: ledNum(r.cache_write || 0) })));
+      c.dataset.all = fmtN(whole);
+    } else td(fmtN(r.in || 0), "n", exactN(r.in));
     td(fmtN(r.out || 0), "n", tipOf(exactN(r.out), r.reasoning ? t("{n} reasoning, inside output", { n: ledNum(r.reasoning) }) : ""));
     // a vendor that counts no cache wrote and read none we know of, not 0 (#3464)
     if (r.cache_unknown) for (let i = 0; i < 2; i++) td("—", "n faint", t("The vendor doesn't count the cache"));
@@ -4035,16 +4054,19 @@ function renderLedger() {
 }
 
 {
-  let typing = 0;
-  $("#ledQ").oninput = (e) => {
-    ledQuery = e.target.value;
-    ledModel = "";
-    ledOwn("model");
-    clearTimeout(typing);
-    typing = setTimeout(() => { ledOffset = 0; loadLedger().catch((err) => status(err.message, "err")); }, 250);
-  };
+  // read once typing pauses, at Enter, and never while an input method is
+  // still composing its words (suetfungsit on X)
+  let typing = 0, composing = false;
+  const ledBy = () => { clearTimeout(typing); ledOffset = 0; loadLedger().catch((err) => status(err.message, "err")); };
+  const ledTyped = () => { ledQuery = $("#ledQ").value; ledModel = ""; ledOwn("model"); };
+  const later = () => { ledTyped(); clearTimeout(typing); typing = setTimeout(ledBy, 250); };
+  $("#ledQ").oninput = (e) => { if (e.isComposing || composing) clearTimeout(typing); else later(); };
+  $("#ledQ").addEventListener("compositionstart", () => { composing = true; clearTimeout(typing); });
+  $("#ledQ").addEventListener("compositionend", () => { composing = false; later(); });
   $("#ledQ").onkeydown = (e) => {
-    if (e.key === "Escape" && e.target.value) { e.stopPropagation(); e.target.value = ""; ledQuery = ""; ledModel = ""; ledOwn("model"); ledOffset = 0; loadLedger().catch((err) => status(err.message, "err")); }
+    if (e.isComposing || e.keyCode === 229) return; // the input method's own Enter or Escape
+    if (e.key === "Enter") { ledTyped(); ledBy(); }
+    else if (e.key === "Escape" && e.target.value) { e.stopPropagation(); e.target.value = ""; ledQuery = ""; ledModel = ""; ledOwn("model"); ledBy(); }
   };
   $("#ledExport").onclick = async () => {
     const b = $("#ledExport");
@@ -5526,8 +5548,23 @@ function sessionDetail(s) {
 
 // All sessions: the Sessions page, on the agent picked here if one is
 $("#sessAll").onclick = (e) => magpie.call("sessions", "reveal", sessAgent === "all" ? {} : { agent: sessAgent }, e);
-$("#sessQ").oninput = (e) => { sessQuery = e.target.value; if (sessions) renderSessions(); };
-$("#sessQ").onkeydown = (e) => { if (e.key === "Escape" && e.target.value) { e.stopPropagation(); e.target.value = ""; sessQuery = ""; if (sessions) renderSessions(); } };
+// Search filters once typing pauses, at Enter, and never while an input
+// method is still composing its words (suetfungsit on X: pinyin filtered
+// a long history before its characters were picked)
+{
+  const q = $("#sessQ");
+  let typing = 0, composing = false;
+  const by = () => { clearTimeout(typing); if (sessQuery === q.value) return; sessQuery = q.value; if (sessions) renderSessions(); };
+  const later = () => { clearTimeout(typing); typing = setTimeout(by, 200); };
+  q.oninput = (e) => { if (e.isComposing || composing) clearTimeout(typing); else later(); };
+  q.addEventListener("compositionstart", () => { composing = true; clearTimeout(typing); });
+  q.addEventListener("compositionend", () => { composing = false; later(); });
+  q.onkeydown = (e) => {
+    if (e.isComposing || e.keyCode === 229) return; // the input method's own Enter or Escape
+    if (e.key === "Enter") by();
+    else if (e.key === "Escape" && q.value) { e.stopPropagation(); q.value = ""; by(); }
+  };
+}
 
 // ---------- settings ----------
 //

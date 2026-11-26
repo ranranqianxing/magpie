@@ -73,10 +73,14 @@ type Provider struct {
 	// tells Token Plan 企业版's usage to (tencent_usage.go), or an Alibaba
 	// Cloud account's AccessKey ID and Secret (TakesAlibabaAccessKey), what
 	// its console tells a Token Plan's usage to (alibaba_usage.go); not the plan's
-	// inference key in Key. They are kept, backed up and synced as the keys are: the Secret
-	// is never sent to the GUI, and a backup without keys has neither.
+	// inference key in Key. On Amazon Bedrock they are an AWS access key,
+	// which signs its requests (SigV4) in place of a Bedrock API key
+	// (SignsWithAccessKey, #7687), with SessionToken a temporary one's.
+	// They are kept, backed up and synced as the keys are: the Secret and
+	// the token are never sent to the GUI, and a backup without keys has none.
 	AccessKeyID     string `json:"accessKeyID,omitempty"`
 	SecretAccessKey string `json:"secretAccessKey,omitempty"`
+	SessionToken    string `json:"sessionToken,omitempty"`
 
 	// KeyName names the key in use, and Keys are the provider's other
 	// accounts: keys saved to switch to (see keys.go).
@@ -535,6 +539,14 @@ type Provider struct {
 	// TakesResolve is; a plugin's requests are made by its host, which has
 	// no way to be told. See netproxy.WithResolve and CheckResolve.
 	Resolve map[string][]string `json:"resolve,omitempty"`
+	// Addresses are a Remote magpie's other addresses: the same
+	// computer's magpie reached another way (evjohnicu on X: at home its
+	// LAN address, from outside through Tailscale or EasyTier). A request
+	// goes to the one that last answered first, and to the next when it
+	// takes no connection; an answer, a refusal too, is the remote's own.
+	// Each is a root as the base URL is (remoteMagpieEndpoints). See
+	// netproxy.WithFailover.
+	Addresses []string `json:"addresses,omitempty"`
 
 	// Proxy is the proxy magpie's requests to this provider go through
 	// (#237: Codex through one, a vendor at home without): "" follows
@@ -613,6 +625,16 @@ type Provider struct {
 	// bills at that times this, unless it has a rate in KeyPriceRates.
 	// 0 is none: no group rate is read.
 	TopUpRate float64 `json:"topUpRate,omitempty"`
+	// RateReadHours is, for a provider with a TopUpRate, how many hours a
+	// key's read group rate stands before it is read again (@YIXIE233 on
+	// X asked for 3), 1 to 168; 0 is the default, six.
+	RateReadHours int `json:"rateReadHours,omitempty"`
+	// KeyRateFactors is, for a provider with a TopUpRate, what each key's
+	// read rate is multiplied by, by its KeyID (@YIXIE233 on X: groups of
+	// one relay whose upstream caches differ cost 2-3x apart at the same
+	// group rate). A key not in it has 1; a rate in KeyPriceRates is
+	// never multiplied (see key_rate.go).
+	KeyRateFactors map[string]float64 `json:"keyRateFactors,omitempty"`
 	// zeroRate marks a PriceRate of 0 that is a rate, a free group's, not
 	// the price as listed; set by atKeyRate alone
 	zeroRate bool
@@ -1024,6 +1046,7 @@ func (p Provider) clone() Provider {
 	p.KeySpendCaps = maps.Clone(p.KeySpendCaps)
 	p.KeyOwnBalances = maps.Clone(p.KeyOwnBalances)
 	p.KeyPriceRates = maps.Clone(p.KeyPriceRates)
+	p.KeyRateFactors = maps.Clone(p.KeyRateFactors)
 	if p.AccountWindowCaps != nil {
 		m := make(map[string]map[string]int, len(p.AccountWindowCaps))
 		for k, v := range p.AccountWindowCaps {
@@ -1360,6 +1383,9 @@ func Save(p Provider) error {
 			}
 			p.Resolve = r
 		}
+		if err := p.checkAddresses(); err != nil {
+			return err
+		}
 		if p.HTTP1 && !p.TakesInsecureTLS() {
 			return fmt.Errorf("%s is a preset's: only a provider you added with your own base URL can be held to HTTP/1.1", p.Name)
 		}
@@ -1402,6 +1428,7 @@ func Save(p Provider) error {
 	if i >= 0 {
 		was = &f.Providers[i]
 	}
+	p.Models, p.Delisted = goneKeptAside(p, was)
 	p.PickedFrom = listedWith(p, was)
 	p.Delisted = delistedWith(p, was)
 	p.DelistedAt = delistedAtWith(p, was)
@@ -1464,6 +1491,45 @@ func delistedWith(p Provider, was *Provider) []string {
 		return nil
 	}
 	return d
+}
+
+// goneKeptAside are p's Models and Delisted with a remote magpie's pick its
+// list set aside kept aside while that list still lacks it. Another
+// magpie's list is followed in the background: an editor opened before it
+// dropped a routing group still held the group among its picks, and its
+// Save picked it again (delistedWith), where no later fetch could tell it
+// from one typed by hand, so the group stayed in this magpie's list for
+// good (CryptoSarom on X). It comes back with a list that has it
+// (relistPicks). A pick typed by hand was never set aside, and stays.
+func goneKeptAside(p Provider, was *Provider) ([]string, []string) {
+	if was == nil || len(was.Delisted) == 0 || len(p.Models) == 0 || !p.IsRemoteMagpie() {
+		return p.Models, p.Delisted
+	}
+	now := liveIDs(p.ID)
+	if len(now) == 0 {
+		return p.Models, p.Delisted // no list to tell by
+	}
+	var kept, aside []string
+	for _, m := range p.Models {
+		if slices.Contains(was.Delisted, m) && !now[m] {
+			aside = append(aside, m)
+		} else {
+			kept = append(kept, m)
+		}
+	}
+	if len(aside) == 0 {
+		return p.Models, p.Delisted
+	}
+	d := p.Delisted
+	if d == nil {
+		d = slices.Clone(was.Delisted)
+	}
+	for _, m := range aside {
+		if !slices.Contains(d, m) {
+			d = append(d, m)
+		}
+	}
+	return kept, d
 }
 
 // delistedAtWith is what p.DelistedAt is saved as: zero while some pick is
@@ -1591,14 +1657,21 @@ func AddCopy(p Provider, from string) (string, error) {
 		p.Key, p.KeyName, p.KeyProtocol, p.KeyWeight, p.KeyPlan = src.Key, src.KeyName, src.KeyProtocol, src.KeyWeight, src.KeyPlan
 		p.Keys = slices.Clone(src.Keys)
 		p.Routing, p.Sink, p.Affinity = src.Routing, src.Sink, src.Affinity
-	}
-	if p.BalanceToken == "" {
-		p.BalanceToken = src.BalanceToken
+		// the balance token belongs to the account the keys sign in to, so it
+		// comes with them. A copy pasted its own key is another account
+		// (zhonglin on X): inheriting from's token would ask from's account
+		// and show its balance twice, the copy's own account never asked.
+		if p.BalanceToken == "" {
+			p.BalanceToken = src.BalanceToken
+		}
 	}
 	// the access key as the copy's editor showed it: the form sends its ID
 	// but never the saved Secret, which went missing from the copy (#1821)
 	if p.SecretAccessKey == "" && (p.AccessKeyID == "" || p.AccessKeyID == src.AccessKeyID) {
 		p.AccessKeyID, p.SecretAccessKey = src.AccessKeyID, src.SecretAccessKey
+		if p.SessionToken == "" {
+			p.SessionToken = src.SessionToken
+		}
 	}
 	if p.ZhipuTeam == nil {
 		p.ZhipuTeam = src.ZhipuTeam
@@ -1846,6 +1919,10 @@ func keyOptional(p Provider) bool {
 	if pr := Preset(p.Preset); pr != nil && pr.NoKey {
 		return true
 	}
+	// Bedrock signed with an AWS access key in place of its API key (#7687)
+	if p.SignsWithAccessKey() {
+		return true
+	}
 	h := p.Host()
 	if strings.HasPrefix(h, "localhost") || strings.HasPrefix(h, "127.0.0.1") || strings.HasPrefix(h, "0.0.0.0") {
 		return true
@@ -1897,8 +1974,12 @@ func normalize(p Provider) Provider {
 	p.KeySpendCaps = normalKeySpendCaps(p.KeySpendCaps)
 	p.KeyOwnBalances = normalKeyOwnBalances(p.KeyOwnBalances)
 	p.KeyPriceRates = normalKeyPriceRates(p.KeyPriceRates)
+	p.KeyRateFactors = normalKeyRateFactors(p.KeyRateFactors)
 	if TopUpRateOK(p.TopUpRate) != "" {
 		p.TopUpRate = 0
+	}
+	if RateReadHoursOK(p.RateReadHours) != "" {
+		p.RateReadHours = 0
 	}
 	if len(p.Models) > 0 {
 		p.NoModels = false // a pick is no longer Select none

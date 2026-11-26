@@ -60,6 +60,10 @@ type Project struct {
 	// Trees are the project's folder in each other worktree of its git
 	// repository, given the project's set, with what magpie put in each
 	Trees []*Project `json:"trees,omitempty"`
+	// MainOnly keeps the project's set to this checkout: the
+	// repository's other worktrees get none of it, and what magpie put
+	// there comes out (#7252)
+	MainOnly bool `json:"mainOnly,omitempty"`
 	// Subagents are the library's subagents the project has, and for which
 	// agents; AgentFiles the files magpie wrote for them, by their hash
 	// (project_subagents.go)
@@ -92,9 +96,16 @@ type Project struct {
 	// (project_pi.go)
 	Pi     map[string]string `json:"pi,omitempty"`
 	PiRecs []PiRec           `json:"piRecs,omitempty"`
-	// reshaped: claudePlugins or pi was read in another build's shape
+	// PiNotCarried are what another build kept in the project's pi that
+	// magpie has no place for, kept as read (project_shapes.go)
+	PiNotCarried []PiNotCarried `json:"piNotCarried,omitempty"`
+	// reshaped: claudePlugins or pi was read in another build's shape;
+	// piFromOld the Pi sources read so, which another build declared in
+	// the project's file; piStrays: pi held v0.1.4702's literals
 	// (project_shapes.go)
-	reshaped bool
+	reshaped  bool
+	piFromOld map[string]bool
+	piStrays  bool
 }
 
 // projectSkillsDirs is where, in a project, each agent reads skills of its
@@ -108,7 +119,9 @@ type Project struct {
 // (getProjectSkillsDir, @qoder-ai/qodercli 1.1.69, whose .agents/skills
 // a setting can turn off), CodeBuddy Code .codebuddy/skills
 // (getProjectSkillsDir, @tencent-ai/codebuddy-code 2.164.0) and Command
-// Code .commandcode/skills (commandcode.ai/docs/skills). DeepSeek Harness
+// Code .commandcode/skills (commandcode.ai/docs/skills), TRAE CN
+// .trae/skills (its workbench's joinPath(workspace, ".trae", "skills"),
+// 2.3.105403; docs.trae.cn/ide_skills). DeepSeek Harness
 // reads <projectRoot>/.dsh/skills and <projectRoot>/.agents/skills, the
 // project root being the nearest folder up from where it runs with a .git
 // in it, else that folder itself (the provider's roots and findProjectRoot,
@@ -139,6 +152,7 @@ var projectSkillsDirs = map[string]string{
 	"qoder-cn":    ".qoder/skills",
 	"codebuddy":   ".codebuddy/skills",
 	"commandcode": ".commandcode/skills",
+	"trae-cn":     ".trae/skills",
 }
 
 // ProjectSkillsDir is the folder, in a project, an agent reads its skills
@@ -199,9 +213,9 @@ func (l *Library) syncFolder(p *Project, res *Result, hubs map[string]*Server) {
 	}
 	want := map[string]string{} // entry → the skill
 	// the entries given as copies: all of them in a project that takes
-	// copies, else those an agent reads that skips a junction
-	// (skipsJunctions), which is magpie's link on Windows without the
-	// right to make a symlink
+	// copies, else those an agent reads that skips magpie's link there
+	// (projectCopies): Antigravity's on every system, and on Windows a
+	// junction, magpie's link without the right to make a symlink
 	copies := map[string]bool{}
 	for name, agents := range p.Skills {
 		if s := l.skill(name); s == nil || s.Dangling { // none, or its source is gone (skill_dangling.go)
@@ -211,7 +225,7 @@ func (l *Library) syncFolder(p *Project, res *Result, hubs map[string]*Server) {
 			if d := ProjectSkillsDir(id); d != "" {
 				e := d + "/" + name
 				want[e] = name
-				copies[e] = copies[e] || p.Copy || skipsJunctions(id)
+				copies[e] = copies[e] || p.Copy || projectCopies(id)
 			}
 		}
 	}
@@ -632,6 +646,20 @@ func ProjectCopy(dir string, copy bool) (*Result, error) {
 	})
 }
 
+// ProjectMainOnly sets whether a project's set stays in its own checkout:
+// on, the repository's other worktrees get none of it, and what magpie put
+// in them is taken out; off, they follow the project again (#7252).
+func ProjectMainOnly(dir string, on bool) (*Result, error) {
+	return change(func(l *Library) error {
+		p := l.project(dir)
+		if p == nil {
+			return fmt.Errorf("no project %s", dir)
+		}
+		p.MainOnly = on
+		return nil
+	})
+}
+
 // ProjectView is a project as the page shows it.
 type ProjectView struct {
 	Dir     string              `json:"dir"`
@@ -649,6 +677,8 @@ type ProjectView struct {
 	// Trees are the project's folder in the repository's other git
 	// worktrees, which follow it
 	Trees []string `json:"trees,omitempty"`
+	// MainOnly: the other worktrees get none of the project's set
+	MainOnly bool `json:"mainOnly,omitempty"`
 	// Subagents are the library's subagents the project has, for the
 	// agents named
 	Subagents map[string][]string `json:"subagents"`
@@ -665,8 +695,18 @@ type ProjectView struct {
 	// ClaudePlugins are the plugins Claude Code has installed that the
 	// project turns on for itself
 	ClaudePlugins []string `json:"claudePlugins"`
+	// ClaudeNative are, by plugin, the ids Claude Code loads the project's
+	// plugins under itself here: magpie doesn't give them to Claude Code
+	// in the project. ClaudeTwice are those given to Claude Code
+	// user-wide that it loads itself here alone, which run twice in the
+	// project (claude_native_overlap.go)
+	ClaudeNative map[string]string `json:"claudeNative,omitempty"`
+	ClaudeTwice  map[string]string `json:"claudeTwice,omitempty"`
 	// Pi are the Pi packages the project has by magpie (#7249)
 	Pi []ProjectPiView `json:"pi"`
+	// PiNotCarried are entries another build kept in the project's pi
+	// that magpie has no place for (#7282)
+	PiNotCarried []PiNotCarried `json:"piNotCarried,omitempty"`
 	// Hooks are the library's hooks the project has on their own, for
 	// the agents given
 	Hooks map[string][]string `json:"hooks"`
@@ -681,6 +721,7 @@ type ProjectView struct {
 
 func projectViews(l *Library, problems []Problem) []ProjectView {
 	out := []ProjectView{}
+	userNatives := l.claudeNatives("")
 	for _, p := range l.Projects {
 		v := ProjectView{Dir: p.Dir, Name: filepath.Base(p.Dir), Copy: p.Copy, Skills: map[string][]string{}, Placed: append([]string{}, p.Placed...)}
 		for k, a := range p.Skills {
@@ -717,7 +758,9 @@ func projectViews(l *Library, problems []Problem) []ProjectView {
 			v.Plugins[k] = append([]string{}, a...)
 		}
 		v.ClaudePlugins = append([]string{}, p.ClaudePlugins...)
+		v.ClaudeNative, v.ClaudeTwice = l.projectClaudeOverlap(p, userNatives)
 		v.Pi = append([]ProjectPiView{}, p.piViews()...)
+		v.PiNotCarried = p.PiNotCarried
 		v.Hooks = map[string][]string{}
 		for k, a := range p.Hooks {
 			v.Hooks[k] = append([]string{}, a...)
@@ -725,6 +768,7 @@ func projectViews(l *Library, problems []Problem) []ProjectView {
 		for _, t := range p.Trees {
 			v.Trees = append(v.Trees, t.Dir)
 		}
+		v.MainOnly = p.MainOnly
 		if fi, err := os.Stat(p.Dir); err != nil || !fi.IsDir() {
 			v.Missing = true
 		} else {

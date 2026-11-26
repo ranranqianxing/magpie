@@ -111,6 +111,35 @@ sync both ways throughout. A kept agent is not listed under Kept on this
 computer, which is the implicit own fields only (`TestAgentHereThroughSync`,
 `TestAgentsHereIsThisComputers`, `agent-here.test.cjs`).
 
+The providers' settings can be kept to each computer the same way, so that
+only the list and the keys sync (StudyingPython on X: "只希望同步供应商的key和列表，
+不希望同步供应商设置"). **Sync only the providers' list and API keys**, under
+Advanced in the sync form (`Config.ProviderSettingsHere`,
+`magpie s3 set provider-settings-here=yes`), is this computer's choice in
+sync.json, off by default and not in the setup text. The settings are the
+fields in [`provider.settingFields`](../../internal/provider/settings_here.go):
+model picks and model rules, on or off, routing, limits and rests, prices
+and balances, request options, headers, proxy and TLS options. What goes
+with a key still syncs: its URLs and API, the header it is sent in, the
+account behind it (AWS, Vertex, Zhipu's team), a client certificate and the
+server's pin, and a secret header (`SecretHeader`) among the headers.
+Which providers there are, their names and icons, their order and the
+routing groups sync too. `TestProviderFieldsSortedForSync` fails on a new
+field of `Provider` until it is put on one side. On, `withSettings` adds the
+`settingsOwn` sentinel to the own set: `withoutOwn` blanks every provider's
+settings in the hashes (`provider.WithoutSettings`), so a setting here is no
+change to push and the server's is none to bring; `keepServersOwn` puts the
+server's settings back into the providers this computer pushes, a provider
+the server lacks going up with this computer's; and `bring` mirrors with
+`provider.MirrorKeepingSettings`, which keeps the settings of a provider here
+and gives one new here the settings it came with. sync-state.json records
+the choice as of the last sync (`Settings`), as `Here` is, so turning it on
+or off is no change on either side. Turned off, the next change here goes up
+again. A Restore from the server keeps the settings too; a backup file's
+Restore and the Restore's Undo do not (`TestProviderSettingsStayOnEachComputer`,
+`TestModelPicksStayOnEachComputer`, `TestProviderSettingsHereTurnedOnSendsNothing`,
+`TestWithSettingsOf`, `sync-provider-settings-here.test.cjs`).
+
 A provider can also be kept on one computer
 ([`Provider.ThisDevice`](../../internal/provider/provider.go): the provider
 row's menu, `magpie provider this-device <id> yes|no`), for a local model that
@@ -266,13 +295,24 @@ clock.
   there on a schedule. Files are 0600 in a 0700 folder.
 - **Format:** `magpie-YYYYMMDD-HHMMSS[-n]-{auto,restore}.json`, holding the
   bundle and its sha256. Each is written to a `.magpie-backup-*.tmp` and
-  renamed into place. A file whose sum doesn't match, a temp file or a name
-  that doesn't match is never listed, restored or pruned.
+  renamed into place. A file whose sum doesn't match, or a temp file, is
+  never listed or restored; a name that doesn't match is never listed,
+  restored or pruned. A file is a regular one, or on Windows an irregular
+  one (a reparse point such as a cloud drive's placeholder); never a folder
+  or a link (`autoFileType`).
 - **Schedule:** a backup is due `Hours` after the newest, so a restart
   doesn't make one early; one whose bundle equals the newest's is not
-  written. After a write the oldest `-auto` files past `Keep` are removed
-  (and `-restore` ones past `Keep` after a restore), with its own temp files
-  over an hour old; other files in the folder are never touched.
+  written.
+- **Pruning** (`pruneAuto`, WuMark1218 on X): at every look of the
+  schedule (every 10 minutes, made or not) and after each write, per reason
+  (`-auto`, `-restore`), files at a backup's name are ordered by the stamp
+  in their name; the newest `Keep` that read whole are kept and every file
+  of that reason older than the last of them is removed, read or not. One
+  that doesn't read whole and is newer than those stays (unknown). Before,
+  only files that read whole were counted and removed, and only after a
+  write, so a damaged pile, or the extra versions after Keep was lowered,
+  stayed. Temp files over an hour old go too; other files in the folder are
+  never touched.
 - **Restore:** `AutoRestore(name)` first writes a `-restore` backup of what
   is here (and stops if that fails), then `Restore(bundle, All)`, which is
   additive: providers added since stay, each keeps its local key. Restoring

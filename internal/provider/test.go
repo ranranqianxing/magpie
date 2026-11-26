@@ -566,12 +566,12 @@ func (p Provider) testOne(ctx context.Context, model string) Result {
 		// the account the user picked to test (TestOn)
 		var found bool
 		if acct, found = p.accountNamed(ref); !found {
-			return Result{Model: model, Error: fmt.Sprintf("no account %q that's on", ref)}
+			return Result{Model: model, Error: fmt.Sprintf("no account %q", ref)}
 		}
 	} else if ref != "" {
 		var found bool
 		if p, found = p.keyNamed(ref); !found {
-			return Result{Model: model, Error: "no such key that's on"}
+			return Result{Model: model, Error: "no such key"}
 		}
 		acct = p
 	} else {
@@ -1172,6 +1172,9 @@ func probeOnce(ctx context.Context, p Provider, proto Protocol, url string, body
 	}
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 	r.Error = APIError(b, res.Status)
+	if hint := p.NoCreditHint(res.StatusCode, b); hint != "" {
+		r.Error += " — " + hint
+	}
 	if p.IsPlugin() && res.StatusCode == http.StatusServiceUnavailable && res.Header.Get("Retry-After") != "" && strings.Contains(strings.ToLower(r.Error), "queued") {
 		// asked not to wait (FallbackHeader), a plugin says its vendor's
 		// queue at once. A model in a queue is served, and an agent's

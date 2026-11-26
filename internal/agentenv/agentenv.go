@@ -32,6 +32,9 @@ var Vars = []string{
 	"CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME", "COPILOT_PROVIDERS_CONFIG",
 	// Claude Code's temp folder, the images its sessions were given
 	"CLAUDE_CODE_TMPDIR",
+	// the Git Bash Claude Code runs hooks in on Windows, which magpie's split
+	// plugin hooks are written for
+	"CLAUDE_CODE_GIT_BASH_PATH",
 	// Zed, or a fork of it that keeps its settings (ZedG)
 	"MAGPIE_ZED_BIN", "MAGPIE_ZED_CONFIG_DIR", "MAGPIE_ZED_PROCESS_NAMES",
 	// Codex's state database, when it is kept apart from CODEX_HOME
@@ -108,6 +111,8 @@ var Vars = []string{
 	"OPENCLAW_CONFIG_PATH", "OPENCLAW_STATE_DIR", "OPENCLAW_PROFILE", "OPENCLAW_HOME",
 	// MiMo Code, MiniMax Code, OpenHanako, Hermes, dsh, WorkBuddy, CodeBuddy Code
 	"MIMOCODE_HOME", "MINIMAX_DATA_DIR", "MAVIS_DATA_DIR", "HANA_HOME", "PASEO_HOME", "HERMES_HOME", "DSH_HOME",
+	// dsh-web's search provider, which magpie leaves to the user when set
+	"DSH_WEB_SEARCH_PROVIDER",
 	"WORKBUDDY_CONFIG_DIR", "CODEBUDDY_CONFIG_DIR",
 	// DS Bot's data folder, and its Electron userData holding locations.json
 	"DS_BOT_HOME", "DS_BOT_SHELL_DATA",

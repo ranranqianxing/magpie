@@ -36,7 +36,9 @@ const providerUsage = `usage:
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
                                           again, it adds another (deepseek-2); k=v pairs too: id, name, header.X-Foo
   magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, gemini, decide, key, models, catalog, icon, header.X-Foo, balance, balance.path, balance.method, balance.token, models.url, list, search, user-agent,
-                                          access.key, access.secret (a Volcengine access key, or a Tencent Cloud SecretId and SecretKey, for its plan's windows)
+                                          access.key, access.secret (a Volcengine access key, or a Tencent Cloud SecretId and SecretKey, for its plan's windows;
+                                          on Amazon Bedrock an AWS access key, which signs requests in place of an API key),
+                                          access.token (a temporary AWS access key's session token)
   magpie provider set <id> k=v…           change a provider's settings, with the same k=v pairs as add;
                                           codex=as-sent sends Codex's Responses requests as Codex sent them
                                           (a relay that checks they are Codex's own), codex=default fits them;
@@ -62,6 +64,10 @@ const providerUsage = `usage:
                                           image-files=off sends DeepSeek's API an agent's images inline on every
                                           turn; image-files=on, the default, uploads each once (for a day)
                                           and names it by its file id
+                                          addresses=<url>[,<url>…], on a Remote magpie, its other addresses (the same
+                                          computer through Tailscale, EasyTier…): a request goes to the one that
+                                          last answered, and on to the next when it takes no connection;
+                                          addresses= clears them
                                           upstream-providers=on, on a Remote magpie, names its models by the
                                           provider serving each there (Claude · Office › RelayA); off, the
                                           default, as that magpie's own list names them
@@ -115,10 +121,11 @@ const providerUsage = `usage:
                                           how much an API key may spend, in USD as the Usage page prices its calls,
                                           a day (the default), a month or in all from now: at it, routing takes the
                                           key for used up and goes on to the other keys and the fallbacks
-  magpie provider key-rate <id> [key [rate|default]]
+  magpie provider key-rate <id> [key [rate|default | factor <f>|default]]
                                           the price rate one API key bills at against the official price, as a relay
                                           bills its key groups apart (e.g. 0.5): the Usage page counts that key's calls
-                                          at it; default has it bill at the provider's rate
+                                          at it; default has it bill at the provider's rate. factor multiplies a rate
+                                          read from the relay (top-up rate) for that key, e.g. 1.5; default for none
   magpie provider key-balance <id> [key [usd|¥cny|off] [--refill monthly[:day]|weekly[:mon…sun]|daily|off] [--expiring amount@yyyy-mm-dd|off]… [--expiring-remove [amount@]yyyy-mm-dd]…]
                                           the balance on an API key whose vendor tells none, typed from its own page
                                           in USD or in yuan (¥100): the Usage page shows it less what magpie prices the
@@ -188,6 +195,9 @@ const providerUsage = `usage:
        magpie provider set my-relay resolve.relay.example.com=10.0.0.5,dns:gw.corp.example
                                    (Advanced › Connect to: connects to 10.0.0.5, then gw.corp.example's
                                     address, while TLS and Host still say relay.example.com)
+       magpie provider set office addresses=http://100.101.2.3:3425,http://10.144.0.2:3425
+                                   (Advanced › Other addresses: the office magpie through Tailscale and
+                                    EasyTier, asked when its own address takes no connection)
        magpie provider set my-relay search=yes
                                    (the relay answers Claude Code's WebSearch and Codex's web search itself, web_search
                                     and web.run's /alpha/search: those go to it as sent, not through magpie's search)
@@ -546,6 +556,9 @@ func providerCmd(args []string) error {
 		if !slices.Equal(before.Models, p.Models) {
 			// models= replaces the picks, as provider models does
 			printPicksChange(before, *p, nil)
+			if err := joinPicks(*p, &before); err != nil {
+				return err
+			}
 		}
 		return nil
 	case "key":
@@ -807,6 +820,9 @@ func providerCmd(args []string) error {
 				return err
 			}
 			printPicksChange(before, *p, rest[1:])
+			if err := joinPicks(*p, &before); err != nil {
+				return err
+			}
 			return showProvider(*p)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -889,6 +905,23 @@ func saveNew(p provider.Provider) error {
 	return announce(id)
 }
 
+// joinPicks ticks p's models picked since before for the agents shown
+// only their picks that take a provider's in (eiyuuzaki2333 on X), and
+// says which.
+func joinPicks(p provider.Provider, before *provider.Provider) error {
+	if q, err := provider.Find(p.ID); err == nil {
+		p = *q // as saved: a remote magpie's pick its list dropped is set aside (goneKeptAside)
+	}
+	joined, err := provider.JoinPicks(p, before)
+	if err != nil {
+		return err
+	}
+	if len(joined) > 0 {
+		fmt.Println(green.Render("✓"), "picked for", strings.Join(joined, ", "), "too")
+	}
+	return nil
+}
+
 // announce says a provider was added and asks the vendor for its models.
 func announce(id string) error {
 	saved, err := provider.Find(id)
@@ -896,6 +929,9 @@ func announce(id string) error {
 		return err
 	}
 	fmt.Println(green.Render("✓"), "added", saved.Name, muted.Render("("+saved.ID+")"))
+	if err := joinPicks(*saved, nil); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if saved.ListsOff() {
@@ -1261,11 +1297,16 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			p.BalanceToken = v
 		case "access.key":
 			// a Volcengine account's access key, which Ark tells its
-			// Coding or Agent Plan's windows to (#1427), or a Tencent Cloud
-			// SecretId, which TokenHub tells Token Plan 企业版's usage to (#1574)
+			// Coding or Agent Plan's windows to (#1427), a Tencent Cloud
+			// SecretId, which TokenHub tells Token Plan 企业版's usage to
+			// (#1574), or an AWS access key, which signs Bedrock's
+			// requests (#7687)
 			p.AccessKeyID = v
 		case "access.secret":
 			p.SecretAccessKey = v
+		case "access.token":
+			// a temporary AWS access key's session token (#7687)
+			p.SessionToken = v
 		case "models.url":
 			p.ModelsURL = v
 		case "list":
@@ -1301,6 +1342,13 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			default:
 				return fmt.Errorf("image-files=on|off, not %q", v)
 			}
+		case "addresses":
+			// a Remote magpie's other addresses (Provider.Addresses,
+			// evjohnicu on X); empty clears them
+			if !p.IsRemoteMagpie() {
+				return fmt.Errorf("addresses are a Remote magpie's; %s is not one", p.ID)
+			}
+			p.Addresses = strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' })
 		case "upstream-providers":
 			// on: a Remote magpie's models named by the provider serving
 			// each there (Provider.UpstreamProviders, lcc580 on X)
@@ -1829,6 +1877,16 @@ func importCmd(args []string) error {
 	}
 	if link == "" {
 		return errors.New("magpie import [-y] 'magpie://import?…'")
+	}
+	// a plugin link installs nothing by itself, here too: it says how
+	if plugin.IsLink(link) {
+		name, err := plugin.ParseLink(link)
+		if err != nil {
+			return err
+		}
+		fmt.Println("The link names the plugin " + name + ". Read what it does, then install it with:")
+		fmt.Println("  magpie plugin add " + name)
+		return nil
 	}
 	p, err := provider.ParseImport(link)
 	if err != nil {
@@ -2498,6 +2556,10 @@ func editPicks(p provider.Provider, args []string) ([]string, error) {
 // models were exposed before and after, and which went or came. A list
 // that replaced the old one says so, and how to add one instead.
 func printPicksChange(before, after provider.Provider, args []string) {
+	asked := after.Models
+	if q, err := provider.Find(after.ID); err == nil {
+		after = *q // as saved: a remote magpie's pick its list dropped is set aside (goneKeptAside)
+	}
 	ids := func(p provider.Provider) []string {
 		var out []string
 		for _, m := range p.Exposed() {
@@ -2548,6 +2610,11 @@ func printPicksChange(before, after provider.Provider, args []string) {
 	for _, id := range added {
 		if len(avail) > 0 && !avail[id] {
 			fmt.Println(" ", amber.Render("!"), after.ID+"/"+id, muted.Render("isn't in "+after.Name+"'s list; exposed as given"))
+		}
+	}
+	for _, id := range asked {
+		if !slices.Contains(after.Models, id) && slices.Contains(after.Delisted, id) {
+			fmt.Println(" ", amber.Render("!"), after.ID+"/"+id, muted.Render("left "+after.Name+"'s list; set aside until it lists it again"))
 		}
 	}
 }

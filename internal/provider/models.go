@@ -42,7 +42,7 @@ func (p Provider) Available() []catalog.Model {
 		// a gateway's Jev among its chat models, with its window and input
 		ms = slices.Clone(ms)
 		for i, m := range ms {
-			if p.isDecision(m) {
+			if p.isDecision(m) && !p.ChatsToo(m.ID) {
 				ms[i] = withDecideFacts([]catalog.Model{m})[0]
 			}
 		}
@@ -850,6 +850,10 @@ type fetched struct {
 // of the agents' model lists and of a model's own protocol setting.
 func (p Provider) fetchOne(ctx context.Context) (fetched, error) {
 	ctx = p.ownRequests(ctx, probelog.KindList) // a detection's list too
+	if p.SignsWithAccessKey() {
+		// Mantle's list, signed as its requests are (#7687)
+		ctx = catalog.WithListSigner(ctx, func(r *http.Request) error { return p.signAWS(r, nil) })
+	}
 	if u := strings.TrimSpace(p.ModelsURL); u != "" {
 		// asked where the user said, and nowhere else: the base URLs
 		// list nothing, or the wrong thing
@@ -2114,20 +2118,55 @@ func (p Provider) Thinks(model string) bool {
 }
 
 // PaidBesideFree says model costs its subscription's credits while the
-// subscription serves other models at no cost to them (catalog.Model's
-// Free: WorkBuddy's "x0.00", Qoder's is_free, Cline's free models). Its
-// credits running out then says nothing of those: they draw on none
-// (Creat.wu on Discord). False for a model not on the list, or where no
-// model is free.
+// subscription serves other models at no cost to them (costsNothing:
+// WorkBuddy's "x0.00", Qoder's is_free, Cline's free models, OpenCode Go's
+// and Zen's). Its credits or windows running out then say nothing of
+// those: they draw on none (Creat.wu on Discord; Go's "If you reach the
+// usage limit, you can continue using the free models", #7496). False for
+// a model not on the list, or where no model is free.
 func (p Provider) PaidBesideFree(model string) bool {
-	listed, paid, free := false, false, false
+	listed, free, freeToo, _ := p.freeBeside(model)
+	return listed && !free && freeToo
+}
+
+// FreeBesidePaid says model is one OpenCode serves at no cost
+// (costsNothing) beside models that cost: a refusal of it for credit or
+// quota is its own, as it draws on neither, and says nothing of the
+// others (ggbdpq, #7496). OpenCode's alone: WorkBuddy refuses even its
+// 0-rate models to an account with no package, a refusal of the account.
+func (p Provider) FreeBesidePaid(model string) bool {
+	listed, free, _, paidToo := p.freeBeside(model)
+	return listed && free && paidToo && p.IsOpenCode()
+}
+
+// freeBeside is whether p lists model, whether it costs nothing there
+// (costsNothing), and whether p lists another model that does, and one
+// that doesn't.
+func (p Provider) freeBeside(model string) (listed, free, freeToo, paidToo bool) {
 	for _, m := range p.Available() {
-		if strings.EqualFold(m.ID, model) {
-			listed, paid = true, !m.Free
+		f := p.costsNothing(m)
+		switch {
+		case strings.EqualFold(m.ID, model):
+			listed, free = true, f
+		case f:
+			freeToo = true
+		default:
+			paidToo = true
 		}
-		free = free || m.Free
 	}
-	return listed && paid && free
+	return listed, free, freeToo, paidToo
+}
+
+// costsNothing says p serves m at no cost to its allowance or credits by
+// its vendor's word: catalog.Model's Free (WorkBuddy's "x0.00", Qoder's
+// is_free, Cline's free models, OpenCode Go's "monthly_usage": null), or,
+// at OpenCode, one of Zen's free models (OpenCodeFree) or of Go's
+// (openCodeGoFree), for a list saved before Go's word was read from it.
+// Not the user's CountFree, which says how Usage counts the provider and
+// nothing of what the vendor holds back, nor another vendor's $0 price:
+// a free tier priced 0 may still draw on the key's limits.
+func (p Provider) costsNothing(m catalog.Model) bool {
+	return m.Free || p.IsOpenCode() && (p.OpenCodeFree(m.ID) || p.openCodeGoFree(m.ID))
 }
 
 // FreeModel says model costs nothing on p: its vendor serves it at no cost
@@ -2821,7 +2860,9 @@ func (p Provider) factoryFastPrice(model string) (catalog.Price, bool) {
 // MiMo's three Token Plan catalogs list all nine of its models at $0 too,
 // and stood before xiaomi's own prices, so a pay-as-you-go call was
 // counted at $0 (#1873, mengyianx).
-var membershipCatalogs = append(slices.Clone(kimiCodePlans), "xiaomi-token-plan-cn", "xiaomi-token-plan-sgp", "xiaomi-token-plan-ams")
+// Zhipu's and Z.ai's GLM Coding Plan catalogs list theirs at $0 too.
+var membershipCatalogs = append(slices.Clone(kimiCodePlans), "xiaomi-token-plan-cn", "xiaomi-token-plan-sgp", "xiaomi-token-plan-ams",
+	"zhipuai-coding-plan", "zai-coding-plan")
 
 // kimiCodePlans are Kimi Code's membership catalogs, whose models are
 // priced as the Kimi API's (kimiCodeAPI).
@@ -2872,6 +2913,69 @@ func MakerPrice(model string) (catalog.Price, bool) {
 		return MakerPrice(f)
 	}
 	return catalog.Price{}, false
+}
+
+// KimiCodeSessionModel is the Kimi Code model a call in Kimi Code's own
+// session file was made on, when it names one: its wire file names the
+// call's model by the key of its [models."…"] table, and a Kimi Code
+// sign-in keys them "kimi-code/<model>" ("kimi-code/k3-256k", its
+// provider "managed:kimi-code"). The part before the slash is Kimi Code's
+// own name, not a provider of magpie's: the reporter's sign-in is magpie's
+// Kimi Code (China), "kimi-code-cn".
+func KimiCodeSessionModel(model string) (string, bool) {
+	pid, id, ok := strings.Cut(strings.TrimSpace(model), "/")
+	if !ok || (pid != "kimi-code" && pid != "kimi-code-cn") || id == "" || strings.Contains(id, "/") {
+		return "", false
+	}
+	return id, true
+}
+
+// KimiCodeSessionPrice is what a call Kimi Code made on its own sign-in,
+// not through magpie, costs the user (#3331, westlinkin): its model as the
+// session file names it, "kimi-code/k3-256k". It is priced as a call to a
+// Kimi Code membership the user has added, the one whose id the name
+// begins with first: the price they set for the model there (or for every
+// model of it, or for the model at any provider), the first membership
+// with one, else the first membership's price for it (the Kimi API model
+// it is, kimiCodeAPI), each with that membership's windows. With none
+// added it is the Kimi API model's list price (VectorLu), and a model the
+// API doesn't sell (kimi-for-coding) stays unpriced. A model that isn't a
+// Kimi Code sign-in's is false.
+func KimiCodeSessionPrice(s settings.Settings, model string) (catalog.Price, bool, []RateWindow) {
+	id, ok := KimiCodeSessionModel(model)
+	if !ok {
+		return catalog.Price{}, false, nil
+	}
+	pid, _, _ := strings.Cut(strings.TrimSpace(model), "/")
+	// the one named first, then the rest in the user's order
+	var members, rest []Provider
+	for _, p := range All() {
+		switch {
+		case !p.kimiCodeMember():
+		case p.ID == pid:
+			members = append(members, p)
+		default:
+			rest = append(rest, p)
+		}
+	}
+	members = append(members, rest...)
+	for _, p := range members {
+		if pr, ok := userPrice(s, p, id); ok {
+			pr.Peak = p.PeakOf(id)
+			return pr, true, p.RateWindows
+		}
+	}
+	for _, p := range members {
+		if pr, ok := tariffOf(s, p, true, id); ok {
+			return pr, true, p.RateWindows
+		}
+	}
+	if api, ok := kimiCodeAPI[strings.ToLower(id)]; ok {
+		if pr, ok := makerListPrice(api); ok {
+			return pr, true, nil
+		}
+	}
+	return catalog.Price{}, false, nil
 }
 
 // makerListPrice is a model id's list price at its maker: the price of
@@ -3359,31 +3463,41 @@ func pricedNamesTo(dst []string, model string) []string {
 }
 
 // geminiTrialBase is the Gemini model the lower-cased id l is the trial
-// access of (ownsh1p on X: Usage showed gemini-4-argon-trial with tokens and
-// no cost): the id without its -trial, at an effort after it too
-// (gemini-4-argon-trial-high). Google's Antigravity models page
+// access, or the tiered id, of: the id without its -trial or -tiered, at an
+// effort after it too (gemini-4-argon-trial-high, gemini-4-hydrogen-tiered-high).
+//
+// -trial (ownsh1p on X: Usage showed gemini-4-argon-trial with tokens and
+// no cost): Google's Antigravity models page
 // (https://antigravity.google/docs/models/, read 2026-11-16) gives Gemini 4
 // Argon to "paid Google AI Pro plans or on trial with eligible premium
 // devices": the same model, reached on a trial, so its calls are estimated
-// at the model's list price as a paid plan's are. Only a gemini- id: a
-// -trial of another vendor's (ZCode's glm-5.3-trial, grok-4.7-trial) is
-// that vendor's own offer and keeps no price it doesn't list.
+// at the model's list price as a paid plan's are.
+//
+// -tiered (kekao on Discord: gemini-4-hydrogen-tiered-high showed no
+// price): Antigravity's one id of a model that thinks at the level the
+// request asks (collapseAntigravityModels), named "<model> (Tiered)", so
+// it is priced as that model.
+//
+// Only a gemini- id: a -trial or -tiered of another vendor's (ZCode's
+// glm-5.3-trial, grok-4.7-trial) is that vendor's own offer and keeps no
+// price it doesn't list.
 func geminiTrialBase(l string) (string, bool) {
-	if !strings.Contains(l, "-trial") {
+	if !strings.Contains(l, "-tri") && !strings.Contains(l, "-tie") {
 		return "", false // every model of every provider's list is priced on each poll
 	}
 	last := l[strings.LastIndexByte(l, '/')+1:]
 	if !strings.HasPrefix(last, "gemini-") {
 		return "", false
 	}
-	if base, ok := strings.CutSuffix(l, "-trial"); ok {
-		return base, true
-	}
-	i := strings.LastIndexByte(l, '-')
-	switch l[i+1:] {
-	case "minimal", "low", "medium", "high", "xhigh":
-		if base, ok := strings.CutSuffix(l[:i], "-trial"); ok {
-			return base + l[i:], true
+	for _, word := range []string{"-trial", "-tiered"} {
+		if base, ok := strings.CutSuffix(l, word); ok {
+			return base, true
+		}
+		// at an effort after it, Antigravity's extra-high too
+		if e, ok := effortBase(l); ok {
+			if base, ok := strings.CutSuffix(e, word); ok {
+				return base + l[len(e):], true
+			}
 		}
 	}
 	return "", false
@@ -3828,7 +3942,7 @@ func entriesOf(of func(Provider) bool, off func(pid, model string) bool) []Entry
 			if off(p.ID, m.ID) { // the user turned it off (#1867)
 				continue
 			}
-			if !p.isDecision(m) && !gone[p.ID+"/"+m.ID] {
+			if (!p.isDecision(m) || p.ChatsToo(m.ID)) && !gone[p.ID+"/"+m.ID] {
 				out = append(out, sharedEntry(&p, m, s))
 			}
 		}
@@ -3849,18 +3963,10 @@ func InputsOf(m catalog.Model) []string {
 	return catalog.InputsOf(m.ID)
 }
 
-// entryFor is one of a provider's models as the catalog carries it: the
-// window and the reply limit a request on it is routed and metered against,
-// with what the user set taken over the vendor's list and models.dev.
-func entryFor(p Provider, m catalog.Model, s settings.Settings) Entry {
-	return sharedEntry(&p, m, s)
-}
-
-// sharedEntry is entryFor that keeps p itself in the entry, so every model of
-// one provider shares one Provider (1.3KB each) instead of a copy a model.
-func sharedEntry(p *Provider, m catalog.Model, s settings.Settings) Entry {
-	ctx := p.windowIn(m, s)
-	output := p.replyLimit(m, s)
+// imagesIn is whether p's model m takes images, and the explicit answer
+// behind it (nil when unknown): the source's word, else the catalog's,
+// with the user's own setting over both.
+func imagesIn(p *Provider, m catalog.Model, s settings.Settings) (bool, *bool) {
 	images := m.Images || catalog.SeesImages(m.ID)
 	if m.ImageInput != nil {
 		images = *m.ImageInput
@@ -3869,6 +3975,36 @@ func sharedEntry(p *Provider, m catalog.Model, s settings.Settings) Entry {
 	if override, ok := s.ModelImages[p.ID+"/"+m.ID]; ok {
 		images, imageInput = override, &override
 	}
+	return images, imageInput
+}
+
+// entryFor is one of a provider's models as the catalog carries it: the
+// window and the reply limit a request on it is routed and metered against,
+// with what the user set taken over the vendor's list and models.dev.
+func entryFor(p Provider, m catalog.Model, s settings.Settings) Entry {
+	return sharedEntry(&p, m, s)
+}
+
+// EntriesOf is each of ms, models of p, as the catalog carries a model it
+// lists (sharedEntry): its name, levels, window and reply limit with the
+// user's settings over the vendor's list, the settings read once for them
+// all. ms may go past what agents are offered: the gateway's account list
+// tells every model of p's Available() in /v1/models' shape.
+func EntriesOf(p Provider, ms []catalog.Model) []Entry {
+	s := settings.Load()
+	out := make([]Entry, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, sharedEntry(&p, m, s))
+	}
+	return out
+}
+
+// sharedEntry is entryFor that keeps p itself in the entry, so every model of
+// one provider shares one Provider (1.3KB each) instead of a copy a model.
+func sharedEntry(p *Provider, m catalog.Model, s settings.Settings) Entry {
+	ctx := p.windowIn(m, s)
+	output := p.replyLimit(m, s)
+	images, imageInput := imagesIn(p, m, s)
 	// a model its vendor lists with no name is called by its id: unnamed,
 	// an agent's list showed the whole magpie/<provider>/<model> (#955)
 	name := cmp.Or(m.Name, m.ID)
@@ -4054,7 +4190,7 @@ func resolveIn(entries []Entry, id string) (Provider, string, bool) {
 	// value no entry has (an agent's bare "gpt-5.5"), every provider's whole
 	// list was 835 MB of a live magpie's 33 GB in 53 minutes
 	for _, p := range heldOf("listed", func() map[string][]*Provider { return keptOf("listed", listedBy) })[id] {
-		if !p.DecidesModel(id) {
+		if !p.OnlyDecides(id) {
 			found = append(found, *p)
 		}
 	}

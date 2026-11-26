@@ -37,10 +37,14 @@ const groupUsage = `usage:
                                           id (what agents pick it as: id=gpt-6-astra drops auto-; the groups
                                           it is in follow; an agent set to the old id needs setting again),
                                           effort=auto (the classifier picks each turn's reasoning; needs classifier=),
-                                          effort=agent (the agent's again), classifier=<provider/model>|group/<id>,
+                                          effort=agent (the agent's again), classifier=<provider/model>|group/<id>
+                                          (or several, a,b: b asked when a can't answer),
                                           intent-sure=<0…1> (how sure the classifier must be of an intent for it
                                           to count; 0 takes its likeliest however unsure, "none of these" never
                                           counting; empty is the 0.4 groups have always asked),
+                                          classify-prompt="<text>" (your own instructions to the classifier on
+                                          telling the intents apart, in place of magpie's; it still answers with
+                                          the intent's number; empty keeps magpie's),
                                           pick=<model> (routing=manual, every request to that one of its models),
                                           fast=<m1>[,m2…] (the models sent in their vendor's fast mode; empty for none),
                                           ultra=<m1>[,m2…] (those of them sent in the faster Ultrafast mode of a ChatGPT
@@ -563,8 +567,9 @@ func applyGroupPairs(g *provider.Group, pairs []string, resolve func(string) (st
 			default:
 				err = fmt.Errorf("effort=auto (the classifier picks each turn's) or effort=agent (the agent's), not %q", v)
 			}
-		case "classifier", "classify":
-			g.Classifier = strings.TrimPrefix(strings.TrimSpace(v), "magpie/")
+		case "classifier", "classify", "classifiers":
+			// classifier=a,b: a first, b when a can't answer
+			g.SetClassifiers(strings.Split(v, ","))
 		case "intent-sure", "intentsure":
 			// how sure the classifier must be of an intent for it to count
 			// (#5101): 0 takes its likeliest however unsure, "none of
@@ -580,6 +585,10 @@ func applyGroupPairs(g *provider.Group, pairs []string, resolve func(string) (st
 				break
 			}
 			g.IntentSure = &sure
+		case "classify-prompt", "classifyprompt", "classifier-prompt":
+			// the user's own instructions to the classifier, in place of
+			// magpie's (sloceanxc on X); empty keeps magpie's
+			g.ClassifyPrompt = strings.TrimSpace(v)
 		case "fast":
 			// the members sent in their vendor's fast mode, as they are in
 			// the group
@@ -635,7 +644,7 @@ func applyGroupPairs(g *provider.Group, pairs []string, resolve func(string) (st
 			g.Pick, err = pickMember(g.Members, v)
 			g.Routing = provider.Manual
 		default:
-			return fmt.Errorf("unknown field %q (fields: name, note, models, models+, models-, routing, pick, stays, context, levels, family, effort, classifier, intent-sure, fast, weight, listed; magpie group help)", k)
+			return fmt.Errorf("unknown field %q (fields: name, note, models, models+, models-, routing, pick, stays, context, levels, family, effort, classifier, intent-sure, classify-prompt, fast, weight, listed; magpie group help)", k)
 		}
 		if err != nil {
 			return err
@@ -1163,7 +1172,12 @@ func groups() error {
 	names, uses := catalogByID(), groupUses()
 	for _, e := range provider.Served() {
 		if e.Group != "" {
-			names[e.ID] = e // a group in a group is served when it is
+			// a group in a group is served when it is. The catalog lists a
+			// found group by its public auto/<model>, while a group's
+			// members keep group/auto-<slug> (Will on Discord: a group of
+			// found groups read each "not served", "no member ready")
+			names[e.ID] = e
+			names[provider.GroupPrefix+e.Group] = e
 		}
 	}
 	type row struct{ name, id, how, members, uses, note string }
@@ -1337,10 +1351,13 @@ func showGroup(g provider.Group) error {
 		if !slices.ContainsFunc(g.Rules, func(r provider.Rule) bool { return r.Intent != "" }) {
 			what = "  rates how hard each turn is"
 		}
-		kv("classifier", g.Classifier+muted.Render(what))
+		kv("classifier", strings.Join(g.Classifiers(), ", ")+muted.Render(what))
 	}
 	if g.IntentSure != nil {
 		kv("intent-sure", fmt.Sprintf("%g", *g.IntentSure)+muted.Render("  how sure the classifier must be of an intent for it to count; 0 takes its likeliest"))
+	}
+	if g.ClassifyPrompt != "" {
+		kv("classify-prompt", g.ClassifyPrompt+muted.Render("  the classifier's instructions, in place of magpie's"))
 	}
 	if u := groupUses()[g.ID]; len(u) > 0 {
 		kv("used by", green.Render(strings.Join(u, ", ")))
@@ -1382,7 +1399,7 @@ func templateCmd(rest []string) error {
 			}
 			fmt.Println("  " + strings.Join(tp.Group.Members, " → "))
 			if tp.Group.Classifier != "" {
-				fmt.Println("  " + muted.Render("classifier "+tp.Group.Classifier))
+				fmt.Println("  " + muted.Render("classifier "+strings.Join(tp.Group.Classifiers(), ", ")))
 			}
 		}
 		fmt.Println(muted.Render("magpie group template <kind> [name] adds one"))

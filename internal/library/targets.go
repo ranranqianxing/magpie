@@ -31,8 +31,14 @@ type Target struct {
 	// Field, when it is set, says the instructions are not the file itself
 	// but the string at this key path of the JSON file Instructions names
 	// (WorkBuddy's personalization.customPrompt): instr_field.go.
-	Field  string
-	MCP    *mcpFile
+	Field string
+	MCP   *mcpFile
+	// MCP2 is a second MCP file for an agent that runs more than one
+	// runtime, each reading its own format: Cindy's Pi reads
+	// pi-agent-home/mcp.json (fmtPiNative) beside its Codex config.toml.
+	// syncMCP2 writes the same servers there, tracked by the applied list
+	// MCP shares.
+	MCP2   *mcpFile
 	Skills string // the folder the agent finds skills in
 	// SkillsAlso are agents whose skills this one reads as well, as
 	// OpenCode reads Claude Code's.
@@ -394,8 +400,27 @@ func targetOf(a *agent.Agent) *Target {
 		t.MCP = &mcpFile{Path: filepath.Join(h, ".config", "alma", "mcp.json"), Format: fmtAlma}
 		t.SkillsAlso = []string{"claude", "codex"}
 	case "cindy":
-		// Cindy keeps its user-wide skills in ~/.agents/skills
+		// Cindy keeps its user-wide skills in ~/.agents/skills. Its Codex
+		// runs with CODEX_HOME at codex-home in its data folder
+		// (getDesktopCodexHome, getAuthEnv in Cindy 0.1.94's app.asar),
+		// and copies only plugin entries into that config.toml from
+		// ~/.codex's, so Codex's servers never reached a Codex session in
+		// Cindy (sunset on Discord): its [mcp_servers] there are its own.
+		// Cindy's own block in it (cindy-remote-mcp) is written only into
+		// remote hosts' configs. Its Claude Code reads the user's
+		// ~/.claude.json, Claude Code's own; a ChatGPT account added in
+		// Cindy runs Codex in a home of its own (codex-accounts), not given.
 		t.Skills = sharedSkillsDir()
+		if a.Dir != "" {
+			t.MCP = &mcpFile{Path: filepath.Join(a.Dir, "codex-home", "config.toml"), Format: fmtCodex}
+			// Cindy's Pi runs with PI_CODING_AGENT_DIR at pi-agent-home in
+			// the same folder (reconcilePiDurableRuns, the CINDY_PI_API_KEY
+			// env block in Cindy 0.1.94's app.asar); native Pi reads its
+			// servers from mcp.json there (pimcp.go), its own JSON shape, so
+			// the Codex-only write never reached a Cindy Pi session, Cindy's
+			// default runtime (POM_JUMPING on X, v0.1.4777).
+			t.MCP2 = &mcpFile{Path: filepath.Join(a.Dir, "pi-agent-home", "mcp.json"), Format: fmtPiNative}
+		}
 	case "craft-agents":
 		// Craft Agents reads user-wide skills from ~/.agents/skills
 		// (skills/storage.ts, GLOBAL_AGENT_SKILLS_DIR) beside its
@@ -627,6 +652,16 @@ func targetOf(a *agent.Agent) *Target {
 		t.Instructions = filepath.Join(d, "steering", "AGENTS.md")
 		t.MCP = &mcpFile{Path: filepath.Join(d, "settings", "mcp.json"), Format: fmtKiro}
 		t.Skills = filepath.Join(d, "skills")
+	case "trae-cn":
+		// TRAE CN 2.3.105403 reads its skills from <home>/<dataFolderName>/
+		// skills, ~/.trae-cn/skills (docs.trae.cn/ide_skills), and the
+		// mcpServers of mcp.json in its userData's User folder, with a JSONC
+		// parser and a watch on the file (apps). Its skills are found by a
+		// loader in its Rust agent (libai_agent) that nothing shows
+		// following a link, so it gets copies (takesCopies)
+		t.MCP = &mcpFile{Path: a.Path, Format: fmtTrae}
+		t.Skills = filepath.Join(h, ".trae-cn", "skills")
+		t.Copy = takesCopies(a.ID)
 	case "liveagent":
 		// LiveAgent's engine, K-brain, keeps its MCP servers in
 		// config.json.live-mcp.json beside its config.json, in the folder
@@ -992,6 +1027,18 @@ func apps() []*agent.Agent {
 		bin = "kiro-cli"
 	}
 	out = append(out, &agent.Agent{ID: "kiro-cli", Name: "Kiro CLI", Icon: "kiro-color", Bin: bin})
+	// TRAE CN (#5889), ByteDance's VS Code fork, is no agent magpie wires
+	// a model into either. It is found by its Electron userData, named for
+	// its product.json nameShort "Trae CN" (~/Library/Application
+	// Support/Trae CN, %APPDATA%\Trae CN, ~/.config/Trae CN), which holds
+	// the user-wide mcp.json it reads (TRAE CN 2.3.105403's workbench:
+	// joinPath(userSettingsResource, "..", "mcp.json")). Its skills are
+	// in ~/.trae-cn, a folder named for its dataFolderName that the
+	// international Trae's ~/.trae is not
+	if d, err := os.UserConfigDir(); err == nil {
+		dir := filepath.Join(d, "Trae CN")
+		out = append(out, &agent.Agent{ID: "trae-cn", Name: "TRAE CN", Icon: "trae", Dir: dir, Path: filepath.Join(dir, "User", "mcp.json")})
+	}
 	return out
 }
 
@@ -1124,6 +1171,27 @@ func skipsJunctions(id string) bool {
 	return linkOS == "windows" && slices.Contains(junctionBlind, id)
 }
 
+// projectLinkBlind are the agents that skip magpie's link in a project's
+// skills folder on every system, and list a folder there: agy 1.5.14 on
+// macOS lists a copied <project>/.agents/skills/<skill> and not the
+// symlink to the library's (#7506, jinpwng on X; agy --print /skills, with
+// a control repository listing none). The app reads skills through the
+// same customizations walk as agy (junctionBlind), so it is taken alike.
+var projectLinkBlind = []string{"agy", "antigravity"}
+
+// projectCopies is whether the agent is given a copy in a project's
+// skills folder rather than magpie's link.
+func projectCopies(id string) bool {
+	return skipsJunctions(id) || slices.Contains(projectLinkBlind, id) || takesCopies(id)
+}
+
+// takesCopies is whether the agent is given copies of its skills, in its
+// own folder and a project's, on every system: TRAE CN's skills are read
+// by its Rust agent (modules/ai-agent, 2.3.105403), which can't be seen
+// to follow a link, so it gets real folders rather than links it may
+// skip.
+func takesCopies(id string) bool { return id == "trae-cn" }
+
 // readsShared are the agents that read ~/.agents/skills as well as their
 // own folder (each one's docs or source): Kimi Code's own is
 // ~/.kimi-code/skills besides it (#4379). OmO's engine, senpi, a fork of
@@ -1229,9 +1297,16 @@ func Takes(q, kind string) (string, error) {
 		}
 	}
 	what := map[string]string{"instructions": "instructions", "mcp": "MCP servers", "skills": "skills"}[kind]
-	// an app found by its program alone (Kiro CLI) that isn't here: told
-	// so, not recorded and then given nothing, as Targets leaves it out
-	if app && a.Bin != "" && !a.Detected() {
+	// one on another computer using the router (remote_agents.go) takes
+	// its servers there, while it isn't on this one: an app found by its
+	// program alone (Kiro CLI) too
+	if kind == "mcp" && a.WSL == "" && isRemote(a.ID) && targetByID(a.ID) == nil {
+		return a.ID, nil
+	}
+	// an app found by its program alone (Kiro CLI), or by its own folder
+	// (TRAE CN), that isn't here: told so, not recorded and then given
+	// nothing, as Targets leaves it out
+	if app && (a.Bin != "" || a.ID == "trae-cn") && !a.Detected() {
 		return "", fmt.Errorf("%s isn't installed here; nothing reads its %s until it is", a.Name, what)
 	}
 	// gone for its CLI, as Targets leaves it out (#2254): told so, not

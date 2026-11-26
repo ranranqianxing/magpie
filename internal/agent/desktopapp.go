@@ -74,8 +74,29 @@ var desktopApps = map[string]desktopApp{
 	// on Discord: ~/.dsh shown as "CLI not found" and wired as the web
 	// profile with that app in use); deepseek-harness-desktop-bin unpacks a
 	// .deb of it into /opt/DeepSeek Harness, electron-builder's folder.
+	//
+	// The community's DSH NEXT and DSH Desktop (github.com/anywhere-labs/
+	// dsh-desktop, dshdesktop.cn; not DeepSeek's) are Electron shells
+	// around the same dsh runtime, on the same home and profile: ~/.dsh,
+	// profiles/desktop (dsh-desktop-next/src/data-directory.ts and
+	// desktop-contract.ts's DEFAULT_PROFILE; dsh-plugin-desktop's
+	// product-identity.ts), so they are dsh's app too (tresgrosplan on X:
+	// DSH NEXT not detected). DSH NEXT 2.0.24-next's arm64 dmg holds DSH
+	// NEXT.app, ai.deepseek.dsh.desktop.next, with the dsh it runs in
+	// Contents/Resources/app/package.json (dshAppVersion). Their package.json
+	// build: per-user NSIS installers under %LOCALAPPDATA%\Programs, the
+	// folder changeable, registered under the UUID v5 of the appId; a deb
+	// into /opt/<productName> with executableName dsh-desktop-next and
+	// dsh-desktop, and no scheme of their own. DSH Desktop Beta
+	// (ai.deepseek.dsh.desktop.beta) is left out: it keeps ~/.dsh-beta.
 	"dsh": {id: "com.deepseek.dsh", names: []string{"DeepSeek Harness.app"}, win: filepath.Join("DeepSeek Harness", "DeepSeek Harness.exe"), guid: "1bf39983-50d0-5fe0-9ef4-cece76f67c5e",
-		onLinux: &linuxApp{dirs: []string{"/usr/lib/deepseek-harness-desktop", "/opt/DeepSeek Harness"}, exe: "deepseek-harness", name: "DeepSeek Harness", scheme: "dsh"}},
+		onLinux: &linuxApp{dirs: []string{"/usr/lib/deepseek-harness-desktop", "/opt/DeepSeek Harness"}, exe: "deepseek-harness", name: "DeepSeek Harness", scheme: "dsh"},
+		more: []desktopApp{
+			{id: "ai.deepseek.dsh.desktop.next", names: []string{"DSH NEXT.app"}, win: filepath.Join("DSH NEXT", "DSH NEXT.exe"), guid: "4a513c97-f710-5eb4-97f6-b8e556e2c341",
+				onLinux: &linuxApp{dirs: []string{"/opt/DSH NEXT"}, exe: "dsh-desktop-next", name: "DSH NEXT"}},
+			{id: "ai.deepseek.dsh.desktop", names: []string{"DSH Desktop.app"}, win: filepath.Join("DSH Desktop", "DSH Desktop.exe"), guid: "85820364-4c28-594e-b046-8896b3669248",
+				onLinux: &linuxApp{dirs: []string{"/opt/DSH Desktop"}, exe: "dsh-desktop", name: "DSH Desktop"}},
+		}},
 	// DS Bot's desktop app (app/electron-builder.yml, 0.3.0: appId
 	// io.github.fei2411.dsbot, productName DS Bot, DS Bot.app; DeepSeek
 	// Bot, its name before) runs a DSH of its own on its data folder
@@ -157,11 +178,47 @@ var desktopApps = map[string]desktopApp{
 	// folder is the default's, not read from an install.
 	"minimax-code": {id: "com.minimax.agent.cn", names: []string{"MiniMax Code.app"}, win: filepath.Join("MiniMax Code", "MiniMax Code.exe"),
 		more: []desktopApp{{id: "com.minimax.agent", names: []string{"MiniMax Code.app"}}}},
+	// Vibe Desktop, Mistral Vibe's desktop app (vibe.go), from Mistral's
+	// own builds (storage.googleapis.com/mistralai-ci-desktop-app, the
+	// Homebrew cask mistral-vibe-app's source): 1.3.0's Vibe.app,
+	// ai.mistral.lechat.desktop, team 8FQF64XL6Y, package le-chat-desktop.
+	// Its Windows installer, vibe-1.3.0-setup.exe, is electron-builder's
+	// one-click per-user NSIS: its script installs to
+	// %LOCALAPPDATA%\Programs\le-chat-desktop\Vibe.exe and registers
+	// HKCU\Software\102a3a1f-… (the UUID v5 of the appId, as dsh's).
+	// There is no Linux build.
+	"vibe": {id: "ai.mistral.lechat.desktop", names: []string{"Vibe.app"}, win: filepath.Join("le-chat-desktop", "Vibe.exe"), guid: "102a3a1f-fbe2-52e4-bb21-8e6b977cc08e"},
 	// Nowledge Mem (0.10.121: Nowledge Mem.app, co.nowledge.mem.desktop, a
 	// Tauri app) keeps its config folder only once it has been opened.
 	"nowledge-mem": {id: "co.nowledge.mem.desktop", names: []string{"Nowledge Mem.app"}},
 	"codebuddy": {id: "com.tencent.codebuddy", names: []string{"CodeBuddy.app"},
 		more: []desktopApp{{id: "com.tencent.codebuddycn", names: []string{"CodeBuddy CN.app"}}}},
+	// The apps magpie is added to by an import link, each found by its
+	// data folder, which an uninstall leaves behind (macAppRemoved).
+	// Cindy 0.1.94's brand identity: com.xd.cindycn for its cn build (data
+	// in Cindy), com.xd.cindy for its global one (CindyGlobal), both
+	// Cindy.app. AionUi's and Cherry Studio's from their electron-builder.yml.
+	"cindy": {id: "com.xd.cindycn", names: []string{"Cindy.app"},
+		more: []desktopApp{{id: "com.xd.cindy", names: []string{"Cindy.app"}}}},
+	"aionui":       {id: "com.aionui.app", names: []string{"AionUi.app"}},
+	"cherrystudio": {id: "com.kangfenmao.CherryStudio", names: []string{"Cherry Studio.app"}},
+}
+
+// removedOS is the system macAppRemoved judges for; a var so a test on
+// another one can ask for a Mac's answer.
+var removedOS = runtime.GOOS
+
+// macAppRemoved says the desktop app of agent id is gone from this Mac: no
+// bundle of any of its builds in the app folders, or where Spotlight has
+// one. An app found by its data folder alone (Cindy, AionUi, Cherry
+// Studio) leaves the folder, and its database with magpie in it, behind
+// when it is uninstalled, and its row stayed on the Agents page, added,
+// with nothing to take it off (Alex on Discord, 11-25: Cindy). Never said
+// elsewhere: where these apps install on Windows and Linux is a path
+// magpie hasn't checked, and the folder is taken as it was.
+func macAppRemoved(id string) bool {
+	app, ok := desktopApps[id]
+	return ok && removedOS == "darwin" && !slices.ContainsFunc(app.builds(), macBundle)
 }
 
 // appFolders are where apps are installed; a var so tests can point it

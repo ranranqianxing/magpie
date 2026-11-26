@@ -79,8 +79,11 @@ line; agents connected to magpie lose it when it quits.
   "Only models I pick" switch turns the list around: the models ticked
   when it is switched on stay, and a model added later, of any provider,
   stays out of that agent's picker and its config until it is ticked
-  (`magpie visible <agent> --only-picked`, back with `--show-new`). A
-  model asked for by name still works either way.
+  (`magpie visible <agent> --only-picked`, back with `--show-new`). With
+  "Add models I pick in a provider" on beside it, a model ticked in a
+  provider's editor, as the provider is added or later, is ticked there too
+  (`magpie visible <agent> --provider-picks`); other new models still wait.
+  A model asked for by name still works either way.
 - **Profiles.** Snapshot every agent's settings under a name and switch all of
   them back in one move. The profile in use, the one applying would change
   nothing, is ticked, the tray panel's Profiles button shows its name, and
@@ -142,7 +145,7 @@ line; agents connected to magpie lose it when it quits.
 | OpenClaw     | `openclaw.json` in `~/.openclaw` (`$OPENCLAW_CONFIG_PATH`, `$OPENCLAW_STATE_DIR`, `~/.openclaw-<profile>` for `$OPENCLAW_PROFILE`, `~` as `$OPENCLAW_HOME`) | model (a `magpie` provider in `models.providers`, `openai-completions`, with magpie's models in it; `agents.defaults.model`'s primary set to it, what was there put back on Disconnect; `magpie/*` added to a `modelPolicy.allow` that would refuse it; the user's own keys in the provider and its models kept; a chat already on a model keeps it until `/model default`) |
 | jcode        | `config.toml` in `$JCODE_HOME`, else `~/.jcode` | model (a `[providers.magpie]` profile, `openai-compatible`, with magpie's models in it; `[provider] default_provider`/`default_model` set to it, what was there put back on Disconnect; the user's own keys in the profile, such as `headers` and a model's `reasoning_effort`, kept; restart open jcode sessions after connecting) |
 | Dim (alpha, `dima`) | Dim's built-in **Magpie** provider, through Dim's own daemon (`$DIMCODE_HOME`, else `~/.dimcode-alpha`), and magpie's own `dim.json` beside its settings | model (Dim's Magpie provider gets the gateway's `/v1` and magpie's key, is turned on and made Dim's model, so a plain `dima` runs on magpie; no other provider is touched, and a key or address you set on the Magpie entry yourself is kept. Picking Dim's own again turns the entry off and puts back the model Dim was on. When Dim's daemon can't be reached, a `dima` function in your shell profiles starts it with `DIM_BASE_URL`, `DIM_API_KEY`, `DIM_MODEL` and the token limits for that run instead) |
-| Mistral Vibe | `config.toml` in `$VIBE_HOME`, else `~/.vibe` | model (a `[[providers]]` entry named magpie with the gateway's `/v1` and the key as an `Authorization` header in `extra_headers`, since Vibe reads keys only from the environment; one `[[models]]` entry per model, aliased `magpie/<provider>/<model>`; `active_model` set to the alias, what was there put back on Disconnect; a `thinking` level the user set on a model kept; restart open vibe sessions after connecting) |
+| Mistral Vibe | `config.toml` in `$VIBE_HOME`, else `~/.vibe` | model (a `[[providers]]` entry named magpie with the gateway's `/v1` and the key as an `Authorization` header in `extra_headers`, since Vibe reads keys only from the environment; one `[[models]]` entry per model, aliased `magpie/<provider>/<model>`; `active_model` set to the alias, what was there put back on Disconnect; a `thinking` level the user set on a model kept; restart open vibe sessions after connecting). Vibe Desktop (bundle `ai.mistral.lechat.desktop`; `le-chat-desktop\Vibe.exe` on Windows) runs the same app server on the same file, lists the agent with no CLI installed, and reads the file when a chat starts |
 | MiniMax Code (mcode) | `~/.minimax/config.yaml` (`$MINIMAX_DATA_DIR`, or the folder the desktop app moved it to) | model (a `magpie` custom provider; magpie's models in its /model) |
 | Droid (Factory) | `~/.factory/settings.json` (`$FACTORY_HOME_OVERRIDE`) | model (magpie's models as BYOK `customModels`, in Droid's /model) |
 | Cline (CLI)  | `~/.cline/data/settings/providers.json` (`$CLINE_DIR`) | model, effort (magpie takes its openai-compatible provider) |
@@ -231,7 +234,8 @@ a local test upstream, with no vendor credentials.
 #### DeepSeek Harness: the DeepSeek row by hand
 
 Connecting dsh gives it magpie's own routes on dsh's pi-ai adapter
-(`magpie`, `magpie-responses`, `magpie-anthropic`). dsh's DeepSeek row
+(`magpie`, `magpie-responses`, `magpie-anthropic`, and
+`magpie-gemini` from dsh 0.2.2-rc.2). dsh's DeepSeek row
 (`llm-deepseek`, the `deepseek-official` route) is dsh's: magpie never
 points it anywhere, and Disconnect leaves an entry of yours there alone.
 That row does more for DeepSeek's own models than pi-ai does: when dsh's
@@ -1323,14 +1327,20 @@ credentials are read when a request is signed.
 Each location serves models of its own, and Vertex AI has no list to ask which,
 so magpie gives each location the models it answered with on 2026-10-06
 (and Gemini 4: `gemini-4-argon` since 2026-10-13, `gemini-4-carbon` since
-2026-11-10 and `gemini-4-hydrogen` since 2026-11-12, at `global`, `us` and
-`eu`):
+2026-11-10, `gemini-4-hydrogen` since 2026-11-12 and `gemini-4-neon` since
+2026-11-18, at `global`, `us` and `eu`):
 
 | Location | Models |
 | --- | --- |
-| `global` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.1-pro-preview`, `gemini-3.1-pro-preview-customtools`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `deepseek-ai/deepseek-v4.1-flash-maas`, `zai-org/glm-5.2-maas`, `openai/gpt-oss-120b-maas`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-2`, `claude-fable-5-1` |
-| `us`, `eu` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.1-flash-lite` |
+| `global` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-4-neon`, `gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.1-pro-preview`, `gemini-3.1-pro-preview-customtools`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `deepseek-ai/deepseek-v4.1-flash-maas`, `zai-org/glm-5.2-maas`, `openai/gpt-oss-120b-maas`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-2`, `claude-fable-5-1` |
+| `us`, `eu` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-4-neon`, `gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.1-flash-lite` |
 | A region | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
+
+A Gemini 4 or later model Google releases after these joins `global`, `us`
+and `eu` (and express mode) once [models.dev](https://models.dev)'s
+`google-vertex` entry lists it, ahead of the Gemini 4 models above, with no
+magpie update: magpie's catalog syncs from models.dev. A preview or a cyber
+model, which Google gives on its allowlist, is typed in.
 
 A region that serves one more, as asia-northeast1 serves `gemini-3.5-flash`,
 has it typed in with the rest you want:
@@ -1608,7 +1618,11 @@ per middleware; `{skip: true}` passes the account over for that request),
 event of a streamed reply and `onResponse(body, ctx)` a whole one, all in
 the agent's own API. A hook returns the changed object, or nothing to
 leave it; `onEvent` returns `null` to drop an event, and
-`ctx.reject(status, message)` turns a request away. Declare it with
+`ctx.reject(status, message)` turns a request away. `ctx.caller` is
+the agent the request came from, `{agent, name, via}`, through any magpies
+that passed it on (as a plugin's `chat.headers` gets `input.caller`), so
+`onRequest` can refuse an agent before any provider is asked; the async
+request hooks get it too. Declare it with
 `"magpie": { "middleware": "./mw.js" }` in `package.json`, or add a single
 `*.middleware.js` file:
 
@@ -1680,7 +1694,7 @@ it is a single `*.agent.js` file:
 ```js
 export const agent = {
   id: "aider", name: "Aider", bin: "aider",
-  config: "~/.aider.conf.yml",   // json, yaml or env
+  config: "~/.aider.conf.yml",   // json, yaml, toml or env
   model: "model",                // the key of the model
   prefix: "openai/",             // written before magpie's model id
   ua: ["aider", "litellm"],
@@ -2827,8 +2841,17 @@ provider, those whose vendor tells no quota included, by identifiers only:
 never the key), `kind` (`account` or `key`), `label`, `user`, `plan`, `on`
 and `pin`, `"<provider>/<id>"`. `?provider=<id>` lists one provider's.
 `X-Magpie-Account: <pin>` (or the id alone) pins a request to that
-account or key. It is asked as `/v1/magpie/quotas` is: this machine, or
-another with a key of a gateway shared on the local network; a read-only
+account or key. `?models=1` adds each one's `models`: the id of every
+model it can be asked for, its provider's whole list (not the first 24
+agents are offered of a provider with no picks), less a model the user
+keeps off that account and one on none of the provider's APIs. Each is
+asked as `<provider>/<id>`, offered to agents or not. `?models=full`
+gives the same models as `/v1/models`' rows instead of ids, built by the
+same code: `id` (`<provider>/<id>`), `display_name`, `reasoning_levels`,
+`context_window`, `max_output_tokens`, `modalities`, `pricing`,
+`magpie_label` and the rest. It is asked as
+`/v1/magpie/quotas` is: this machine, or another with a key of a gateway
+shared on the local network; a read-only
 key may read it, and a key held to a budget, models or accounts only when
 its owner lets it be told quotas, and then only of the accounts it may
 use.
@@ -3558,6 +3581,27 @@ downloaded, and downloads that one before it restarts, so you land on the
 newest (unless downloads wait for a click). Every release is on
 [yetone/magpie-releases](https://github.com/yetone/magpie-releases/releases).
 
+
+### Plugin links
+
+A plugin's author, or a page that lists plugins, can link to one:
+
+```
+magpie://plugin?name=opencode-acme-auth
+magpie://plugin?name=%40magpie-community%2Fopencode-zed-auth
+```
+
+Opening one brings up magpie's Plugins on the package's sheet: its README,
+publisher, license and *Install*. Nothing is installed until you press
+*Install*. A package magpie's list doesn't have says that nobody at magpie
+has reviewed it. Only an npm package's name is taken (no version, path,
+git repository or URL), and a link that comes within two seconds of the
+last is dropped. `magpie import <link>` prints the package and the
+`magpie plugin add` command for it, and installs nothing.
+
+A plugin's own page asks the same with `magpie.openPlugin(name)`
+([Pages in the window](https://usemagpie.ai/docs/plugins#pages)).
+
 ### Signed releases
 
 usemagpie.ai's feed only carries a release; it is not what magpie trusts. From
@@ -3840,10 +3884,11 @@ On Linux `host.docker.internal` is there only for a container given
 For the browser UI run the image with `magpie web --addr 0.0.0.0:3430 --no-open`
 in place of the default `serve`, and open
 `http://localhost:3430/?k=<key from docker logs magpie>` (set `MAGPIE_WEB_KEY`
-to keep one key across restarts; a browser then stays signed in for 400
-days, and `MAGPIE_NAME` to title its tab `<name> · magpie`, telling several
-deployments apart; a name set in Settings → Network and sharing → Advanced →
-Name comes first). A browser keeps cookies per host, not per port, so another service on
+to keep one key across restarts, and a browser stays signed in for 400 days;
+without it a browser stays signed in, closed and opened again too, until
+magpie starts again with a new key. Set `MAGPIE_NAME` to title its tab
+`<name> · magpie`, telling several deployments apart; a name set in Settings
+→ Network and sharing → Advanced → Name comes first). A browser keeps cookies per host, not per port, so another service on
 the same address can take the sign-in away: by clearing its site data, or by
 filling the host's cookie limit (the sign-in is the last Chrome drops). A page
 opened without it, such as a bookmark, says why it was turned away and takes
@@ -4722,11 +4767,14 @@ and models to look after first, by magpie's own ids only:
   fine-tune) is only `<provider>/other`; one on a provider of your own is
   only `custom`, a routing group only `group`;
 - how many of each, and how many routing groups you have.
-- for each partner (a sponsor listed first in the add sheet), by its id, how
-  many times a day the add sheet showed it, its row was opened, its key
-  page was opened and a provider was added from it (at most 20 of each,
-  5 adds), kept in `~/.cache/magpie/partner-counts.json` for at most 14
-  days and sent the day after as `magpie partner` events;
+- for each partner (a sponsor listed first in the add sheet, or in the
+  Plugins page's Discover), by its id, how many times a day it was shown,
+  its row was opened, its key page was opened and a provider was added
+  from it or its plugin installed (at most 20 of each, 5 adds), with where
+  it is listed (`slot`: `providers` or `plugins`), and how many times a
+  day the Plugins page was opened (at most 20), kept in
+  `~/.cache/magpie/partner-counts.json` for at most 14 days and sent the
+  day after as `magpie partner` and `magpie page` events;
 - to usemagpie.ai, not PostHog, which of the plugins Discover lists are
   installed and on (npm names, or `github:owner/repo` for a repository
   tagged `magpie-plugin`; never a folder, a private repository or an
@@ -4756,8 +4804,8 @@ Partners are also counted where usemagpie.ai sees them, whatever these
 settings say, as any website sees its visits. The partner list
 (`/api/partners`) gives each partner's website and key page as a
 `https://usemagpie.ai/go/<id>/site|keys[/<region>]` link, which sends a
-`magpie partner go` event (the partner, which link, the region, and the
-country Cloudflare gives) before sending the browser on; and one in ten
+`magpie partner go` event (the partner, which link, the region, where it
+is listed, and the country Cloudflare gives) before sending the browser on; and one in ten
 fetches of the list sends a `magpie partners fetch` event with weight 10
 and the country, while a partner is listed. Each event has an id of its
 own: no install id, address or account goes with it. The code is

@@ -20,9 +20,10 @@ const libraryUsage = `magpie library                     what the library gives 
   magpie library instructions        print the shared instructions
   magpie library instructions set <file|->   replace them with a file's text (- for stdin)
   magpie library instructions agents <a,b…|none>   the agents that get them
-  magpie library mcp add <name> <url | command args…> [agents=a,b…] [header=K=V…] [env=K=V…] [timeout=SECS] [--local]
+  magpie library mcp add <name> <url | command args…> [agents=a,b…] [header=K=V…] [env=K=V…] [timeout=SECS] [idle=SECS|never] [--local]
                                      header= is for a URL, env= for a command; the program's own words go after --
-  magpie library mcp set <name> header=K=V | header-=K | env=K=V | env-=K | timeout=SECS   change one setting of a server
+  magpie library mcp set <name> header=K=V | header-=K | env=K=V | env-=K | timeout=SECS | idle=SECS|never   change one setting of a server
+                                     idle= is how long a server magpie runs (the router's, Codex's) is kept unused, never to keep it
   magpie library mcp show <name>     print the server as the library keeps it, as JSON
   magpie library mcp agents <name> <a,b…|none>
   magpie library mcp local <name> on|off   keep it to this computer: a sync or a backup never carries it, and one
@@ -54,6 +55,8 @@ const libraryUsage = `magpie library                     what the library gives 
   magpie library skill auto-update on|off      fetch each skill from GitHub or git again by itself when it changes there (one changed here stays)
   magpie library skill use-library <name> <agent>   an agent's own skill by that name is in the way: set it aside, link the library's
   magpie library skill keep-own <name> <agent>      …or keep the agent's, and take the agent off the library's
+  magpie library plugin [list]       the library's plugins (Library › Claude plugins): magpie library plugin help
+  magpie library plugin import <folder | owner/repo | git address> [plugin…] [agents=a,b…|none]   put a source's plugins in the library, as Library › Claude plugins does
   magpie library project …           a project folder's own skills (Library › Projects): magpie library project help
   magpie library native              what plugins Codex and Claude Code and packages Pi installed themselves declare (read only; the agent loads them)
   magpie library rtk                 which agents run their shell commands through RTK (rtk-ai.app), to save tokens
@@ -141,14 +144,14 @@ func libraryCmd(args []string) error {
 				unused = s.Name
 			}
 		case len(rest) >= 3 && rest[0] == "set" && !strings.HasPrefix(rest[1], "-"):
-			// header, env and timeout of a server in the library, one at a time (#6111)
+			// header, env, timeout and idle of a server in the library, one at a time (#6111)
 			var cmd []string
 			var o library.ServerOpts
 			if cmd, o, err = library.SplitServerWords(rest[2:]); err != nil {
 				return err
 			}
 			if len(cmd) > 0 || o.HasAgent || o.Local != nil {
-				return fmt.Errorf("set takes header=K=V, env=K=V, header-=K, env-=K and timeout=SECS, not %q", strings.Join(cmd, " "))
+				return fmt.Errorf("set takes header=K=V, env=K=V, header-=K, env-=K, timeout=SECS and idle=SECS|never, not %q", strings.Join(cmd, " "))
 			}
 			res, err = library.SetServer(rest[1], o)
 		case len(rest) == 2 && rest[0] == "show" && !strings.HasPrefix(rest[1], "-"):
@@ -287,6 +290,8 @@ func libraryCmd(args []string) error {
 		return rtkCmd(rest)
 	case "project", "projects":
 		return libraryProjectCmd(rest)
+	case "plugin", "plugins":
+		return libraryPluginCmd(rest)
 	case "help", "-h", "--help":
 		fmt.Print("  " + libraryUsage)
 		return nil

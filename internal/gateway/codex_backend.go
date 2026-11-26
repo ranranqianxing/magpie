@@ -1945,6 +1945,12 @@ func withoutUnreadable(body, msg []byte) ([]byte, bool) {
 		// (passthrough_refused.go)
 		return withoutPassthrough(body, f)
 	}
+	if agentMessageRefused.Match(wordsOf(msg)) {
+		// the ChatGPT backend doesn't run MultiAgentV2 for this model and
+		// turns its agent_message items away: each plain one is asked again
+		// as the user's turn (withoutAgentMessages)
+		return withoutAgentMessages(body)
+	}
 	if !foreignReasoning.Match(msg) && !bodyHas(bytes.ToLower(msg), "not found") {
 		return nil, false
 	}
@@ -1957,6 +1963,107 @@ func withoutUnreadable(body, msg []byte) ([]byte, bool) {
 		return withoutSeals(body)
 	}
 	return nil, false
+}
+
+// agentMessageRefused is the ChatGPT backend turning an agent_message
+// input item away: a MultiAgentV2 item (a subagent's task, or an agent's
+// message to another) that a model not running V2 doesn't take
+// ("Unsupported input item: agent_message", cyberestro on X). Each plain
+// one is asked again as the user's turn, as Grok's backend's same refusal
+// is handled (grokAgentMessage, plugins#61).
+var agentMessageRefused = lazyre.New(`(?i)unsupported input item\s*:?\s*["']?agent_message`)
+
+// withoutAgentMessages is a request's input with each plain agent_message
+// item rewritten as the user's message a Responses backend takes, and ok
+// set when one was. A sealed, empty, or otherwise-shaped agent_message is
+// left as it came: magpie reads no sealed task, and the sealed-task guard
+// (hasSealedAgentMessage) still sees it. Only a plain one, whose content
+// the model can read, is turned into a message.
+func withoutAgentMessages(body []byte) ([]byte, bool) {
+	var q map[string]json.RawMessage
+	if json.Unmarshal(body, &q) != nil {
+		return body, false
+	}
+	var items []json.RawMessage
+	if json.Unmarshal(q["input"], &items) != nil {
+		return body, false
+	}
+	changed := false
+	for i, raw := range items {
+		var item map[string]any
+		if json.Unmarshal(raw, &item) != nil {
+			continue
+		}
+		msg, ok := agentMessageAsUser(item)
+		if !ok {
+			continue
+		}
+		b, err := marshalPlain(msg)
+		if err != nil {
+			continue
+		}
+		items[i], changed = b, true
+	}
+	if !changed {
+		return body, false
+	}
+	var err error
+	if q["input"], err = marshalPlain(items); err != nil {
+		return body, false
+	}
+	nb, err := marshalPlain(q)
+	if err != nil {
+		return body, false
+	}
+	return nb, true
+}
+
+// agentMessageAsUser is a plain Codex agent_message as the user's message a
+// Responses backend takes — "From <author> to <recipient>" first, then its
+// text and images as they came — true when it is one; nil, false for a
+// sealed, empty, or other-shaped item, left as it came. It mirrors the Grok
+// plugin's grokAgentMessage (plugins#61).
+func agentMessageAsUser(item map[string]any) (map[string]any, bool) {
+	if item["type"] != "agent_message" {
+		return nil, false
+	}
+	if _, sealed := item["encrypted_content"]; sealed {
+		return nil, false
+	}
+	parts, _ := item["content"].([]any)
+	if len(parts) == 0 {
+		return nil, false
+	}
+	for _, p := range parts {
+		pm, ok := p.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		if _, sealed := pm["encrypted_content"]; sealed {
+			return nil, false
+		}
+		_, isText := pm["text"].(string)
+		_, isURL := pm["image_url"].(string)
+		if !(pm["type"] == "input_text" && isText || pm["type"] == "input_image" && isURL) {
+			return nil, false
+		}
+	}
+	from, _ := item["author"].(string)
+	to, _ := item["recipient"].(string)
+	header := ""
+	switch {
+	case from != "" && to != "":
+		header = "From " + from + " to " + to
+	case from != "":
+		header = "From " + from
+	case to != "":
+		header = "To " + to
+	}
+	content := parts
+	if header != "" {
+		content = append([]any{map[string]any{"type": "input_text", "text": header + "\n\n"}}, parts...)
+	}
+	return map[string]any{"type": "message", "role": "user", "content": content}, true
 }
 
 // withoutItem is a Responses request without the input item of this id.
@@ -3338,24 +3445,40 @@ func callItemIDs(body []byte) []byte {
 // "Invalid 'input[1].id': 'rs_6aca2fc7533c979d5f0e4f7a:rs_01a125caa544754e9a3c70080100b009'.
 // Expected an ID that contains letters, numbers, underscores, or dashes,
 // but this value contained additional characters."
+// or one longer than the 64 an id may have (isnine's 420, #4525,
+// ghjkllasdf-fake's 444, #4527, JaxWeng's 428, #5812), which a relay
+// that checks as OpenAI does turns the whole turn away over — "string
+// too long. Expected a string with maximum length 64, but got a string
+// with length 428 instead." — and, the tail being the character
+// refusal's alone, every turn of the session after it the same way.
 // It is the tail within 1000 characters of the head: the regexp
 // .{0,1000}? it was unrolled to 88kB of program, held from start to exit.
 func itemIDRefusal(b []byte) bool {
-	const tail = "Expected an ID that contains letters, numbers, underscores, or dashes"
 	for _, at := range itemIDRefusalHead.FindAllIndex(b, -1) {
 		rest, end := b[at[1]:], 0
 		for n := 0; n < 1000 && end < len(rest); n++ {
 			_, w := utf8.DecodeRune(rest[end:])
 			end += w
 		}
-		if bytes.Contains(rest[:min(len(rest), end+len(tail))], []byte(tail)) {
-			return true
+		for _, tail := range itemIDRefusalTails {
+			if bytes.Contains(rest[:min(len(rest), end+len(tail))], tail) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
 var itemIDRefusalHead = lazyre.New(`Invalid 'input\[\d+\]\.id'`)
+
+// itemIDRefusalTails are the tails an item id refusal words itself in:
+// the id had a character OpenAI's don't have, or was longer than they
+// take. The length tail is OpenAI's own for a string over its schema's
+// bound, which the head's input[n].id holds to item ids alone.
+var itemIDRefusalTails = [][]byte{
+	[]byte("Expected an ID that contains letters, numbers, underscores, or dashes"),
+	[]byte("Expected a string with maximum length"),
+}
 
 // itemIDsRefused is how unfit remembers a provider turning away, for
 // model, an input item id with another character in it (plainItemIDs).

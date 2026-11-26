@@ -100,6 +100,9 @@ func TestHubMCPToolsOnDemand(t *testing.T) {
 		`{"name":"github__create_issue","arguments":{"title":"a"}}`,
 		`{"name":"create_issue","arguments":{"title":"a"}}`,
 		`{"name":"github__create_issue","arguments":"{\"title\":\"a\"}"}`,
+		// the agent's own names for it: Alma's, Claude Code's
+		`{"name":"magpie__github_create_issue","arguments":{"title":"a"}}`,
+		`{"name":"mcp__magpie__github__create_issue","arguments":{"title":"a"}}`,
 	} {
 		ran := readMCP(t, hubPost(h, "opencode", here, toolsCall(hubCallTool, args)))
 		if ran.Result.IsError || ran.Result.Content[0].Text != "ran github create_issue" {
@@ -256,7 +259,7 @@ func TestHubFindsItselfIsWhoGetsEveryTool(t *testing.T) {
 	fresh(t)
 	n := hubOnDemandOver + 1
 	for _, id := range HubFindsItself() {
-		if hubOnDemand(id, n) || hubOnDemand(id+"@wsl:Ubuntu", n) {
+		if hubOnDemand(id, n, false) || hubOnDemand(id+"@wsl:Ubuntu", n, false) {
 			t.Fatalf("%s is named as searching itself but is given its tools on demand", id)
 		}
 	}
@@ -266,8 +269,102 @@ func TestHubFindsItselfIsWhoGetsEveryTool(t *testing.T) {
 		}
 	}
 	for _, id := range []string{"opencode", "gemini", "kimi", "qwen", "goose", "crush", "copilot", "cursor"} {
-		if !hubOnDemand(id, n) {
+		if !hubOnDemand(id, n, false) {
 			t.Fatalf("%s is given every tool but not named", id)
 		}
+	}
+}
+
+// The address for any other app gives its tools on demand when asked
+// (HubOnDemandQuery): Passings_z on X (11-21) connected their own harness
+// to /mcp/magpie/hub with Tools on demand on and was given every tool.
+// Asked, it is held to the same rule as an agent: past hubOnDemandOver
+// tools, and not with every tool whole (RouterAllTools); find_tools and
+// call_tool run its tools. Not asked, it lists every tool, as before.
+func TestHubMCPOtherAppsAskForToolsOnDemand(t *testing.T) {
+	fresh(t)
+	many := manyHubTools(hubOnDemandOver + 2)
+	fs := HubServer{Name: "fs", Known: true}
+	for _, x := range many[1:] {
+		fs.Tools = append(fs.Tools, HubToolNote{Name: x.Tool})
+	}
+	f := &fakeHub{on: true, tools: map[string][]HubTool{"": many}, servers: map[string][]HubServer{"": {
+		{Name: "github", Known: true, Tools: []HubToolNote{{Name: "create_issue", About: "Opens a new issue"}}}, fs,
+	}}}
+	withHub(t, f)
+	h := lanGuard(New().Handler())
+	asked := HubMCPAll + "?" + HubOnDemandQuery
+
+	if got := listedNames(t, readMCP(t, hubPostAt(h, asked, here, toolsList))); !slices.Equal(got, []string{hubFindTool, hubCallTool, hubCodeTool}) {
+		t.Fatalf("asked for them on demand, listed %v", got)
+	}
+	if say := initInstructions(t, hubPostAt(h, asked, here, hubInit).Body.String()); !strings.Contains(say, "on demand") {
+		t.Fatalf("instructions: %s", say)
+	}
+	found := readMCP(t, hubPostAt(h, asked, here, toolsCall(hubFindTool, `{"query":"open an issue"}`)))
+	if found.Result.IsError || !strings.Contains(found.Result.Content[0].Text, `"github__create_issue"`) {
+		t.Fatalf("find: %+v", found)
+	}
+	ran := readMCP(t, hubPostAt(h, asked, here, toolsCall(hubCallTool, `{"name":"github__create_issue","arguments":{"title":"a"}}`)))
+	if ran.Result.IsError || ran.Result.Content[0].Text != "ran github create_issue" {
+		t.Fatalf("call_tool: %+v", ran)
+	}
+
+	for _, path := range []string{HubMCPAll, HubMCPAll + "?tools=all", HubMCPAll + "?other=on-demand"} {
+		if got := listedNames(t, readMCP(t, hubPostAt(h, path, here, toolsList))); len(got) != len(many)+1 {
+			t.Fatalf("%s listed %v", path, got)
+		}
+	}
+
+	withHub(t, &fakeHub{on: true, tools: map[string][]HubTool{"": manyHubTools(hubOnDemandOver)}})
+	if got := listedNames(t, readMCP(t, hubPostAt(h, asked, here, toolsList))); len(got) != hubOnDemandOver+1 {
+		t.Fatalf("with %d tools, asked listed %v", hubOnDemandOver, got)
+	}
+
+	withHub(t, f)
+	s := settings.Load()
+	s.RouterAllTools = true
+	if err := settings.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		s := settings.Load()
+		s.RouterAllTools = false
+		settings.Save(s)
+	})
+	if got := listedNames(t, readMCP(t, hubPostAt(h, asked, here, toolsList))); len(got) != len(many)+1 {
+		t.Fatalf("with every tool whole, asked listed %v", got)
+	}
+}
+
+// A tool its server marks always loaded (Magpie Artifacts' publish) is
+// listed whole beside find_tools and call_tool, with its _meta, so an
+// agent declares it to its model and an ask for a page reaches it
+// without naming it. Turned off, the mark lists nothing more.
+func TestHubOnDemandKeepsAlwaysLoaded(t *testing.T) {
+	fresh(t)
+	tools := manyHubTools(hubOnDemandOver + 2)
+	pub := map[string]json.RawMessage{}
+	for _, x := range artifactsMCPTools() {
+		if m := x.(map[string]any); m["name"] == artifactPublishTool {
+			for k, v := range m {
+				pub[k], _ = json.Marshal(v)
+			}
+		}
+	}
+	tools = append(tools, HubTool{Server: artifactsServerName, Tool: artifactPublishTool, Spec: pub})
+	withHub(t, &fakeHub{on: true, tools: map[string][]HubTool{"opencode": tools}})
+	h := lanGuard(New().Handler())
+	body := hubPost(h, "opencode", here, toolsList).Body.String()
+	want := HubToolName(artifactsServerName, artifactPublishTool)
+	if got := listedNames(t, readMCP(t, hubPost(h, "opencode", here, toolsList))); !slices.Equal(got, []string{hubFindTool, hubCallTool, want, hubCodeTool}) {
+		t.Fatalf("listed %v", got)
+	}
+	if !strings.Contains(body, `"anthropic/alwaysLoad":true`) || !strings.Contains(body, `"antigravity/alwaysLoad":true`) {
+		t.Fatalf("the publish tool's _meta is gone: %s", body)
+	}
+	delete(pub, "_meta")
+	if got := listedNames(t, readMCP(t, hubPost(h, "opencode", here, toolsList))); !slices.Equal(got, []string{hubFindTool, hubCallTool, hubCodeTool}) {
+		t.Fatalf("without the mark, listed %v", got)
 	}
 }

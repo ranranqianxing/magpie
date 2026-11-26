@@ -66,6 +66,11 @@ type Account struct {
 	// Code's own while Claude Code is signed out (claude_dirs.go).
 	standIn bool
 
+	// off is an account the user turned off, made only for a test sent
+	// to it before it is turned on (testAccounts): routing never takes
+	// one (AlsoOn leaves them out).
+	off bool
+
 	// unnamed is Claude Code's own sign-in while it is known by no name:
 	// User is a name made from its plan ("Claude Max") until Claude Code
 	// puts the account's profile in its config, as its first run does.
@@ -273,6 +278,11 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	if p.IsRemoteMagpie() && p.Key != "" {
 		remoteKey(req.Header, p.Key)
 	}
+	// Bedrock with an AWS access key: signed last, over what is sent
+	// (#7687)
+	if p.SignsWithAccessKey() {
+		return p.signAWS(req, body)
+	}
 	return nil
 }
 
@@ -321,6 +331,11 @@ func (p Provider) Retry(ctx context.Context, sent []byte, status int, body []byt
 // Explain is the error a refusal is passed on as: msg, with what the
 // user can do about it when the account knows.
 func (p Provider) Explain(msg string, status int, body []byte) string {
+	if hint := p.NoCreditHint(status, body); hint != "" {
+		// a key at Anthropic's own API out of its organization's credit
+		// (anthropic_credit.go)
+		return msg + " — " + hint
+	}
 	if p.Account == nil || p.Account.explain == nil {
 		return msg
 	}
@@ -446,8 +461,15 @@ func claudePlan(sub, tier string) string { return claudePlanShown(sub, tier, "")
 // "Claude <name>" ("Ultra" for a Max 20x account, none for Max 5x). A
 // known tier decides; the name is read only when the tier doesn't say,
 // so a profile left from another account can't rename this one.
+//
+// The tier decides a Pro account too: Claude Code keeps the subscription
+// type it was signed in with (subscriptionType, "the stored login plan")
+// and renews only the tier from the profile, so an account upgraded from
+// Pro to Max still says "pro" beside a Max tier (CoderMaurice on X: the
+// editor read "Claude Pro" while the account drew Max's Fable window).
+// A Team or Enterprise seat is named as it is, whatever its seat's tier.
 func claudePlanShown(sub, tier, shown string) string {
-	if sub != "max" {
+	if sub != "max" && sub != "pro" {
 		return sub
 	}
 	switch {
@@ -455,8 +477,12 @@ func claudePlanShown(sub, tier, shown string) string {
 		return "ultra"
 	case strings.Contains(tier, "max_5x"):
 		return "max"
-	case strings.EqualFold(strings.TrimSpace(shown), "ultra"):
+	}
+	switch name := strings.ToLower(strings.TrimSpace(shown)); {
+	case name == "ultra" && (sub == "max" || tier == ""):
 		return "ultra"
+	case name == "max" && tier == "":
+		return "max"
 	}
 	return sub
 }

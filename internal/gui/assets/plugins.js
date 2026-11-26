@@ -33,7 +33,7 @@
 
   const SEARCH = "M7 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z M10 10l3 3";
   const DOWN = "M8 3v7.5 M4.8 7.6 8 10.8l3.2-3.2 M3.5 13h9";
-  const STAR = "M8 2.2l1.8 3.7 4 .6-2.9 2.8.7 4L8 11.4l-3.6 1.9.7-4L2.2 6.5l4-.6z";
+  const STAR = "M8 2.5l1.8 3.7 4 .6-2.9 2.8.7 4L8 11.7l-3.6 1.9.7-4L2.2 6.8l4-.6z";
   const SHIELD = "M8 2.3 13 4v3.8c0 3-2.1 5.1-5 5.9-2.9-.8-5-2.9-5-5.9V4z M5.8 8l1.6 1.6 2.9-3";
   const OUTL = "M9.5 3.5h3v3 M12.5 3.5 7.5 8.5 M11 9.5v3H3.5V5h3";
   const PLUG = "M6 2v3 M10 2v3 M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0z M8 11v3";
@@ -197,6 +197,8 @@
   // when it comes, never waited on
   let npmTries = 0;
   let npmAnswered = false; // npm was asked once: no downloads then means none to rank by
+  let countsGone = false; // plugincounts.js didn't load: no magpie counts to wait for
+  let weekPicks;
   async function askNPM(only) {
     const names = [...new Set([...(listings || []).map((l) => l.package), ...(mine?.plugins || []).filter((e) => onNPM(e.spec)).map((e) => name(e.spec))])]
       .filter((n) => !only || !npm[n]);
@@ -236,8 +238,18 @@
       loadBuiltins(),
       providers ? null : loadProviders().then(drawBody, () => {}),
     ];
-    import("./plugincounts.js").then(() => window.pmCounts.load(drawBody), () => {});
+    import("./plugincounts.js").then(() => window.pmCounts.load(drawBody), () => { countsGone = true; drawBody(); });
+    if (!weekPicks) {
+      import("./pluginweek.js").then(({ picks }) => {
+        weekPicks = picks;
+        drawBody();
+      }, () => {
+        weekPicks = () => null;
+        drawBody();
+      });
+    }
     import("./pluginpartners.js").then(drawBody, () => {});
+    import("./pluginglide.js").catch(() => {});
     await Promise.all(parts);
     askNPM();
     askGit();
@@ -246,6 +258,9 @@
   // the sidebar's dot, followed: Plugins opens on Installed, where the
   // plugins with an update are named at the top
   window.pluginTabTo = (id) => { tab = id; };
+  // opened from another page (app.js show): on Installed when an update
+  // waits, and the opening counted for its partners (provider.CountPage)
+  window.pmOpen = (up) => { if (up) tab = "installed"; api("page", { page: "plugins" }).catch(() => {}); };
   // pluginQuery: Discover, looking for q (the add sheet found nothing by it)
   window.pluginQuery = (q) => {
     query = q;
@@ -663,7 +678,9 @@
   // it (magpie's community, another author on npm, a repository its
   // author tagged on GitHub), is the same card, its source said under its
   // name. A strip picks the kind, a menu the source; the top is the
-  // week's picks: one a day, the most downloaded, the most starred.
+  // week's picks: one a day, the most used and the most liked. Both are
+  // counted in magpie, not npm's downloads (any npm user's) or GitHub's
+  // stars (a repository's, which a plugin in a starred one inherits).
   const ORDER = ["pv", "mw", "ag", "tl", "pg"];
   const SHELVES = { pv: "Subscriptions", mw: "Gateway middleware", ag: "Agents", tl: "Tools for agents", pg: "Pages" };
   const SHORT = { pv: "Subscriptions", mw: "Middleware", ag: "Agents", tl: "Tools", pg: "Pages" };
@@ -673,11 +690,14 @@
   let kindPick = "", srcPick = "", onlyNew = false, sortPick = "hot";
   const srcOf = (l) => l.github ? "gh" : l.community ? "ours" : "third";
   const hotOf = (l) => l.npm?.weekly || 0;
+  // who uses it and who likes it in magpie, last week (plugincounts.js)
+  const usersOf = (l) => window.pmCounts?.users(l.package) || 0;
+  const likesOf = (l) => window.pmCounts?.likes(l.package) || 0;
   const nameOrder = (a, b) => a.name.localeCompare(b.name, intlLang());
-  const byHot = (a, b) => hotOf(b) - hotOf(a) || (b.github?.stars || 0) - (a.github?.stars || 0) || nameOrder(a, b);
+  // Most popular: by who uses it in magpie, then npm's downloads; stars
+  // only order what neither knows
+  const byHot = (a, b) => usersOf(b) - usersOf(a) || hotOf(b) - hotOf(a) || (b.github?.stars || 0) - (a.github?.stars || 0) || nameOrder(a, b);
   const ranked = (list, how = sortPick) => [...list].sort(how === "name" ? nameOrder : how === "liked" && window.pmCounts ? (a, b) => pmCounts.order(a, b, byHot) : byHot);
-  // the day in the reader's own calendar, which the daily pick turns on
-  const today = () => { const d = new Date(); return Math.floor((d.getTime() - d.getTimezoneOffset() * 6e4) / 864e5); };
 
   // every plugin the market can show: the list's, and the repositories
   // tagged on GitHub it doesn't list already
@@ -716,18 +736,6 @@
     box.onkeydown = (ev) => { if (ev.target === box && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); detail(l); } };
   };
 
-  // the week's picks: null till npm has said how often each is downloaded
-  function picks(all) {
-    const listed = ranked(all.filter((l) => !l.github && hotOf(l) > 0), "hot");
-    if (!listed.length) return null;
-    // the day's: one of the community's most downloaded not installed
-    // yet, a different one each day
-    let pool = listed.filter((l) => l.community && !entryOf(l.package)).slice(0, 14);
-    if (!pool.length) pool = listed.slice(0, 14);
-    const day = pool[today() % pool.length];
-    const starred = all.filter((l) => l.github?.stars > 0).sort((a, b) => b.github.stars - a.github.stars || nameOrder(a, b)).slice(0, 5);
-    return { day, top: listed.slice(0, 5), starred };
-  }
   function hero(l) {
     const box = el("article", "pm-hero");
     opens(box, l);
@@ -741,9 +749,9 @@
     top.append(lg, who);
     const stats = el("div", "pm-stats");
     const stat = (v, k) => { const s = el("div", "pm-stat"); s.append(el("b", "", v), el("span", "", k)); stats.append(s); };
-    stat(count(hotOf(l)), t("Downloads last week"));
-    const u = window.pmCounts?.users(l.package);
+    const u = usersOf(l);
     if (u) stat(count(u), t("Users"));
+    if (hotOf(l) || !u) stat(count(hotOf(l)), t("Downloads last week"));
     stat(t(SHORT[kindOf(l)]), t("Kind"));
     if (l.npm?.version) stat("v" + l.npm.version, t("Version"));
     const acts = el("div", "pm-hact");
@@ -770,8 +778,9 @@
     return box;
   }
   function recSection(all) {
-    const p = picks(all);
-    if (!p && npmAnswered) return null;
+    const p = npmAnswered && (countsGone || window.pmCounts?.answered)
+      ? weekPicks?.(all, { usersOf, likesOf, hotOf, byHot, entryOf }) : undefined;
+    if (p === null) return null;
     const sec = el("section", "pm-sec pm-recs");
     const h = el("div", "pm-rectitle");
     h.append(el("h2", "", t("This week")), el("span", "", new Date().toLocaleDateString(intlLang(), { month: "long", day: "numeric" })));
@@ -785,8 +794,10 @@
         grid.append(g);
       }
     } else {
-      grid.append(hero(p.day), rankList(t("Most downloaded"), t("last week, on npm"), p.top, (l) => t(SHORT[kindOf(l)]) + " · ↓" + t("{n}/week", { n: count(hotOf(l)) })));
-      if (p.starred.length) grid.append(rankList(t("Most starred"), t("on GitHub"), p.starred, (l) => "★ " + count(l.github.stars) + " · " + l.github.owner));
+      grid.append(hero(p.day));
+      if (p.used.length) grid.append(rankList(t("Most used"), t("in magpie, last week"), p.used, (l) => t(SHORT[kindOf(l)]) + " · " + t("{n} use it", { n: count(usersOf(l)) })));
+      else grid.append(rankList(t("Most downloaded"), t("last week, on npm"), p.downloaded, (l) => t(SHORT[kindOf(l)]) + " · ↓" + t("{n}/week", { n: count(hotOf(l)) })));
+      if (p.liked.length) grid.append(rankList(t("Most liked"), t("liked in magpie"), p.liked, (l) => "♥ " + count(likesOf(l)) + " · " + t(SHORT[kindOf(l)])));
       else grid.classList.add("two");
     }
     sec.append(h, grid);
@@ -799,7 +810,7 @@
     b.type = "button";
     b.setAttribute("aria-haspopup", "menu");
     b.setAttribute("aria-expanded", "false");
-    b.append(el("span", "", name), el("b", "", now), glyph("M4.5 6.5 8 10l3.5-3.5", 10, 1.8));
+    b.append(el("span", "", name), el("b", "", now), glyph("M4.5 6.2 8 9.7l3.5-3.5", 10, 1.8));
     b.onclick = (ev) => { ev.stopPropagation(); open(b); };
     return b;
   }
@@ -883,7 +894,7 @@
       const more = el("button", "pm-more");
       more.type = "button";
       more.append(el("span", "", t("See all")), glyph("M6 3.5 10.5 8 6 12.5", 11, 1.7));
-      more.onclick = () => { kindPick = k; drawBody(); page.scrollTo({ top: 0 }); };
+      more.onclick = () => { kindPick = k; drawBody(); };
       h.append(el("span", "grow"), more);
     }
     box.append(h, cardGrid(list.slice(0, limit)));
@@ -1051,9 +1062,11 @@
     const partners = window.pmPartners?.({ f, all: everything(() => true), kindPick, srcPick, onlyNew, entryOf, kindOf, opens, npm, logo, actionFor, glyph, OUTL });
     if (partners) out.push(partners);
     if (!f) {
-      const rec = !kindPick && recSection(all);
+      const rec = recSection(all);
       if (rec) out.push(rec);
       out.push(...market(all));
+      // a kind picked keeps the week's picks; pluginglide.js glides the bar up
+      if (window.pmGlide) out.push(pmGlide.room(kindPick, page));
       out.push(manual(), footer());
       if (mine?.registry) {
         out.push(regBox = regBox || el("div", "pm-registry"));
@@ -1873,6 +1886,8 @@
       w.append(glyph(SHIELD, 12, 1.5), el("span", "", t(from, { owner: l.github.owner, topic })));
       main.append(w);
     }
+    // pluginlink.js's, for a package the market doesn't list
+    main.append(l.note || "");
     if (l.replaces) main.append(el("p", "pm-note", t("magpie's own sign-in to this subscription is deprecated: this plugin takes its place, and accounts signed in there move to it.")));
     const readme = el("div", "pm-readme");
     const pageKey = l.package + "\n" + (document.documentElement.lang || "en");
@@ -1935,4 +1950,9 @@
   // opened on the Plugins tab (?view=plugins): app.js showed it before
   // this file was here to load it
   if (view === "plugins") load();
+  // a package's sheet over the page the reader is on, for a plugin page's
+  // magpie.openPlugin, or the window opened by a magpie://plugin link
+  // (?plugin=): pluginlink.js
+  window.pluginOpen = (n) => import("./pluginlink.js").then((m) => m.open(n, async () => (mine && listings || await load(), [[listings, tagged], npm, detail])));
+  if (params.has("plugin")) pluginOpen(params);
 })();

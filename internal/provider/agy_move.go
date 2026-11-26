@@ -24,8 +24,11 @@ import (
 const (
 	agyCLIID      = "agy-cli"
 	agyCLIPackage = "@magpie-community/opencode-agy-cli-auth"
-	// 0.1.68: auth.import takes the old plugin's sign-ins
-	agyCLIMin = "0.1.68"
+	// 0.1.133: each account moved gets an agy home of its own, and a
+	// request of one never goes on in another's agy, so one account's
+	// 429 no longer rests the other (Archivemylife on X); 0.1.68:
+	// auth.import takes the old plugin's sign-ins
+	agyCLIMin = "0.1.133"
 )
 
 // agyMoving are the Antigravity accounts agy-cli doesn't have yet, as the
@@ -106,6 +109,30 @@ func AgyMoveUsers() []string {
 		out = append(out, agyWho(a))
 	}
 	return out
+}
+
+// AgyHasEvery reports whether Antigravity (local agy CLI) is signed in
+// and has every account of the withdrawn Antigravity plugin, by email:
+// then nothing is left to move, and the old plugin only sends requests
+// agy-cli could. An old account with no email can't be matched, so it
+// counts as not there. Account discovery being off changes nothing here:
+// these are the user's own sign-ins.
+func AgyHasEvery() bool {
+	have := map[string]bool{}
+	for _, a := range plugin.Auths(agyCLIID) {
+		if who := agyWho(a); who != "" {
+			have[who] = true
+		}
+	}
+	if len(have) == 0 {
+		return false
+	}
+	for _, a := range plugin.Auths("antigravity") {
+		if a["type"] == "oauth" && !have[agyWho(a)] {
+			return false
+		}
+	}
+	return true
 }
 
 // MoveToAgy brings Antigravity's accounts into agy-cli: the plugin

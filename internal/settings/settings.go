@@ -124,6 +124,11 @@ type Settings struct {
 	// westernUnits, which asked for K/M/B: what that chose is now the
 	// default, so an old file's is left unread.
 	ChineseUnits bool `json:"chineseUnits,omitempty"`
+	// InUncached keeps the Requests list's In at the vendor's own input,
+	// what the prompt cache neither read nor wrote, also where a narrow
+	// window leaves the cache columns out and In otherwise says the whole
+	// prompt (01e13f0e0; JonahFu on X, who wanted In as it was).
+	InUncached bool `json:"inUncached,omitempty"`
 	// DayStart is the hour a day starts at in usage: 0 is midnight, and 1 to
 	// 6 count the small hours before it with the day before (ssharpcc on X,
 	// who codes past 1am). The Usage page, its daily cards and the gateway
@@ -382,6 +387,10 @@ type Settings struct {
 	// ClaudeWarmup is CodexWarmup for the Claude accounts, the request
 	// sent through Claude Code.
 	ClaudeWarmup string `json:"claudeWarmup,omitempty"`
+	// AgyWarmup is CodexWarmup for the agy CLI's (Antigravity's) accounts,
+	// each pool of models (Gemini, Claude & GPT) started on its own: a
+	// pool's window starts at the first request to one of its models.
+	AgyWarmup string `json:"agyWarmup,omitempty"`
 	// CodexWarmAt starts each ChatGPT account's 5-hour window at a time of
 	// day of the user's choosing, local "15:04", with the same tiny
 	// request: an account whose 5-hour window isn't running then gets one,
@@ -1154,6 +1163,12 @@ type Settings struct {
 	// or an old one, is not shown until it is ticked. HiddenModels is not
 	// read for such an agent. An agent named with no entries is shown none.
 	PickedModels map[string][]string `json:"pickedModels,omitempty"`
+	// PicksJoin are the agents, by id, shown only the models picked for
+	// them (PickedModels) that take in the models picked for a provider as
+	// well (eiyuuzaki2333 on X): a model ticked in a provider's editor, as
+	// it is added or later, is ticked for them too, so it isn't ticked
+	// twice. Another model that comes later still waits to be ticked.
+	PicksJoin []string `json:"picksJoin,omitempty"`
 	// OwnModelsHidden are the agents, by id, whose pickers leave out the
 	// models the agent reaches on its own, not through magpie (DeepSeek
 	// Harness's own DeepSeek models, #1642): only magpie's are offered, and
@@ -1627,7 +1642,8 @@ var (
 	Currencies = []string{"usd", "cny", CurrencyByProvider}
 	// TotalCurrencies are TotalCurrency's values, "" being usd.
 	TotalCurrencies = []string{"usd", "cny"}
-	// Warmups are CodexWarmup's and ClaudeWarmup's values, off as "".
+	// Warmups are CodexWarmup's, ClaudeWarmup's and AgyWarmup's values,
+	// off as "".
 	Warmups = []string{"", "week", "all"}
 	// TrayEvery are TrayUsageEvery's values, in minutes.
 	TrayEvery = []int{1, 3, 5, 10, 30}
@@ -2708,6 +2724,9 @@ func saveOwn(s Settings, recording, reads bool) error {
 	if !slices.Contains(Warmups, s.ClaudeWarmup) {
 		return fmt.Errorf("claude warm-up must be off, week or all, not %q", s.ClaudeWarmup)
 	}
+	if !slices.Contains(Warmups, s.AgyWarmup) {
+		return fmt.Errorf("agy warm-up must be off, week or all, not %q", s.AgyWarmup)
+	}
 	for _, at := range slices.Concat(s.CodexWarmAts, s.ClaudeWarmAts) {
 		if _, _, ok := Clock(at); !ok {
 			return fmt.Errorf("a warm-up's time of day must look like 06:00, not %q", at)
@@ -3048,6 +3067,9 @@ func (s Settings) normal() Settings {
 	}
 	if s.ClaudeWarmup == "off" {
 		s.ClaudeWarmup = ""
+	}
+	if s.AgyWarmup == "off" {
+		s.AgyWarmup = ""
 	}
 	if s.TrayUsageEvery == 0 {
 		s.TrayUsageEvery = 3

@@ -415,8 +415,28 @@ var failedAsText = map[string]bool{"devin": true, "qoder": true, "qoder-cn": tru
 // deepseek-v4.1-flash, whose host doesn't say so), Command Code's
 // plugin, which replays it for a Go key as the built-in did to
 // /alpha/generate, and Qoder's, which sends it on as Qoder's own client
-// does (uk.jent on Discord; plugin 0.2.42).
+// does (uk.jent on Discord; plugin 0.2.42). Each of these is sent
+// noReasoning on a tool turn that has none (chatWantsReasoning).
+//
+// Devin's plugin reads it too (0.1.36, plugins#703) and gives it to a
+// model that isn't Claude as the turn's thinking: swe-2 thinks on a tool
+// loop's later steps only when the steps before carry theirs. Measured
+// 2026-11-25 on swe-2-high through magpie, five read_file steps then the
+// next: a streamed Chat request with each step's reasoning_content
+// thought 5 of 5, the same without it 0 of 5, and a Codex Responses body
+// with each step's reasoning item, built here without it, 0 of 5
+// (@Anotiaww on X). Devin is sent no noReasoning: the plugin would give
+// swe-2 a thought it never had.
 func chatReplaysReasoning(host, model string) bool {
+	return chatWantsReasoning(host, model) || host == "devin"
+}
+
+// chatWantsReasoning is whether a Chat upstream that has a turn's
+// reasoning back (chatReplaysReasoning) wants some on every tool turn,
+// noReasoning when the client kept none: DeepSeek refuses a request
+// without it (#1462), and Command Code's and Qoder's plugins read the
+// space as none.
+func chatWantsReasoning(host, model string) bool {
 	return strings.Contains(host, "deepseek") || strings.Contains(strings.ToLower(model), "deepseek") || host == provider.CommandCodePlanID || host == "qoder" || host == "qoder-cn"
 }
 
@@ -445,7 +465,7 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 	if r.System != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": r.System})
 	}
-	replay := chatReplaysReasoning(host, model)
+	replay, wants := chatReplaysReasoning(host, model), chatWantsReasoning(host, model)
 	// MiniMax's own Chat API gives a model's thinking in the text, between
 	// <think> tags, and wants it back there on the turns after (its
 	// interleaved thinking): the decoder takes it out as thinking (#1267),
@@ -551,7 +571,7 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 				}
 			} else if think != "" && replay {
 				am["reasoning_content"] = think
-			} else if replay && (len(calls) > 0 || afterTool) {
+			} else if wants && (len(calls) > 0 || afterTool) {
 				// a tool call with no thinking (another model's turn), or a
 				// reply to a tool result with none, which DeepSeek turns the
 				// whole request away for (#1462, #1822)
@@ -1172,6 +1192,10 @@ type cUsage struct {
 	CompletionTokensDetails *struct {
 		ReasoningTokens int `json:"reasoning_tokens"`
 	} `json:"completion_tokens_details,omitempty"`
+	// ReasoningTokens is Copilot's count of them, at the top of its usage
+	// beside completion_tokens, which counts them too (probed live on
+	// gemini-4-hydrogen: "completion_tokens":88, "reasoning_tokens":48)
+	ReasoningTokens int `json:"reasoning_tokens"`
 	// what others say was read from their cache, when prompt_tokens_details
 	// doesn't: DeepSeek's hits, Moonshot's cached_tokens, Mistral's
 	// num_cached_tokens (its older top-level count, which its API still
@@ -1225,6 +1249,9 @@ func (u cUsage) usage() Usage {
 	}
 	if u.CompletionTokensDetails != nil {
 		out.Reasoning = u.CompletionTokensDetails.ReasoningTokens
+	}
+	if out.Reasoning == 0 {
+		out.Reasoning = u.ReasoningTokens
 	}
 	if c := u.Credit; c != nil && *c >= 0 {
 		out.Credits = c

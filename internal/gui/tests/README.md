@@ -161,6 +161,30 @@ node --test --test-concurrency=1 internal/gui/tests/gateway-caller-keys.test.cjs
 
 ## Other Browser Regressions
 
+`artifacts-page.test.cjs` checks Work › Artifacts (docs/subsystems/artifacts.md):
+its button after Library's and gone with the Library off, a row per
+artifact newest first naming the agent and, with more than one, its
+versions; a click opens the newest, the menu copies its link, opens an
+earlier version from the app's menu (none with one version) and deletes it
+after asking, with no click opening the row twice. None says so, and a
+find field shows from 8. Every language, both engines, a window at 1000
+and 560 and a browser at 420, with no sideways scroll and the API faked.
+
+`artifact-runtime.test.cjs` checks the page runtime (internal/artifact/runtime.js)
+as a page written for claude.ai's meets it: window.claude before the page's
+scripts, db and user resolved and the rest null, a bad path a TypeError at
+once, refused calls rejected with their code, every call text/plain from
+Origin null with the page's token, onSnapshot following the page's writes
+and the agent's, a page that declares artifact publishing itself (the
+whole page reloads every open view, files keep the saving view running and
+build on its version, a conflict sends the loser to the winner, ifMatch's
+answer brings another's save), publish: false refusing with nothing sent,
+a page that declares assets uploading a file as its bytes (options.type
+over the blob's), showing it in an <img> from /_blob/, listing and
+deleting it, with its own mistakes refused before any request, and a
+shared copy resolving every capability null, assets too. Both engines, under the
+sandbox CSP, the store faked.
+
 `mask-alert.test.cjs` checks Insights › Masking's Masking alert (Must2333 on
 X): after the page's list and not in Settings › Usage (nb5p on Discord), Off
 to begin with; On saves `maskAlert`, another setting saved later keeps it,
@@ -1528,6 +1552,16 @@ found skill with a byte copy in another agent shows both agents' icons and
 no "differs in"; one that really differs still says so. Chromium and
 WebKit, in English and Chinese, with `/api/plugins` faked.
 
+`library-sections.test.cjs` hides the Library's tabs from Plugins ›
+Built-in (lantian_x on X): the Library row's Sections link opens a menu of
+the tabs, each ticked; unticking Hooks and Environment variables posts the
+plugin's `hide` setting at once and the link says two are hidden; the
+Library page's tabs and, from 1024 points, the sidebar's list leave them
+out, and Hooks, open last, gives way to Instructions. The last tab shown
+can't be hidden and nothing is posted then; nothing but the setting is
+posted at all. Every language, Chromium and WebKit, at 1100, 800 and 420
+points, with the API faked.
+
 `library-problems-hide.test.cjs` opens the Library with Grok Build's
 AGENTS.md failing to stat at every sync (Zachary-wW, #3745), the API
 answering as `library.go` does, the error texts as magpie's own sync gave
@@ -2838,3 +2872,23 @@ tone, #26251E. It checks that the row draws that picture as a mask in the
 text colour, and that it shows in both themes, all five languages, at 980px
 and 420px, in Chromium and WebKit (chen2652). `ARTIFACT_DIR` keeps the row's
 screenshots.
+
+The community badge's shield and the card's counts (star, person, heart,
+downloads) are held level by `icon-text-align.test.cjs`, with every other
+glyph beside words. `plugin-badge-align.test.cjs` is gone (11-23): it
+measured the icon against the words' whole ink, descenders and "/week"
+included, so it asked for a .1em nudge down that sat the person 1.5 device
+px below its count in the real app. Against the digits, headless Chromium
+and WebKit read the same row 0.4 to 1.3px apart by language (each picks
+its own font for the digits), so a screenshot bound of 1px held either way.
+
+## Requests' In without the cache
+
+`ledger-in-uncached.test.cjs` checks Settings › Usage › Advanced › In
+without cache (JonahFu on X): folded and Off at first, in the app and in a
+page served to a browser; On saves `inUncached`, another save keeps it, Off
+saves false, and no click moves the page. With it on, the Requests list's In
+is the vendor's in beside the cache columns and with them left out
+(`.led.tight`), and the header says so; with it off, the whole prompt as
+`ledger-in-whole` has it. Every language, 1100 and 390 wide, Chromium and
+WebKit; the API is faked.
