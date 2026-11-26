@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -142,6 +143,9 @@ func (p *Proxy) runAgentLoop(ctx context.Context, followups <-chan []byte, turn 
 	for {
 		before := execN
 		sealed, skipped, _, err := p.agentGatewayRound(ctx, chat, write, &execN)
+		if errors.Is(err, errStopped) {
+			break
+		}
 		if err != nil {
 			write(agentTextFrame("cursor ide: " + err.Error()))
 			break
@@ -239,6 +243,9 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 		return nil, nil, false, errf("chat")
 	}
 	resp, err := p.postChat(ctx, chat, body)
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		return nil, nil, false, errStopped
+	}
 	if err != nil {
 		return nil, nil, false, errf("gateway")
 	}
@@ -248,7 +255,10 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 	}
 	var asm toolAssembler
 	var said strings.Builder
-	eachPiece(resp.Body, func(piece chatPiece) {
+	readErr := eachPiece(resp.Body, func(piece chatPiece) error {
+		if ctx.Err() != nil {
+			return errStopped
+		}
 		if piece.thinking != "" {
 			write(agentThinkingFrame(piece.thinking))
 			said.WriteString(piece.thinking)
@@ -264,7 +274,14 @@ func (p *Proxy) agentGatewayRound(ctx context.Context, chat Chat, write func([]b
 				write(frame)
 			}
 		}
+		return nil
 	})
+	if ctx.Err() != nil || errors.Is(readErr, errStopped) || errors.Is(readErr, context.Canceled) {
+		return nil, nil, false, errStopped
+	}
+	if readErr != nil {
+		return nil, nil, false, readErr
+	}
 	text := said.String()
 	run, skipped := sealCalls(&asm, text, func(msg string) { write(agentTextFrame(msg)) })
 	Note(fmt.Sprintf("agent tool round runnable=%d skipped=%d images=%d", len(run), len(skipped), countChatImages(chat.Messages)))

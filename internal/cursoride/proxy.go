@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -71,6 +72,9 @@ func (p *Proxy) Start() (string, error) {
 	}
 	p.ca, p.key = ca, key
 	p.leaves = map[string]*tls.Certificate{}
+	if p.hub != nil {
+		p.hub.stopAll()
+	}
 	p.hub = newHub()
 	p.client = &http.Client{Transport: upstreamTransport()}
 	addr := p.Addr
@@ -94,8 +98,14 @@ func (p *Proxy) Start() (string, error) {
 func (p *Proxy) Close() error {
 	p.mu.Lock()
 	srv := p.srv
+	h := p.hub
 	p.ln, p.srv = nil, nil
 	p.mu.Unlock()
+	// In-flight gateway calls use the session context, not the hijacked
+	// CONNECT, so shutting the listener down does not stop them.
+	if h != nil {
+		h.stopAll()
+	}
 	if srv == nil {
 		return nil
 	}
@@ -199,15 +209,28 @@ func (p *Proxy) inferenceSSE(w http.ResponseWriter, r *http.Request) {
 		p.forward(w, r.WithContext(r.Context()), body, false)
 		return
 	}
+	// Leaving this stream does not cancel the gateway call. Cursor can
+	// open RunInferenceSSE again for the same request id and keep reading.
+	// A second reader replaces this one; the frames stay queued.
+	watch, detach := s.attach()
+	defer detach()
 	w.Header().Set("Content-Type", "application/connect+proto")
 	w.WriteHeader(http.StatusOK)
 	fl, _ := w.(http.Flusher)
+	// Headers have to leave before the next frame. A reconnect often
+	// finds an empty queue, and an unflushed WriteHeader never reaches
+	// the client until something is pushed.
+	if fl != nil {
+		fl.Flush()
+	}
 	for {
-		frame, ok := s.next(r.Context())
+		frame, ok := s.next(r.Context(), watch)
 		if !ok {
 			return
 		}
-		_, _ = w.Write(frame)
+		if _, werr := w.Write(frame); werr != nil {
+			return
+		}
 		if fl != nil {
 			fl.Flush()
 		}
@@ -316,20 +339,28 @@ func (p *Proxy) localAppend(w http.ResponseWriter, s *sess, raw []byte, appendMs
 			s.push(invocationIdFrame(id))
 			s.push(endFrame(id, err.Error()))
 		} else {
-			go p.runChat(s, chat, appendMs, compileMs)
+			ctx, gen := s.beginRun(chat.InvocationID)
+			go p.runChat(s, ctx, gen, chat, appendMs, compileMs)
 		}
 	case KindCancel:
-		s.stop()
+		// Stops this invocation. The SSE session and its parent context
+		// stay, so the next invoke on this request id can run.
+		s.stopRun()
 	case KindFinish:
 		s.finish()
 	}
 	writeProto(w, nil, "application/proto")
 }
 
-func (p *Proxy) runChat(s *sess, chat Chat, appendMs, compileMs int64) {
+func (p *Proxy) runChat(s *sess, ctx context.Context, gen uint64, chat Chat, appendMs, compileMs int64) {
 	noteBidiHistory(chat)
 	defer Note("chat done model=" + chat.Model + " path=BidiAppend")
-	s.push(invocationIdFrame(chat.InvocationID))
+	if ctx.Err() != nil {
+		return
+	}
+	if !s.pushRun(gen, invocationIdFrame(chat.InvocationID)) {
+		return
+	}
 	var sawText bool
 	// bare counts rounds whose calls were all refused by the facade.
 	// Cursor never sees those calls, so it will not send a follow-up
@@ -339,10 +370,16 @@ func (p *Proxy) runChat(s *sess, chat Chat, appendMs, compileMs int64) {
 	// one completing tool_call_part, and Cursor's own loop continues.
 	bare := 0
 	for {
-		run, skipped, err := p.completeInference(s, chat, &sawText, appendMs, compileMs)
+		if ctx.Err() != nil {
+			return
+		}
+		run, skipped, err := p.completeInference(ctx, s, gen, chat, &sawText, appendMs, compileMs)
 		appendMs, compileMs = 0, 0
+		if errors.Is(err, errStopped) || ctx.Err() != nil {
+			return
+		}
 		if err != nil {
-			s.push(endFrame(chat.InvocationID, err.Error()))
+			s.endRun(gen, chat.InvocationID, err.Error(), false)
 			return
 		}
 		Note(fmt.Sprintf("agent tool round runnable=%d skipped=%d images=%d", len(run), len(skipped), countChatImages(chat.Messages)))
@@ -356,16 +393,13 @@ func (p *Proxy) runChat(s *sess, chat Chat, appendMs, compileMs int64) {
 		}
 		feedSkipped(&chat, skipped)
 	}
-	if sawText {
-		s.push(textFrame(chat.InvocationID, "", true))
-	}
-	s.push(endFrame(chat.InvocationID, ""))
+	s.endRun(gen, chat.InvocationID, "", sawText)
 }
 
 // completeInference asks the gateway once and writes text as it arrives.
 // Runnable calls go out as one completing tool_call_part each. Skipped
 // calls are not sent. The error is the frame text.
-func (p *Proxy) completeInference(s *sess, chat Chat, sawText *bool, appendMs, compileMs int64) (run, skipped []toolBuf, err error) {
+func (p *Proxy) completeInference(ctx context.Context, s *sess, gen uint64, chat Chat, sawText *bool, appendMs, compileMs int64) (run, skipped []toolBuf, err error) {
 	noteRequestToolArgs(chat.Messages)
 	jsonStart := time.Now()
 	body, jerr := chat.JSON()
@@ -374,7 +408,7 @@ func (p *Proxy) completeInference(s *sess, chat Chat, sawText *bool, appendMs, c
 		return nil, nil, errf("chat")
 	}
 	reqStart := time.Now()
-	resp, derr := p.postChat(s.context(), chat, body)
+	resp, derr := p.postChat(ctx, chat, body)
 	ttfb := time.Since(reqStart).Milliseconds()
 	// A bare retry zeros append-ms and compile-ms. The cache counts on
 	// chat are from the invoke's compile, already logged on the first
@@ -384,6 +418,9 @@ func (p *Proxy) completeInference(s *sess, chat Chat, sawText *bool, appendMs, c
 		hit, miss = -1, -1
 	}
 	noteBidiTiming(appendMs, compileMs, jsonMs, ttfb, len(body), hit, miss)
+	if ctx.Err() != nil || errors.Is(derr, context.Canceled) {
+		return nil, nil, errStopped
+	}
 	if derr != nil {
 		return nil, nil, errf("gateway")
 	}
@@ -394,9 +431,14 @@ func (p *Proxy) completeInference(s *sess, chat Chat, sawText *bool, appendMs, c
 	var asm toolAssembler
 	var said strings.Builder
 	var firstText int64 = -1
-	eachPiece(resp.Body, func(piece chatPiece) {
+	readErr := eachPiece(resp.Body, func(piece chatPiece) error {
+		if ctx.Err() != nil {
+			return errStopped
+		}
 		if piece.thinking != "" {
-			s.push(thinkingFrame(chat.InvocationID, piece.thinking))
+			if !s.pushRun(gen, thinkingFrame(chat.InvocationID, piece.thinking)) {
+				return errStopped
+			}
 			if firstText < 0 {
 				firstText = time.Since(reqStart).Milliseconds()
 			}
@@ -407,7 +449,9 @@ func (p *Proxy) completeInference(s *sess, chat Chat, sawText *bool, appendMs, c
 		// must ride non-final text_part frames (#Cursor 3.27 local loop).
 		if piece.text != "" {
 			*sawText = true
-			s.push(textFrame(chat.InvocationID, piece.text, false))
+			if !s.pushRun(gen, textFrame(chat.InvocationID, piece.text, false)) {
+				return errStopped
+			}
 			if firstText < 0 {
 				firstText = time.Since(reqStart).Milliseconds()
 			}
@@ -422,9 +466,35 @@ func (p *Proxy) completeInference(s *sess, chat Chat, sawText *bool, appendMs, c
 		for _, d := range piece.tools {
 			asm.add(d)
 		}
+		return nil
 	})
-	run, skipped = finishInferenceTools(s, chat.InvocationID, &asm, said.String())
+	if ctx.Err() != nil || errors.Is(readErr, errStopped) || errors.Is(readErr, context.Canceled) {
+		return nil, nil, errStopped
+	}
+	if readErr != nil {
+		Note("chat fail path=BidiAppend reason=stream")
+		return nil, nil, readErr
+	}
+	// A clean end still seals, including a body with no [DONE]. A stream
+	// error or a canceled read returned above, so this seal is only a
+	// body that finished.
+	run, skipped, frames := finishInferenceTools(chat.InvocationID, &asm, said.String())
+	sent := true
+	if len(frames) > 0 {
+		sent = s.emitRun(gen, frames)
+	}
+	markers := markupMarkers(said.String())
+	state := "skipped"
+	if sent {
+		state = "written"
+	}
+	for _, t := range run {
+		noteToolTrace("frames", t.name, t.args, t.frags, t.placeholders, t.fill, markers, state)
+	}
 	Note(fmt.Sprintf("bidi timing first-text-ms=%d seal-ms=%d", firstText, time.Since(reqStart).Milliseconds()))
+	if ctx.Err() != nil || !sent {
+		return nil, nil, errStopped
+	}
 	return run, skipped, nil
 }
 
@@ -528,16 +598,14 @@ func agentHistoryMode(turn AgentTurn) string {
 // Pi can run. The part's arguments are the sealed JSON, not the unsent
 // tail of a fragment. Cursor's local loop parses that part and runs the
 // tool. A call that is still missing its strings is not sent.
-func finishInferenceTools(s *sess, invocation string, asm *toolAssembler, text string) (run, skipped []toolBuf) {
-	markers := markupMarkers(text)
+func finishInferenceTools(invocation string, asm *toolAssembler, text string) (run, skipped []toolBuf, frames [][]byte) {
 	run, skipped = sealCalls(asm, text, func(msg string) {
-		s.push(textFrame(invocation, msg, false))
+		frames = append(frames, textFrame(invocation, msg, false))
 	})
 	for _, t := range run {
-		s.push(toolCallFrame(invocation, t.id, t.name, displayArgs(t.name, t.args), true))
-		noteToolTrace("frames", t.name, t.args, t.frags, t.placeholders, t.fill, markers, "written")
+		frames = append(frames, toolCallFrame(invocation, t.id, t.name, displayArgs(t.name, t.args), true))
 	}
-	return run, skipped
+	return run, skipped, frames
 }
 
 // agentRun answers AgentService/Run when the model is in the catalog.
@@ -735,7 +803,7 @@ func writeSealedTools(asm *toolAssembler, execN *uint32, write func([]byte)) {
 	}
 }
 
-func eachPiece(r io.Reader, fn func(chatPiece)) {
+func eachPiece(r io.Reader, fn func(chatPiece) error) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
 	for sc.Scan() {
@@ -743,11 +811,21 @@ func eachPiece(r io.Reader, fn func(chatPiece)) {
 		if !ok {
 			continue
 		}
-		fn(piece)
+		if piece.fail != "" {
+			return &streamFail{msg: piece.fail}
+		}
+		if err := fn(piece); err != nil {
+			return err
+		}
 		if piece.done {
-			return
+			return nil
 		}
 	}
+	err := sc.Err()
+	if errors.Is(err, bufio.ErrTooLong) {
+		return errf("gateway stream line too large")
+	}
+	return err
 }
 
 func (p *Proxy) fetch(r *http.Request, body []byte) (int, []byte, string, error) {
@@ -1229,9 +1307,32 @@ func isUUID(s string) bool {
 	return true
 }
 
+// frameQueueMax is how many unread inference frames one session holds.
+// A later RunInferenceSSE drains them. Past the cap the producer waits
+// instead of keeping the rest of the completion in memory. The wait ends
+// when a reader takes a frame, this invocation is canceled, or the proxy
+// closes. The reader leaving does not cancel the invocation: Cursor opens
+// the stream again for the same request id.
+const frameQueueMax = 256
+
+// errStopped is an invocation ended by KindCancel, replaced by a newer
+// invoke, or cut by the proxy closing. It is not a provider failure.
+var errStopped = errors.New("cursor ide: stopped")
+
+// streamFail is a provider error carried in a 200 chat stream.
+type streamFail struct{ msg string }
+
+func (e *streamFail) Error() string {
+	if e == nil || e.msg == "" {
+		return "cursor ide: gateway stream error"
+	}
+	return e.msg
+}
+
 type hub struct {
-	mu sync.Mutex
-	m  map[string]*sess
+	mu     sync.Mutex
+	m      map[string]*sess
+	closed bool
 }
 
 func newHub() *hub { return &hub{m: map[string]*sess{}} }
@@ -1242,8 +1343,10 @@ func (h *hub) sess(id string) *sess {
 	if s := h.m[id]; s != nil {
 		return s
 	}
-	s := &sess{ready: make(chan struct{}), note: make(chan struct{})}
-	s.ctx, s.cancel = context.WithCancel(context.Background())
+	if h.closed {
+		return closedSess(h, id)
+	}
+	s := newSess(h, id)
 	h.m[id] = s
 	return s
 }
@@ -1252,7 +1355,7 @@ func (h *hub) mark(id string, local bool, route Route, conv string) *sess {
 	s := h.sess(id)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.decided {
+	if s.decided || s.done {
 		return s
 	}
 	s.local, s.route, s.conv = local, route, conv
@@ -1271,19 +1374,74 @@ func (h *hub) localOf(id string) *sess {
 	return s
 }
 
+func (h *hub) stopAll() {
+	h.mu.Lock()
+	h.closed = true
+	all := h.m
+	h.m = map[string]*sess{}
+	h.mu.Unlock()
+	for _, s := range all {
+		s.shutdown()
+	}
+}
+
+func (h *hub) dropIfIdle(s *sess) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done && s.readers == 0 && h.m[s.id] == s {
+		delete(h.m, s.id)
+	}
+}
+
 type sess struct {
-	mu       sync.Mutex
-	local    bool
-	decided  bool
-	ready    chan struct{}
-	route    Route
-	conv     string
-	ctx      context.Context
-	cancel   context.CancelFunc
-	frames   [][]byte
-	note     chan struct{}
-	done     bool
-	finished bool
+	id      string
+	hub     *hub
+	mu      sync.Mutex
+	local   bool
+	decided bool
+	ready   chan struct{}
+	route   Route
+	conv    string
+	// parent outlives every invocation. KindCancel does not cancel it.
+	parent       context.Context
+	parentCancel context.CancelFunc
+	runCtx       context.Context
+	runCancel    context.CancelFunc
+	runGen       uint64
+	runInv       string
+	runEnded     bool
+	frames       [][]byte
+	note         chan struct{}
+	space        chan struct{}
+	done         bool
+	finished     bool
+	readers      int
+	readerGen    uint64
+	watchCancel  context.CancelFunc
+}
+
+func newSess(h *hub, id string) *sess {
+	s := &sess{
+		id:    id,
+		hub:   h,
+		ready: make(chan struct{}),
+		note:  make(chan struct{}),
+		space: make(chan struct{}),
+	}
+	s.parent, s.parentCancel = context.WithCancel(context.Background())
+	return s
+}
+
+func closedSess(h *hub, id string) *sess {
+	s := newSess(h, id)
+	s.done = true
+	s.finished = true
+	s.decided = true
+	close(s.ready)
+	s.parentCancel()
+	return s
 }
 
 func (s *sess) wait(ctx context.Context) bool {
@@ -1301,30 +1459,180 @@ func (s *sess) isLocal() bool {
 	return s.decided && s.local
 }
 
-func (s *sess) context() context.Context {
+// attach is one RunInferenceSSE reader. A newer reader cancels the watch
+// so the previous handler stops reading. The gateway call is not canceled.
+func (s *sess) attach() (context.Context, func()) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.ctx
+	if s.watchCancel != nil {
+		s.watchCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.readerGen++
+	gen := s.readerGen
+	s.watchCancel = cancel
+	s.readers++
+	s.mu.Unlock()
+	var once sync.Once
+	return ctx, func() {
+		once.Do(func() {
+			s.mu.Lock()
+			s.readers--
+			if s.readerGen == gen {
+				s.watchCancel = nil
+			}
+			s.mu.Unlock()
+			if s.hub != nil {
+				s.hub.dropIfIdle(s)
+			}
+		})
+	}
 }
 
-func (s *sess) push(b []byte) {
+func (s *sess) beginRun(inv string) (context.Context, uint64) {
+	s.mu.Lock()
+	if s.done {
+		ctx := s.parent
+		gen := s.runGen
+		s.mu.Unlock()
+		return ctx, gen
+	}
+	if !s.runEnded && s.runInv != "" {
+		s.queueLocked(endFrame(s.runInv, ""))
+	}
+	prev := s.runCancel
+	s.runGen++
+	gen := s.runGen
+	s.runInv = inv
+	s.runEnded = false
+	ctx, cancel := context.WithCancel(s.parent)
+	s.runCtx = ctx
+	s.runCancel = cancel
+	s.mu.Unlock()
+	if prev != nil {
+		prev()
+	}
+	return ctx, gen
+}
+
+func (s *sess) stopRun() {
 	s.mu.Lock()
 	if s.done {
 		s.mu.Unlock()
 		return
 	}
+	s.runGen++
+	prev := s.runCancel
+	s.runCancel = nil
+	if !s.runEnded && s.runInv != "" {
+		s.runEnded = true
+		s.queueLocked(endFrame(s.runInv, ""))
+	}
+	s.mu.Unlock()
+	if prev != nil {
+		prev()
+	}
+}
+
+func (s *sess) push(b []byte) {
+	for {
+		s.mu.Lock()
+		if s.done {
+			s.mu.Unlock()
+			return
+		}
+		if len(s.frames) < frameQueueMax {
+			s.queueLocked(b)
+			s.mu.Unlock()
+			return
+		}
+		space := s.space
+		parent := s.parent
+		s.mu.Unlock()
+		select {
+		case <-space:
+		case <-parent.Done():
+			return
+		}
+	}
+}
+
+func (s *sess) pushRun(gen uint64, b []byte) bool {
+	for {
+		s.mu.Lock()
+		if s.done || gen != s.runGen {
+			s.mu.Unlock()
+			return false
+		}
+		if len(s.frames) < frameQueueMax {
+			s.queueLocked(b)
+			s.mu.Unlock()
+			return true
+		}
+		space := s.space
+		runCtx := s.runCtx
+		parent := s.parent
+		s.mu.Unlock()
+		if runCtx == nil {
+			return false
+		}
+		select {
+		case <-space:
+		case <-runCtx.Done():
+			return false
+		case <-parent.Done():
+			return false
+		}
+	}
+}
+
+func (s *sess) emitRun(gen uint64, frames [][]byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done || gen != s.runGen {
+		return false
+	}
+	for _, f := range frames {
+		s.queueLocked(f)
+	}
+	return true
+}
+
+func (s *sess) endRun(gen uint64, inv, message string, finalText bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done || gen != s.runGen || s.runEnded {
+		return false
+	}
+	s.runEnded = true
+	if finalText {
+		s.queueLocked(textFrame(inv, "", true))
+	}
+	s.queueLocked(endFrame(inv, message))
+	return true
+}
+
+func (s *sess) queueLocked(b []byte) {
 	s.frames = append(s.frames, b)
 	close(s.note)
 	s.note = make(chan struct{})
-	s.mu.Unlock()
 }
 
-func (s *sess) next(ctx context.Context) ([]byte, bool) {
+func (s *sess) popLocked() []byte {
+	b := s.frames[0]
+	s.frames = s.frames[1:]
+	close(s.space)
+	s.space = make(chan struct{})
+	return b
+}
+
+func (s *sess) next(conn, watch context.Context) ([]byte, bool) {
+	if watch == nil {
+		watch = context.Background()
+	}
 	for {
 		s.mu.Lock()
 		if len(s.frames) > 0 {
-			b := s.frames[0]
-			s.frames = s.frames[1:]
+			b := s.popLocked()
 			s.mu.Unlock()
 			return b, true
 		}
@@ -1335,19 +1643,12 @@ func (s *sess) next(ctx context.Context) ([]byte, bool) {
 		note := s.note
 		s.mu.Unlock()
 		select {
-		case <-ctx.Done():
+		case <-conn.Done():
+			return nil, false
+		case <-watch.Done():
 			return nil, false
 		case <-note:
 		}
-	}
-}
-
-func (s *sess) stop() {
-	s.mu.Lock()
-	cancel := s.cancel
-	s.mu.Unlock()
-	if cancel != nil {
-		cancel()
 	}
 }
 
@@ -1358,14 +1659,50 @@ func (s *sess) finish() {
 		return
 	}
 	s.finished = true
-	s.frames = append(s.frames, connectEnd())
 	s.done = true
-	close(s.note)
-	s.note = make(chan struct{})
-	cancel := s.cancel
+	s.queueLocked(connectEnd())
+	prev := s.runCancel
+	s.runCancel = nil
+	parent := s.parentCancel
 	s.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if prev != nil {
+		prev()
+	}
+	if parent != nil {
+		parent()
+	}
+	if s.hub != nil {
+		s.hub.dropIfIdle(s)
+	}
+}
+
+func (s *sess) shutdown() {
+	s.mu.Lock()
+	prev := s.runCancel
+	parent := s.parentCancel
+	watch := s.watchCancel
+	s.runCancel = nil
+	if !s.done {
+		s.done = true
+		s.finished = true
+		if !s.decided {
+			s.decided = true
+			close(s.ready)
+		}
+		close(s.note)
+		s.note = make(chan struct{})
+		close(s.space)
+		s.space = make(chan struct{})
+	}
+	s.mu.Unlock()
+	if prev != nil {
+		prev()
+	}
+	if parent != nil {
+		parent()
+	}
+	if watch != nil {
+		watch()
 	}
 }
 
