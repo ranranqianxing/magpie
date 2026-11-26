@@ -126,6 +126,11 @@ type Hub interface {
 	// gives: the switch turned off, the server removed or edited, here or
 	// by another magpie (the window, the CLI)
 	Prune()
+	// Met is told of an agent that connected to its own address from
+	// another computer (hubMeet): one magpie knows that isn't on this
+	// computer is recorded, and given the servers on the first time
+	// (library/remote_agents.go)
+	Met(agent string)
 }
 
 // HubServer is a server behind the hub as an agent is told of it: About
@@ -278,6 +283,153 @@ func hubServersOf(ctx context.Context, agent string) []HubServer {
 		}
 	}
 	return ss
+}
+
+// hubHeld are the servers behind agent's tools that the request of ctx
+// isn't given, by why (Passings_z on X: a held key from the host of a
+// Docker magpie was given 54 of 157 tools and told nothing). program: a
+// program run here, to a key held to some models, accounts or a spend
+// limit from elsewhere; here: one that acts as this computer's user;
+// browser: Magpie Browser, to a caller from elsewhere with no key (a web
+// page); memory: Magpie Memory, to a key not let use it. keyMCP counts
+// those the calling key may not use (access.Key.MCP), never named, as the
+// key's owner chose to keep them from whoever holds it. Another magpie's
+// router isn't told of the Remote magpie's router it was kept from: that
+// is no loss to anyone.
+type hubHeld struct {
+	program, here, browser, memory []string
+	keyMCP                         int
+}
+
+func hubHeldOf(ctx context.Context, agent string) hubHeld {
+	var h hubHeld
+	if MCPHub == nil {
+		return h
+	}
+	v, who := HubVisitorOf(ctx), access.Caller(ctx)
+	for _, s := range MCPHub.Servers(agent) {
+		if s.Bridge && FromRouter(ctx) {
+			continue
+		}
+		if ok, _ := who.MCPServer(s.Name); !ok {
+			h.keyMCP++
+			continue
+		}
+		if v.Gives(s) {
+			continue
+		}
+		switch hubHeldKind(s) {
+		case "browser":
+			h.browser = append(h.browser, s.Name)
+		case "memory":
+			h.memory = append(h.memory, s.Name)
+		case "here":
+			h.here = append(h.here, s.Name)
+		default:
+			h.program = append(h.program, s.Name)
+		}
+	}
+	return h
+}
+
+// hubHeldNames is names for a line, cut at a name to about 160 characters.
+func hubHeldNames(names []string) string {
+	out := names[0]
+	for i, n := range names[1:] {
+		if runeLen(out)+runeLen(n) > 160 {
+			return out + " and " + strconv.Itoa(len(names)-1-i) + " more"
+		}
+		out += ", " + n
+	}
+	return out
+}
+
+// hubHeldWhy is why servers of kind k are held back, as one sentence for
+// one server and one for several, each saying what lets them through.
+var hubHeldWhys = map[string][2]string{
+	"program": {
+		"It runs as a program on the computer magpie runs on, and this caller's gateway key, from another computer, has a model, account or spend limit. A key with no such limit, or a connection from that computer, is given it.",
+		"They run as programs on the computer magpie runs on, and this caller's gateway key, from another computer, has a model, account or spend limit. A key with no such limit, or a connection from that computer, is given them.",
+	},
+	"here": {
+		"It acts as the user of the computer magpie runs on, so only a caller on that computer is given it.",
+		"They act as the user of the computer magpie runs on, so only a caller on that computer is given them.",
+	},
+	"browser": {
+		"It is given to a caller on the computer magpie runs on, or to an app elsewhere with a gateway key.",
+		"They are given to a caller on the computer magpie runs on, or to an app elsewhere with a gateway key.",
+	},
+	"memory": {
+		"A gateway key from another computer is given it only when its owner lets the key use memory.",
+		"A gateway key from another computer is given them only when its owner lets the key use memory.",
+	},
+}
+
+func hubHeldSay(kind string, n int) string {
+	if n == 1 {
+		return hubHeldWhys[kind][0]
+	}
+	return hubHeldWhys[kind][1]
+}
+
+// say is a line for each kind of server held back, "" when none is.
+func (h hubHeld) say() string {
+	var out []string
+	for _, k := range []struct {
+		names []string
+		kind  string
+	}{{h.program, "program"}, {h.here, "here"}, {h.browser, "browser"}, {h.memory, "memory"}} {
+		if len(k.names) > 0 {
+			out = append(out, "Not given to this caller: "+hubHeldNames(k.names)+". "+hubHeldSay(k.kind, len(k.names)))
+		}
+	}
+	if h.keyMCP == 1 {
+		out = append(out, "This gateway key may use only some MCP servers here; 1 more is left out.")
+	} else if h.keyMCP > 1 {
+		out = append(out, "This gateway key may use only some MCP servers here; "+strconv.Itoa(h.keyMCP)+" more are left out.")
+	}
+	return strings.Join(out, "\n")
+}
+
+// hubHeldKind is which of hubHeld's kinds s is, for a visitor not given it.
+func hubHeldKind(s HubServer) string {
+	switch {
+	case s.Keyed:
+		return "browser"
+	case s.Memory:
+		return "memory"
+	case s.HereOnly:
+		return "here"
+	}
+	return "program"
+}
+
+// HubHeldReason is why a visitor that isn't given s (HubVisitor.Gives)
+// isn't, and what would let it through, as one sentence.
+func HubHeldReason(s HubServer) string { return hubHeldSay(hubHeldKind(s), 1) }
+
+// hubHeldWhy is why a tools/call of name isn't run for the request of ctx,
+// when name is a tool of a server held back from it (hubHeld): "" when it
+// isn't one.
+func hubHeldWhy(ctx context.Context, agent, name string) string {
+	if MCPHub == nil {
+		return ""
+	}
+	v, who := HubVisitorOf(ctx), access.Caller(ctx)
+	for _, s := range MCPHub.Servers(agent) {
+		tool, ok := strings.CutPrefix(name, unsafeToolChars.ReplaceAllString(s.Name, "-")+hubSep)
+		if !ok || tool == "" || s.Bridge && FromRouter(ctx) {
+			continue
+		}
+		if ok, _ := who.MCPServer(s.Name); !ok {
+			return keyMCPServerRefused(who, s.Name)
+		}
+		if v.Gives(s) {
+			continue
+		}
+		return "the MCP server " + s.Name + " isn't given to this caller. " + HubHeldReason(s)
+	}
+	return ""
 }
 
 // hubServes is whether the hub gives another magpie's router a server.
@@ -618,7 +770,24 @@ func hubServersFor(ctx context.Context, agent string) []HubServer {
 	return hubServersOf(ctx, agent)
 }
 
+// hubMeet tells the Library of an agent on another computer that
+// connected to its own address (Hub.Met): a magpie in Docker has none of
+// the agents that use its router (bitxeno303 on X: DeepSeek Harness on
+// their own computer had no tools at /mcp/magpie/hub/dsh), and nothing
+// could be ticked for one. A request from this computer, a web page's, or
+// another magpie's router is no agent of another computer's.
+func hubMeet(r *http.Request, agent string) {
+	if agent == "" || MCPHub == nil || local(r) || hubFromPage(r) || FromRouter(r.Context()) {
+		return
+	}
+	MCPHub.Met(HubAgentOf(agent))
+}
+
 func (s *Server) hubMCPCall(r *http.Request, agent string, m mcpMessage) (any, map[string]any) {
+	switch m.Method {
+	case "initialize", "tools/list":
+		hubMeet(r, agent)
+	}
 	switch m.Method {
 	case "initialize":
 		say := "The tools of the MCP servers in magpie's Library that are switched on for this agent, each named <server>__<tool>. Add servers, or switch them on for an agent, in magpie's Library → MCP."
@@ -634,11 +803,16 @@ func (s *Server) hubMCPCall(r *http.Request, agent string, m mcpMessage) (any, m
 		if MCPHub != nil {
 			ss = hubServersFor(r.Context(), agent)
 		}
-		if hubOnDemand(agent, hubToolCount(ss)) {
+		if hubOnDemand(agent, hubToolCount(ss), hubAsksOnDemand(r)) {
 			say += hubOnDemandSay
 		}
 		if hubCodeOn(hubToolCount(ss)) {
 			say += hubCodeSay
+		}
+		// what this caller isn't given, and why, so a key that sees fewer
+		// tools than the computer does isn't left to guess
+		if held := hubHeldOf(r.Context(), agent).say(); held != "" {
+			say += "\n" + held
 		}
 		say = hubAbout(ss, here, say)
 		if MCPHub == nil || !MCPHub.On() {
@@ -655,12 +829,17 @@ func (s *Server) hubMCPCall(r *http.Request, agent string, m mcpMessage) (any, m
 	case "tools/list":
 		ts := hubTools(r.Context(), agent)
 		where := hubWhere(r)
-		onDemand := hubOnDemand(agent, len(ts))
+		onDemand := hubOnDemand(agent, len(ts), hubAsksOnDemand(r))
 		var list []any
 		if onDemand {
 			// hubTools ran, so each server's tools are as just listed
 			for _, t := range hubOnDemandSpecs(where, hubServersOf(r.Context(), agent)) {
 				list = append(list, t)
+			}
+			for _, t := range ts {
+				if hubAlwaysLoaded(t) {
+					list = append(list, hubSpecOf(t, where))
+				}
 			}
 		} else {
 			list = make([]any, 0, len(ts)+1)
@@ -669,7 +848,7 @@ func (s *Server) hubMCPCall(r *http.Request, agent string, m mcpMessage) (any, m
 			}
 		}
 		if hubCodeOn(len(ts)) {
-			list = append(list, hubCodeSpec(where, onDemand))
+			list = append(list, hubCodeSpec(where, onDemand, hubSkillsOf(agent)))
 		}
 		return map[string]any{"tools": list}, nil
 	case "tools/call":
@@ -700,6 +879,9 @@ func (s *Server) hubMCPCall(r *http.Request, agent string, m mcpMessage) (any, m
 		}
 		if t, ok := hubToolNamed(r.Context(), ts, agent, p.Name); ok {
 			return s.hubCall(r, agent, t, p.Arguments, p.Meta), nil
+		}
+		if why := hubHeldWhy(r.Context(), agent, p.Name); why != "" {
+			return nil, map[string]any{"code": -32602, "message": "unknown tool " + p.Name + ": " + why}
 		}
 		if agent == "" {
 			return nil, map[string]any{"code": -32602, "message": "unknown tool " + p.Name + ": no MCP server in magpie's Library gives it"}

@@ -173,6 +173,26 @@ func (p Provider) ownDecideModels() []catalog.Model {
 	return out
 }
 
+// ChatsToo reports whether model, a decision model of p's, is one of its
+// conversation models as well: Ark's pay as you go answers
+// doubao-seed-2-1-lite-260915 (ArkDecision) on chat completions and
+// Responses, as it does on System One (solider1394 on X: that model,
+// asked by Immersive Translate and FluentRead, was "not found", though
+// another gateway served it on the same id), while Bailian's and Google's
+// decision models answer nothing else. One the user set to be asked on
+// System One is a decision model alone.
+func (p Provider) ChatsToo(model string) bool {
+	return model == ArkDecision && !p.DecideOnly() && arkDecides(p.Decide) &&
+		(arkDecides(p.Chat) || arkDecides(p.Responses)) && !p.IsPlugin() && !p.decideSet(model)
+}
+
+// OnlyDecides reports whether model is a decision model of p's that holds
+// no conversation (DecidesModel, less ChatsToo): one a conversation is
+// refused on and agents aren't offered.
+func (p Provider) OnlyDecides(model string) bool {
+	return p.DecidesModel(model) && !p.ChatsToo(model)
+}
+
 // Decides reports whether the provider is a decision API.
 func (p Provider) Decides() bool { return p.Decide != "" }
 
@@ -770,7 +790,11 @@ func deciders(keep func(id string) bool) []Entry {
 				if p.IsRemoteMagpie() {
 					out = append(out, sharedEntry(&p, m, s))
 				} else {
-					out = append(out, Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Name: m.Name, Provider: &p})
+					// what it takes as an agent's list gives it (Pi's
+					// classifiers, #7521): Google's and a Clef's images too
+					images, imageInput := imagesIn(&p, m, s)
+					out = append(out, Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Name: m.Name, Provider: &p,
+						Images: images, ImageInput: imageInput, Inputs: InputsOf(m)})
 				}
 			}
 		}

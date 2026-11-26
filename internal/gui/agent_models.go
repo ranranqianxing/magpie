@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -29,7 +30,21 @@ type modelCountJSON struct {
 	// Names are the first few models shown by name, for a row that says
 	// which it lists rather than how many (Claude Desktop's)
 	Names []string `json:"names,omitempty"`
+	// Menu is how many of them the agent's app's model menu takes at most,
+	// when it takes fewer than magpie may list (agentMenus): the row says
+	// when the rest are left out
+	Menu int `json:"menu,omitempty"`
 }
+
+// agentMenus is how many models an agent's app's menu takes. The Codex
+// app asks Codex's app-server for model/list with limit 100 and never for
+// the next page (ChatGPT.app 26.930), so a model past them can't be picked
+// there; the Codex CLI's /model asks for every one (#1262). Antigravity's
+// backend keeps the first 32 of a gateway's catalog entries
+// (gateway.AntigravityMenuMax), so the rest were missing from its menu
+// while the row counted them (0xBCD18E on X). By the agent's own id: a
+// WSL twin has no app.
+var agentMenus = map[string]int{"codex": 100, "antigravity": gateway.AntigravityMenuMax}
 
 // countNames is how many models' names modelCount gives.
 const countNames = 3
@@ -153,12 +168,15 @@ func unservedIn(opts []agent.Option, first bool, unserved func() []provider.Unse
 func agentModelCount(a *agent.Agent, fields []fieldJSON) *modelCountJSON {
 	id := a.ListsFor()
 	if takesCatalog(fields) || a.ListsModels {
-		return modelCount(id)
+		c := modelCount(id)
+		c.Menu = agentMenus[a.ID]
+		return c
 	}
 	if _, only := provider.PickedModels(id); !only && len(provider.HiddenModels(id)) == 0 {
 		return nil
 	}
 	if c := modelCount(id); c.Shown < c.Listed {
+		c.Menu = agentMenus[a.ID]
 		return c
 	}
 	return nil
@@ -318,9 +336,11 @@ func agentModelsAPI(mux *http.ServeMux) {
 		}
 		_, only := provider.PickedModels(a.ListsFor())
 		// own: its pickers offer models of the agent's own beside
-		// magpie's, which ownHidden leaves out (#1642)
+		// magpie's, which ownHidden leaves out (#1642); joins: shown only
+		// its picks, it takes in a provider's too (provider.PicksJoin)
 		writeJSON(rw, map[string]any{"models": agentModelList(a), "ordered": len(provider.ModelOrder(a.ListsFor())) > 0, "only": only,
-			"own": a.OwnModels(a.Values()), "ownHidden": provider.OwnModelsHidden(a.ListsFor())})
+			"joins": provider.PicksJoin(a.ListsFor()),
+			"own":   a.OwnModels(a.Values()), "ownHidden": provider.OwnModelsHidden(a.ListsFor())})
 	})
 	// hidden is every entry to take out of the agent's lists; the others
 	// are shown, and one the agent is set to is kept in whatever is asked
@@ -338,6 +358,9 @@ func agentModelsAPI(mux *http.ServeMux) {
 	//
 	// ownHidden switches the agent's pickers between offering its own
 	// models beside magpie's and offering magpie's alone (#1642)
+	//
+	// joins switches whether an agent shown only its picks takes in the
+	// models picked in a provider's editor too (eiyuuzaki2333 on X)
 	mux.HandleFunc("POST /api/agent-models/{id}", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Hidden []string
@@ -346,6 +369,7 @@ func agentModelsAPI(mux *http.ServeMux) {
 			Only   *bool
 			// OwnHidden, sent as ownHidden
 			OwnHidden *bool
+			Joins     *bool
 			// Widen: models its visibility keeps that were ticked, whose
 			// providers or groups it is shown from now on
 			Widen []string
@@ -377,6 +401,14 @@ func agentModelsAPI(mux *http.ServeMux) {
 				return
 			}
 			writeJSON(rw, map[string]any{"ownHidden": provider.OwnModelsHidden(a.ListsFor())})
+			return
+		}
+		if in.Joins != nil {
+			if err := provider.SetPicksJoin(a.ListsFor(), *in.Joins); err != nil {
+				fail(rw, err)
+				return
+			}
+			writeJSON(rw, map[string]any{"joins": provider.PicksJoin(a.ListsFor())})
 			return
 		}
 		if in.Order != nil {

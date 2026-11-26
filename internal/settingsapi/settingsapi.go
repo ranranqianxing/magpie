@@ -35,14 +35,14 @@ var Keys = []string{
 	// the menu bar's allowance cards
 	"trayUsages", "trayUsage", "trayUsageEvery", "trayNoLogos", "trayAnthropicMark", "trayNoBird", "trayNoNumber", "trayPace", "trayNoCost", "trayWindows",
 	// usage and alerts
-	"currency", "totalCurrency", "trayCurrency", "chineseUnits", "dayStart", "usageAlert", "balanceAlert", "resetReminder", "turnDoneAlert", "maskAlert",
+	"currency", "totalCurrency", "trayCurrency", "chineseUnits", "inUncached", "dayStart", "usageAlert", "balanceAlert", "resetReminder", "turnDoneAlert", "maskAlert",
 	// network
 	"proxy", "pluginProxy", "updateProxy", "updateSource",
 	// privacy
 	"redact", "redactPersonal", "redactKinds", "redactWords", "redactWordsAnyCase", "redactWordsWhole", "redactShape",
 	"noStats", "noUsageStats", "otel",
 	// warm-ups and check-ins
-	"codexWarmup", "claudeWarmup", "codexWarmAt", "claudeWarmAt", "codexWarmAts", "claudeWarmAts",
+	"codexWarmup", "claudeWarmup", "agyWarmup", "codexWarmAt", "claudeWarmAt", "codexWarmAts", "claudeWarmAts",
 	"workbuddyCheckin", "traeCheckin", "minimaxCheckin", "qoderCheckin", "checkinAt",
 	// models: replies, vision, images, search
 	"replyModel", "noLoopGuard", "claudeLeanPrompt", "claudeNoExtraUsage", "claudeRegionHold", "claudePrintMode", "refusalRetries", "retryAfterCap",
@@ -67,6 +67,7 @@ var Choices = map[string][]string{
 	"trayCurrency":    settings.TotalCurrencies,
 	"codexWarmup":     {"off", "week", "all"},
 	"claudeWarmup":    {"off", "week", "all"},
+	"agyWarmup":       {"off", "week", "all"},
 	"trayUsageEvery":  ints(settings.TrayEvery),
 	"dayStart":        {"0", "1", "2", "3", "4", "5", "6"},
 	"updateChannel":   {settings.UpdateStable, settings.UpdateDaily},
@@ -283,6 +284,11 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	if _, sent := fields["maskAlert"]; !sent {
 		in.MaskAlert = cur.MaskAlert
 	}
+	// nor whether Requests' In leaves the cache out where its columns are
+	// left out (JonahFu on X)
+	if _, sent := fields["inUncached"]; !sent {
+		in.InUncached = cur.InUncached
+	}
 	in.AgentOrder, in.AgentsHidden, in.AgentsShown, in.AgentsHere = cur.AgentOrder, cur.AgentsHidden, cur.AgentsShown, cur.AgentsHere
 	in.Window, in.WindowMaximised, in.WindowAt = cur.Window, cur.WindowMaximised, cur.WindowAt // the window's own, as it was last resized and moved
 	in.OnTop = cur.OnTop                                                                       // and pinned on top, by its title bar's pin (window/ontop)
@@ -297,6 +303,7 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	in.Visible, in.HiddenModels, in.OrderedModels = cur.Visible, cur.HiddenModels, cur.OrderedModels
 	in.PickedModels = cur.PickedModels       // "only models I pick" (#1337)
 	in.OwnModelsHidden = cur.OwnModelsHidden // an agent's own models left out (#1642)
+	in.PicksJoin = cur.PicksJoin             // a provider's picks taken in (eiyuuzaki2333)
 	in.FastPicks = cur.FastPicks             // switched in the agents' pickers (#954)
 	in.UltraPicks = cur.UltraPicks           // and sent Ultrafast (#1954)
 	in.AgentEfforts = cur.AgentEfforts       // picked in an agent's row (#1003)

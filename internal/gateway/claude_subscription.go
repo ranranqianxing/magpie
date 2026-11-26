@@ -78,15 +78,16 @@ import (
 )
 
 type subscriptionBridge struct {
-	mu       sync.Mutex
-	runs     map[string]*subscriptionRun // callback token → run
-	calls    map[string]*subscriptionRun // tool_use id → run
-	idle     map[string]*subscriptionRun // conversation so far (turnKey) → run
-	shelf    map[string]*savedSession    // conversation so far (turnKey) → its saved session
-	resuming map[*savedSession]bool      // taken off the shelf, not yet owned by a run
-	baseURL  string
-	sweep    sync.Once
-	swept    sync.Map // Claude Code's project folders sweepSessions went through
+	mu          sync.Mutex
+	runs        map[string]*subscriptionRun // callback token → run
+	calls       map[string]*subscriptionRun // tool_use id → run
+	idle        map[string]*subscriptionRun // conversation so far (turnKey) → run
+	shelf       map[string]*savedSession    // conversation so far (turnKey) → its saved session
+	resuming    map[*savedSession]bool      // taken off the shelf, not yet owned by a run
+	cancelTurns map[*cancelTurn]struct{}    // requests whose cancellation can leave a saved session
+	baseURL     string
+	sweep       sync.Once
+	swept       sync.Map // Claude Code's project folders sweepSessions went through
 	// lost is why each run that had a conversation ended, by that
 	// conversation (convKey), and lostCalls by the tool calls it waited
 	// on or was last handed results for, for the log of a request that
@@ -242,6 +243,13 @@ type subscriptionRun struct {
 	cacheTail   string
 	cachePrefix cachePrefix
 	timer       *time.Timer
+	// unpasted: it is claude -p because the interactive mode didn't take a
+	// message of its conversation (unpastedCode, set as it starts). Its
+	// conversation's next turns, and the side questions between them, go
+	// on in it as -p for as long as it runs (keepsPrint): switching each
+	// to a new interactive run told the whole conversation wrote all of it
+	// to the cache again (#7556, lshen1120)
+	unpasted bool
 
 	// Claude Code's input, kept open for the next turn; owner is the account
 	// it runs as (owned, named once in its life when it started unnamed:
@@ -317,6 +325,10 @@ type subscriptionRun struct {
 	// its first turn, which a turn refused for the account's limit is
 	// cut back to (keepForReset, #6292)
 	fromLen int64
+	// fromKey is where the saved session it started from waited
+	// (savedSession.key): the turn it was started for goes on from there,
+	// which may be before Claude Code's local reply (turnFrom)
+	fromKey string
 
 	// effort is the level its Claude Code thinks at, as it started (its
 	// --effort) or was told since (setEffort, setTUIEffort); "" is Claude
@@ -1042,6 +1054,7 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 		go func() {
 			sweepBridgeProjects(claudeConfigDir(), os.TempDir())
 			sweepBridgeTemps(os.TempDir())
+			b.sweepRunSessions(claudeConfigDir())
 		}()
 	})
 	tmp, err := os.MkdirTemp("", "magpie-claude-")
@@ -1131,10 +1144,8 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 		sessions = claudeSessions(configDir, work)
 		args = slices.DeleteFunc(args, func(a string) bool { return a == "--no-session-persistence" })
 		// a caller's folder keeps its own sessions beside the runs': only
-		// magpie's own folder is swept, a run's session removed by its id
-		if !client {
-			b.sweepSessions(sessions)
-		}
+		// the runs' are swept there, known by their ids (bridgesid)
+		b.sweepSessions(sessions, client)
 	}
 	// kept is the session from was, for startTrusted to go on with in
 	// magpie's folder when Claude Code asks about the caller's
@@ -1398,6 +1409,7 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 	run.lean = req.leanPrompt
 	run.appended = req.appendPrompt
 	run.tui = tui
+	run.unpasted = !tui && code == unpastedCode
 	run.cachePrefix = prefix
 	if tui {
 		run.safeguards = bytes.Clone(req.Safeguards)
@@ -1493,8 +1505,16 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 		// unless the run is shelved in turn; a branch's is the copy cut
 		// for it
 		from.taken()
+		key, since := nextTurn(req, owner)
+		// A tool branch may start partway through the turn. Its initial
+		// file length is a checkpoint only for the suffix it actually serves.
+		if req.replayed || len(since) != len(from.since) {
+			key = ""
+		}
 		run.mu.Lock()
+		run.backKey = key
 		run.sessionID, run.fromLen = from.session, fromLen
+		run.fromKey = from.key
 		run.mu.Unlock()
 	}
 	line, _ := json.Marshal(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": prompt}})
@@ -2074,6 +2094,13 @@ func (b *subscriptionBridge) resume(req *Request, owner string) (*subscriptionRu
 		}
 	}
 	if run == nil {
+		if k, messages := b.waitingPrefix(req, owner); k != "" {
+			if r := b.idle[k]; r != nil {
+				key, since, run = k, messages, r
+			}
+		}
+	}
+	if run == nil {
 		// the client sent the conversation back rewritten (#912): the
 		// run is its own when nothing else could be, and its agent was
 		// told every tool the client offers now
@@ -2092,10 +2119,16 @@ func (b *subscriptionBridge) resume(req *Request, owner string) (*subscriptionRu
 		return nil, nil
 	}
 	if !run.tui && wantTUI(req) {
-		// a -p run from before the interactive mode was turned on goes
-		// on with no turn more
-		run.abortFor("Claude Code's interactive mode is on, and this run is -p")
-		return nil, nil
+		if !run.keepsPrint() {
+			// a -p run from before the interactive mode was turned on goes
+			// on with no turn more
+			run.abortFor("Claude Code's interactive mode is on, and this run is -p")
+			return nil, nil
+		}
+		// a -p run started for a message the interactive mode didn't
+		// take goes on with its conversation's turns, its cache read
+		asUnpasted(req)
+		log.Printf("claude: the conversation's next turn goes on in its claude -p run, started for a message the interactive mode didn't take")
 	}
 	req.clientCache.selected(false)
 	if run.tui && back != "" && urlImages(since) == 0 {
@@ -2156,7 +2189,7 @@ func (b *subscriptionBridge) resume(req *Request, owner string) (*subscriptionRu
 	run.segment = ch
 	run.active = time.Now()
 	run.turnUUID, run.backKey, run.backLine, run.backMsg = turn, key, run.lastLine, run.lastMsg
-	run.fromLen = 0 // it answered a turn since it started: its lines say where the conversation stood
+	run.fromLen, run.fromKey = 0, "" // it answered a turn since it started: its lines say where the conversation stood
 	run.allowed = allowedTools(req)
 	run.mu.Unlock()
 	run.endIn(runTimeout)
@@ -2205,18 +2238,85 @@ func nextTurn(req *Request, owner string) (string, []Message) {
 		return "", nil
 	}
 	since := msgs[j+1:]
+	if !selfContainedCalls(since) {
+		return "", nil
+	}
+	return turnKey(owner, req, msgs[:j+1]), since
+}
+
+// selfContainedCalls says no result in msgs answers a call before msgs.
+func selfContainedCalls(msgs []Message) bool {
 	calls := map[string]bool{}
-	for _, m := range since {
+	for _, m := range msgs {
 		for _, p := range m.Parts {
 			switch {
 			case p.Kind == ToolCall:
 				calls[p.ID] = true
 			case p.Kind == ToolResult && !calls[p.CallID]:
-				return "", nil
+				return false
 			}
 		}
 	}
-	return turnKey(owner, req, msgs[:j+1]), since
+	return true
+}
+
+// pastLocalReply is nextTurn with Claude Code's local replies passed
+// over: the conversation up to the last reply the upstream gave, and the
+// messages since, Claude Code's own and any cancelled user message among
+// them (#3808). "" when there is none to pass, or the turn isn't new.
+func pastLocalReply(req *Request, owner string) (string, []Message) {
+	msgs := req.Messages
+	if len(msgs) == 0 || msgs[len(msgs)-1].Role == "assistant" {
+		return "", nil
+	}
+	j, passed := len(msgs)-1, false
+	for j >= 0 && (msgs[j].Role != "assistant" || callsTool(msgs[j]) || localResumeReply(msgs[j])) {
+		passed = passed || localResumeReply(msgs[j])
+		j--
+	}
+	if j < 0 || !passed || !selfContainedCalls(msgs[j+1:]) {
+		return "", nil
+	}
+	return turnKey(owner, req, msgs[:j+1]), msgs[j+1:]
+}
+
+// waitingPrefix is pastLocalReply when a run waits there, or a session is
+// shelved there (b.mu held): a cancelled turn, or Claude Code's native
+// resume, adds "No response requested." to the conversation as an
+// assistant message the upstream never sent (<synthetic> in its
+// transcript; Messages carries only its role and words), so nextTurn's
+// key, taken after it, is no run's. The key is turnKey's still: the
+// account, model, settings, system prompt, tools and every message up to
+// the upstream's reply are the run's own.
+func (b *subscriptionBridge) waitingPrefix(req *Request, owner string) (string, []Message) {
+	key, since := pastLocalReply(req, owner)
+	if key == "" || b.idle[key] == nil && b.shelf[key] == nil {
+		return "", nil
+	}
+	return key, since
+}
+
+// turnFrom is the turn of req a run took at key, the conversation it
+// waited at: nextTurn's, or one past Claude Code's local reply
+// (waitingPrefix). A run refused for the limit, or a turn sent again, is
+// cut back to before the turn it took, the cancelled user message in it
+// (keepForReset, retryBranch); nextTurn's would leave that message out.
+func turnFrom(req *Request, owner, key string) (string, []Message) {
+	k, since := nextTurn(req, owner)
+	if k == "" || key == "" || k == key {
+		return k, since
+	}
+	if pk, psince := pastLocalReply(req, owner); pk == key {
+		return pk, psince
+	}
+	return k, since
+}
+
+// localResumeReply is the assistant message Claude Code adds to a
+// conversation itself, not the upstream's (NO_RESPONSE_REQUESTED in its
+// source): after a turn its user cancelled, and on a native resume.
+func localResumeReply(m Message) bool {
+	return m.Role == "assistant" && len(m.Parts) == 1 && m.Parts[0].Kind == Text && m.Parts[0].Text == "No response requested."
 }
 
 // looseTurn is a conversation a run waits at, as a client may send it
@@ -2855,6 +2955,13 @@ func (b *subscriptionBridge) unshelve(req *Request, owner string) *savedSession 
 		s = b.shelf[key]
 	}
 	if s == nil {
+		if k, messages := b.waitingPrefix(req, owner); k != "" {
+			if saved := b.shelf[k]; saved != nil {
+				key, since, s = k, messages, saved
+			}
+		}
+	}
+	if s == nil {
 		// rewritten (resume); its Claude Code is told the tools the
 		// client offers now, and the session keeps the calls made of
 		// those it had
@@ -3132,8 +3239,7 @@ func (b *subscriptionBridge) retryBranch(req *Request, owner string) *savedSessi
 	if req.clientCache != nil {
 		return nil
 	}
-	key, since := nextTurn(req, owner)
-	if key == "" {
+	if key, _ := nextTurn(req, owner); key == "" {
 		return nil
 	}
 	keys, want := conversationKeys(owner, req.Messages), historyKey(req.Messages)
@@ -3167,6 +3273,7 @@ func (b *subscriptionBridge) retryBranch(req *Request, owner string) *savedSessi
 		busy := (gone || !run.closed) && run.rewinding == nil && !run.rewound && run.lean == req.leanPrompt &&
 			!run.clientMarks && (run.tui || !wantTUI(req)) && run.told == want
 		sid, sessions, backLine, backMsg, appended, tui, prefix := run.sessionID, slices.Clone(run.sessions), run.backLine, run.backMsg, run.appended, run.tui, run.cachePrefix
+		backKey := run.backKey
 		started := run.started
 		run.mu.Unlock()
 		if !busy || sid == "" || backLine == "" && backMsg == "" || len(sessions) == 0 {
@@ -3183,7 +3290,10 @@ func (b *subscriptionBridge) retryBranch(req *Request, owner string) *savedSessi
 		if found != nil {
 			found.discard() // a newer run's copy is taken: the older one's goes
 		}
-		found, at = &savedSession{session: cut, sessions: sessions, owner: owner, at: time.Now(), since: since, tui: tui, appended: appended, cachePrefix: prefix}, started
+		// the turn as the run took it: past Claude Code's local reply,
+		// a cancelled user message is in it (#3808)
+		key, since := turnFrom(req, owner, backKey)
+		found, at = &savedSession{session: cut, sessions: sessions, owner: owner, key: key, at: time.Now(), since: since, tui: tui, appended: appended, cachePrefix: prefix}, started
 		foundEnded = nil
 		if gone {
 			foundEnded = run
@@ -3279,7 +3389,7 @@ func cutReply(dirs []string, sid, uuid, msg string) (string, error) {
 	}
 	mark := []byte(`"uuid":"` + uuid + `"`)
 	return cutSessionWhere(dirs, sid, "reply "+msg, func(b []byte, last bool) int {
-		if end := cutAfterReply(b, msg); end > 0 {
+		if end := cutAfterReply(b, msg, false); end > 0 {
 			return end
 		}
 		if !last || uuid == "" {
@@ -3291,7 +3401,7 @@ func cutReply(dirs []string, sid, uuid, msg string) (string, error) {
 
 // cutAfterReply is where in a session's lines b the last whole assistant
 // line of message msg ends, -1 when none is there.
-func cutAfterReply(b []byte, msg string) int {
+func cutAfterReply(b []byte, msg string, completed bool) int {
 	mark := []byte(`"id":"` + msg + `"`)
 	end := -1
 	for at := 0; at < len(b); {
@@ -3308,10 +3418,11 @@ func cutAfterReply(b []byte, msg string) int {
 			Type        string `json:"type"`
 			IsSidechain bool   `json:"isSidechain"`
 			Message     struct {
-				ID string `json:"id"`
+				ID   string `json:"id"`
+				Stop string `json:"stop_reason"`
 			} `json:"message"`
 		}
-		if json.Unmarshal(line, &l) == nil && l.Type == "assistant" && !l.IsSidechain && l.Message.ID == msg {
+		if json.Unmarshal(line, &l) == nil && l.Type == "assistant" && !l.IsSidechain && l.Message.ID == msg && (!completed || l.Message.Stop == "end_turn") {
 			end = at
 		}
 	}
@@ -3551,45 +3662,81 @@ func untouchedFor(path string, age time.Duration) bool {
 // folders, the sessions a gateway that stopped or crashed left there:
 // those untouched for longer than one would be kept. Another gateway on
 // the same account (a dev build) works in the same folder; its sessions
-// are newer.
-func (b *subscriptionBridge) sweepSessions(dirs []string) {
+// are newer. In a caller's folder (runsOnly) the user's own Claude Code
+// saves its sessions too, so only the runs' go, known by their ids
+// (bridgesid): left there, each was listed in the user's `claude
+// --resume` beside their own (YZSR on Discord: 12 of a folder's 14).
+func (b *subscriptionBridge) sweepSessions(dirs []string, runsOnly bool) {
 	for _, dir := range dirs {
 		if _, done := b.swept.LoadOrStore(dir, true); done {
 			continue
 		}
 		go func() {
 			kept, known := b.keptSessions()
-			if !known {
-				return
-			}
-			entries, _ := os.ReadDir(dir)
-			for _, e := range entries {
-				sid, ok := strings.CutSuffix(e.Name(), ".jsonl")
-				if !ok || e.IsDir() || kept[filepath.Join(dir, e.Name())] {
-					continue
-				}
-				if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > idleLongest+time.Minute {
-					removeSession([]string{dir}, sid)
-				}
-			}
-			tmp := claudeTempDir(dir)
-			if tmp == "" {
-				return
-			}
-			entries, _ = os.ReadDir(tmp)
-			for _, e := range entries {
-				sid := e.Name()
-				if !e.IsDir() || strings.HasPrefix(sid, ".") {
-					continue
-				}
-				if _, err := os.Stat(filepath.Join(dir, sid+".jsonl")); err == nil {
-					continue
-				}
-				if untouchedFor(filepath.Join(tmp, sid), tempLongest) {
-					_ = os.RemoveAll(filepath.Join(tmp, sid))
-				}
+			if known {
+				sweepSessionDir(dir, kept, runsOnly)
 			}
 		}()
+	}
+}
+
+// sweepRunSessions sweeps the runs' sessions from every project of
+// Claude Code's folder configDir, once a gateway: a caller's folder no
+// run goes to again keeps what a stopped gateway left there otherwise.
+// Only the runs' are touched (runsOnly), and the folders sweepSessions
+// went through are left to it.
+func (b *subscriptionBridge) sweepRunSessions(configDir string) {
+	root := filepath.Join(configDir, "projects")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	kept, known := b.keptSessions()
+	if !known {
+		return
+	}
+	for _, e := range entries {
+		dir := filepath.Join(root, e.Name())
+		if !e.IsDir() {
+			continue
+		}
+		if _, done := b.swept.Load(dir); done {
+			continue
+		}
+		sweepSessionDir(dir, kept, true)
+	}
+}
+
+// sweepSessionDir removes from project folder dir the sessions untouched
+// for longer than one is kept, and the temp files of those gone, but for
+// those in kept; with runsOnly, only the runs' sessions (bridgesid.Is).
+func sweepSessionDir(dir string, kept map[string]bool, runsOnly bool) {
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		sid, ok := strings.CutSuffix(e.Name(), ".jsonl")
+		if !ok || e.IsDir() || kept[filepath.Join(dir, e.Name())] || runsOnly && !bridgesid.Is(sid) {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > idleLongest+time.Minute {
+			removeSession([]string{dir}, sid)
+		}
+	}
+	tmp := claudeTempDir(dir)
+	if tmp == "" {
+		return
+	}
+	entries, _ = os.ReadDir(tmp)
+	for _, e := range entries {
+		sid := e.Name()
+		if !e.IsDir() || strings.HasPrefix(sid, ".") || runsOnly && !bridgesid.Is(sid) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, sid+".jsonl")); err == nil {
+			continue
+		}
+		if untouchedFor(filepath.Join(tmp, sid), tempLongest) {
+			_ = os.RemoveAll(filepath.Join(tmp, sid))
+		}
 	}
 }
 
@@ -4401,6 +4548,9 @@ func (r *subscriptionRun) readOutput(rd io.Reader) {
 	var before, this Usage
 	var lateUsage cliUsage    // a message left out as told by its call (onCall)
 	var reqID, errKind string // the last request's id, and how it failed
+	// when the limit that turned the turn away renews, as its
+	// rate_limit_event said: told with the turn's error (Event.Resets)
+	var refusedTill time.Time
 	usage := func(u cliUsage) Usage {
 		v := u.gateway()
 		this.add(v)
@@ -4787,6 +4937,7 @@ func (r *subscriptionRun) readOutput(rd io.Reader) {
 			if user, own := ownerAccount(r.owned()); user != "" && !(own && provider.ClaudeCodeMovedOff(user)) {
 				provider.NoteClaudeLimits(user, claudeLimits(envelope.RateLimitInfo))
 			}
+			refusedTill = rejectedTill(envelope.RateLimitInfo, time.Now())
 			return
 		}
 		if envelope.Type == "result" && retell && !envelope.IsError {
@@ -4820,6 +4971,7 @@ func (r *subscriptionRun) readOutput(rd io.Reader) {
 		}
 		if envelope.Type == "result" {
 			retell, answerAsked = false, false
+			defer func() { refusedTill = time.Time{} }() // the next turn's is its own
 			silent, said := !begun, aside
 			begun, aside = false, ""
 			// a turn that failed — out of quota, rate limited — ends with
@@ -4852,7 +5004,7 @@ func (r *subscriptionRun) readOutput(rd io.Reader) {
 					!(own && provider.ClaudeCodeMovedOff(user)) {
 					provider.NoteClaudeSignInFailure(user, r.loginVersion, text)
 				}
-				r.emit(Event{Kind: KError, Text: text, Status: envelope.APIErrorStatus, Code: errKind, RequestID: reqID})
+				r.emit(Event{Kind: KError, Text: text, Status: envelope.APIErrorStatus, Code: errKind, RequestID: reqID, Resets: refusedTill})
 				r.endSegment()
 			case cut:
 				failed("and Claude Code ended the turn without asking again")
@@ -5175,6 +5327,24 @@ func claudeLimits(raw json.RawMessage) []provider.ClaudeLimit {
 		}
 	}
 	return out
+}
+
+// rejectedTill is when the limit a rate_limit_event's info says turned the
+// request away renews: its resetsAt, when it is rejected and the time is
+// still to come. Zero otherwise: one that only reports what is used says
+// nothing of a refusal.
+func rejectedTill(raw json.RawMessage, now time.Time) time.Time {
+	var info struct {
+		Status   string `json:"status"`
+		ResetsAt int64  `json:"resetsAt"`
+	}
+	if json.Unmarshal(raw, &info) != nil || info.Status != "rejected" || info.ResetsAt <= 0 {
+		return time.Time{}
+	}
+	if t := time.Unix(info.ResetsAt, 0); t.After(now) {
+		return t
+	}
+	return time.Time{}
 }
 
 // carryUpdate keeps this message's known 1h writes when a partial split
@@ -7485,10 +7655,7 @@ func (s *Server) serveSubscriptionAs(w http.ResponseWriter, r *http.Request, fro
 	// Windows 10 LTSC, every image turn a 502 the client asked again)
 	if name == "Claude Code" && claudeTUIOn() && !req.tuiRefused &&
 		(redo == unpastedCode || countImages(req.Messages) > 0 && s.subscription.imagesUnpasted()) {
-		req.unpasted = true
-		if req.clientCache != nil {
-			req.clientCache.print = true
-		}
+		asUnpasted(req)
 	}
 	if name == "Claude Code" && claudeTUIOn() && !req.tuiRefused && !req.unpasted && keptByPrint(req) {
 		// the classifier's marks keep more than its fresh interactive
@@ -7525,6 +7692,19 @@ func (s *Server) serveSubscriptionAs(w http.ResponseWriter, r *http.Request, fro
 		req.Tools = append(slices.Clone(req.Tools), advisorToolDef())
 	}
 
+	// Register before claiming a run or sending this turn. A replacement
+	// can arrive as soon as the client disconnects, even during start.
+	var checkpoint *cancelTurn
+	if name == "Claude Code" && req.clientCache == nil {
+		key, _ := nextTurn(req, owner)
+		checkpoint, err = s.subscription.watchCancel(r.Context(), key)
+		if err != nil {
+			return 499, err.Error()
+		}
+	}
+	// Early returns release the registration. After the run starts the
+	// cancellation callback owns it until the cut and rewind are finished.
+	defer func() { s.subscription.finishCancel(checkpoint) }()
 	run, results, how := s.subscription.match(req)
 	// Another request has the run's calls answered, or is answering them,
 	// or the run ended. Claude Code's fork sub-agents each start from their
@@ -7688,16 +7868,27 @@ func (s *Server) serveSubscriptionAs(w http.ResponseWriter, r *http.Request, fro
 	// A turn resumed in a run kept for it is taken back instead, the run
 	// left waiting where it was before it (letGo, #780); the reply's end,
 	// which comes of that, leaves the run to it.
-	var letting atomic.Bool
-	gone := context.AfterFunc(r.Context(), func() {
-		letting.Store(true)
+	active := checkpoint
+	checkpoint = nil
+	stopCancel := context.AfterFunc(r.Context(), func() {
 		// said in the log, as the routing trace says it with a 499 (#751)
 		log.Printf("%s run on %s stopped: the client went away %s into the reply", name, model, time.Since(began).Round(time.Millisecond))
+		if active != nil {
+			s.subscription.keepBeforeTurn(run, req, owner, "", active.key)
+		}
 		run.letGo()
+		s.subscription.finishCancel(active)
 	})
+	gone := func() bool {
+		if !stopCancel() {
+			return false
+		}
+		s.subscription.finishCancel(active)
+		return true
+	}
 	defer gone()
 	abort := func(code int, msg string) {
-		if letting.Load() {
+		if r.Context().Err() != nil {
 			return
 		}
 		if code == http.StatusTooManyRequests && name == "Claude Code" {
@@ -7755,6 +7946,17 @@ func unansweredWhy(said string) string {
 		return "it ended without an answer"
 	}
 	return errEndedShort.Error()
+}
+
+// resetsOn tells restAfter, beside a refusal, when the limit that
+// refused it renews (resetsHeader, never sent on to the client): Claude
+// Code's own words for it ("resets Nov 25 at 10am (Asia/Shanghai)") are
+// not read, and an account out for its week rested a quarter of an hour.
+func resetsOn(w http.ResponseWriter, t time.Time) {
+	if t.IsZero() {
+		return
+	}
+	w.Header().Set(resetsHeader, strconv.FormatInt(t.Unix(), 10))
 }
 
 // bridgeFailed is the status and words a client is answered with when an
@@ -7887,6 +8089,21 @@ func redoable(r *http.Request, name string, req *Request, code int, msg string) 
 // (claudetui.Unpastable).
 func unpastedSaid(name, msg string) bool {
 	return name == "Claude Code" && strings.Contains(msg, claudetui.Unpastable)
+}
+
+// asUnpasted makes req's run claude -p for a message the interactive mode
+// didn't take (unpastedCode).
+func asUnpasted(req *Request) {
+	req.unpasted = true
+	if req.clientCache != nil {
+		req.clientCache.print = true
+	}
+}
+
+// keepsPrint is whether the run is claude -p for a message the interactive
+// mode didn't take, and so goes on with its conversation's turns as -p.
+func (r *subscriptionRun) keepsPrint() bool {
+	return !r.tui && r.unpasted
 }
 
 // unpastedCode is claudePrint's code for a run that is claude -p because
@@ -8083,6 +8300,7 @@ func relayFailing(w http.ResponseWriter, r *http.Request, from provider.Protocol
 			code := 502
 			if n > 0 {
 				code, msg = bridgeFailed(name, head[n-1].Text, head[n-1].Status)
+				resetsOn(w, head[n-1].Resets)
 			}
 			abort(code, msg)
 			// what Anthropic said the reply's start used, the conversation
@@ -8180,6 +8398,7 @@ func relayFailing(w http.ResponseWriter, r *http.Request, from provider.Protocol
 		// client yet, so it is told the failure, as a translated reply
 		// cut short is (errEndedShort)
 		code, msg := bridgeFailed(name, col.err, col.errStatus)
+		resetsOn(w, col.errResets)
 		abort(code, msg)
 		usage.add(col.res.Usage)
 		if len(col.res.Parts) == 0 && redoable(r, name, req, code, msg) {

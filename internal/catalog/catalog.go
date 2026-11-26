@@ -157,7 +157,8 @@ type Model struct {
 	// including models whose ids don't name Jev.
 	Decides bool `json:",omitempty"`
 	// Free is set on a model a subscription serves at no cost to its
-	// allowance: WorkBuddy's "credits": "x0.00".
+	// allowance: WorkBuddy's "credits": "x0.00", OpenCode Go's
+	// "monthly_usage": null.
 	Free bool `json:",omitempty"`
 	// Rate is what a request costs of a subscription's credits, as a
 	// multiple, when its vendor lists it: Qoder's price_factor (0.5),
@@ -173,6 +174,12 @@ type Model struct {
 	// with no way to turn it off: Kimi Code's supports_thinking_type
 	// "only" (reasoning.type). Kimi Code is told always_thinking for it.
 	AlwaysThinks bool `json:",omitempty"`
+	// AsksAdaptively is set on a routing group dsh asks on Messages whose
+	// every member is asked adaptively there (gateway.AsksAdaptively,
+	// which a group's own id doesn't answer): dsh gives it pi-ai's
+	// forceAdaptiveThinking, as it does such a member alone, so its xhigh
+	// and max aren't clamped to a high budget (#6778).
+	AsksAdaptively bool `json:",omitempty"`
 	// DynamicTools is set on a model its vendor's list says loads tools
 	// mid-conversation: Kimi Code's supports_dynamic_tools
 	// (tools.dynamic_load). Kimi Code is told dynamically_loaded_tools.
@@ -689,6 +696,9 @@ func loadGen() (map[string]mdProvider, int) {
 				}
 				var m map[string]mdProvider
 				if json.Unmarshal(b, &m) == nil && len(m) > 0 {
+					// and the embedding models v1 leaves out, which
+					// models.dev's v2 lists and prices (embeddings.go)
+					addEmbeddings(m, readEmbeddings())
 					shareCatalog(m)
 					mdev = m
 					votes, reasons := map[string]int{}, map[string]int{}
@@ -966,7 +976,9 @@ func syncLock(ctx context.Context, onlyIfMissing bool) error {
 	// the lab catalog beside it is best effort: without it the provider
 	// catalog answers alone, and one kept before is kept
 	labsChanged, _ := syncLabs(ctx)
-	if changed || labsChanged {
+	// and v2's embedding models likewise (embeddings.go)
+	embeddingsChanged, _ := syncEmbeddings(ctx)
+	if changed || labsChanged || embeddingsChanged {
 		Reset()
 		Touched() // names, reasoning levels and context windows may be others
 	}
@@ -974,10 +986,11 @@ func syncLock(ctx context.Context, onlyIfMissing bool) error {
 }
 
 // Stale reports whether no catalog exists or the cache is older than a day
-// (fresh.go), or magpie's has no lab catalog beside it yet (labs.go).
+// (fresh.go), or magpie's has no lab catalog or v2 embedding models
+// beside it yet (labs.go, embeddings.go).
 func Stale() bool {
 	src := Source()
-	if src == "" || labsMissing() {
+	if src == "" || labsMissing() || embeddingsMissing() {
 		return true
 	}
 	st, err := os.Stat(src)
@@ -1087,6 +1100,34 @@ func TierTimes(model, tier string, at time.Time) (float64, int) {
 		}
 	}
 	return x, n
+}
+
+// planTierTimes are the multiples of a model's Standard rate that a ChatGPT
+// plan's included usage (Codex's windows) is drawn down at in a service
+// tier, from the "Included usage" column of OpenAI's Codex pricing page
+// (learn.chatgpt.com/docs/pricing, Speed multipliers). They are not the
+// API's or credits' rates: Fast on GPT-6.1 and GPT-6 is 2x in credits but
+// 2.5x of the plan, and Ultrafast on GPT-6.2 is 3x in credits through
+// 2027-02-28 but 6x of the plan throughout (mu33410 on X: a week of
+// GPT-6.2 Ultrafast read as half the allowance of a week without it).
+var planTierTimes = map[[2]string]float64{
+	{"gpt-6.2-astra", "priority"}: 2, {"gpt-6.2-sol", "priority"}: 2,
+	{"gpt-6.1-sol", "priority"}: 2.5, {"gpt-6.1-terra", "priority"}: 2.5,
+	{"gpt-6-astra", "priority"}: 2.5, {"gpt-6-sol", "priority"}: 2.5, {"gpt-6-luna", "priority"}: 2.5,
+	{"gpt-6.2-astra", "ultrafast"}: 6, {"gpt-6.2-sol", "ultrafast"}: 6,
+	{"gpt-6-astra", "ultrafast"}: 8, {"gpt-6.1-sol", "ultrafast"}: 8,
+}
+
+// PlanTierTimes is the multiple of model's Standard rate a ChatGPT plan's
+// included usage is drawn down at in tier ("priority" for Fast,
+// "ultrafast"), and whether OpenAI says one (planTierTimes).
+func PlanTierTimes(model, tier string) (float64, bool) {
+	tier = strings.ToLower(strings.TrimSpace(tier))
+	if tier == "fast" {
+		tier = "priority" // Codex's own word for it
+	}
+	x, ok := planTierTimes[[2]string{bareID(model), tier}]
+	return x, ok
 }
 
 // PricedBy is the list price the first of providers (models.dev ids)

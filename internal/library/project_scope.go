@@ -451,9 +451,13 @@ func (p *Project) dropMadeFile(rel string) {
 // one of them. A worktree gone from disk takes its records with it:
 // nothing of magpie's is left there to take back. Claude Code keeps a
 // worktree's project under the main worktree's record (claudeRoot), so
-// that one serves them all.
+// that one serves them all. A project kept to its own checkout (MainOnly)
+// has no worktree that follows it: each is taken back out.
 func (l *Library) syncTrees(p *Project, res *Result, hubs map[string]*Server) {
-	dirs := p.treeDirs()
+	var dirs []string
+	if !p.MainOnly {
+		dirs = p.treeDirs()
+	}
 	var trees []*Project
 	for _, d := range dirs {
 		t := p.tree(d)
@@ -462,6 +466,7 @@ func (l *Library) syncTrees(p *Project, res *Result, hubs map[string]*Server) {
 		}
 		t.Copy, t.Skills, t.Servers, t.ServersOff, t.SkillsOff, t.Subagents = p.Copy, p.Skills, p.Servers, p.ServersOff, p.SkillsOff, p.Subagents
 		t.Instr, t.InstrAgents, t.Plugins, t.ClaudePlugins, t.Hooks, t.Pi = p.Instr, p.InstrAgents, p.Plugins, p.ClaudePlugins, p.Hooks, p.Pi
+		t.piFromOld = p.piFromOld
 		l.syncFolder(t, res, hubs)
 		trees = append(trees, t)
 	}
@@ -523,6 +528,10 @@ func (p *Project) ignored() []string {
 // (keepProjectTrees), for a worktree made with git to follow its project.
 func (l *Library) treesChanged() bool {
 	for _, p := range l.Projects {
+		// v0.1.4702's literal Pi entries, to take out of the files
+		if p.piStrays {
+			return true
+		}
 		// a folder made a repository since (git init): its entries go
 		// into the new info/exclude
 		if len(p.ignored()) > 0 {
@@ -532,6 +541,11 @@ func (l *Library) treesChanged() bool {
 					return true
 				}
 			}
+		}
+		// kept to its own checkout: no worktree follows it, and the
+		// change that kept it so took them out
+		if p.MainOnly {
+			continue
 		}
 		if len(p.Skills)+len(p.Servers)+len(p.ServersOff)+len(p.SkillsOff)+len(p.Subagents)+len(p.InstrAgents)+len(p.Plugins)+len(p.Hooks)+len(p.ClaudePlugins)+len(p.Pi) == 0 && len(p.Trees) == 0 {
 			continue

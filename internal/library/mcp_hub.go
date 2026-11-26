@@ -10,7 +10,8 @@ package library
 //     (startServer: in home, with PWD, magpie's environment with the
 //     login shell's PATH, the server's own variables with ${NAME}
 //     expanded), the first time a tool of it is listed or called; it is
-//     ended once no call has used it for hubIdle, and started again when
+//     ended once no call has used it for hubIdle (or its own IdleTimeout;
+//     never with KeepAlive), and started again when
 //     next used, or when it ended by itself. Its stdin is magpie's: a
 //     magpie that dies without ending it closes it, which ends an MCP
 //     server, and on Windows its job ends with magpie.
@@ -119,7 +120,13 @@ func (l *Library) hubServerFor(t *Target) *Server {
 	// (extensions/mcp, serverSummary): told the router's instructions
 	// alone, a Pi asked about a repository never saw DeepWiki (11-01)
 	if t.MCP != nil && t.MCP.Format == fmtPiNative {
-		s.about = gateway.HubLine(hubAbouts(l.hubServers(t.Agent.ID)))
+		ss := l.hubServers(t.Agent.ID)
+		s.about = gateway.HubLine(hubAbouts(ss))
+		for _, a := range ss {
+			if serverKey(a) == artifactsKey {
+				s.direct = append(s.direct, gateway.HubToolName(a.Name, artifactPublish))
+			}
+		}
 	}
 	return s
 }
@@ -233,6 +240,7 @@ func (l *Library) hubServers(agentID string) []*Server {
 	if p != nil {
 		_, given, _ = l.withPlugins(p)
 	}
+	natives := l.claudeHubNatives(id, p)
 	var out []*Server
 	for _, s := range l.MCP {
 		on := id == "" && !s.Hidden || slices.Contains(s.Agents, id)
@@ -242,6 +250,9 @@ func (l *Library) hubServers(agentID string) []*Server {
 			} else if !s.Hidden && slices.Contains(given[s.Name], id) {
 				on = true
 			}
+		}
+		if _, ok := natives[s.Bundle]; ok && s.Bundle != "" {
+			on = false // Claude Code runs the plugin's own
 		}
 		if on && inHub(s, id) {
 			out = append(out, s)
@@ -339,7 +350,7 @@ func (theHub) Call(ctx context.Context, agentID, server, tool string, args json.
 	ss := hubServers(agentID)
 	i := slices.IndexFunc(ss, func(s *Server) bool { return s.Name == server })
 	if i >= 0 && !gateway.HubVisitorOf(ctx).Gives(hubServerOf(ss[i])) {
-		return nil, errors.New("it acts as this computer's user, so magpie runs it for this computer's agents only")
+		return nil, errors.New("it isn't given to this caller. " + gateway.HubHeldReason(hubServerOf(ss[i])))
 	}
 	if i < 0 && agentID == "" {
 		return nil, errors.New("it isn't in magpie's Library")
@@ -593,7 +604,8 @@ func (b *backend) relist() {
 }
 
 // use and done count the calls using the server; it is ended hubIdle after
-// the last.
+// the last, or the server's own idle timeout, and never with KeepAlive
+// (Server.idleFor).
 func (b *backend) use() {
 	b.mu.Lock()
 	b.busy++
@@ -611,8 +623,12 @@ func (b *backend) done() {
 	if b.busy > 0 || b.stopped {
 		return
 	}
+	d := b.s.idleFor(hubIdle)
+	if d <= 0 {
+		return
+	}
 	var t *time.Timer
-	t = time.AfterFunc(hubIdle, func() {
+	t = time.AfterFunc(d, func() {
 		b.mu.Lock()
 		if b.idle != t || b.busy > 0 || b.conn == nil {
 			b.mu.Unlock()

@@ -78,7 +78,8 @@ func adoptPluginTools() (bool, error) {
 		return false, err
 	}
 	// and each Remote magpie's router's (bridge_mcp.go)
-	if plugins, bridges := l.adoptPlugins(), l.adoptBridges(); !plugins && !bridges {
+	// and Magpie Artifacts given unasked taken back, once (artifacts.go)
+	if plugins, bridges, arts := l.adoptPlugins(), l.adoptBridges(), l.withdrawArtifacts(); !plugins && !bridges && !arts {
 		return false, nil
 	}
 	return true, l.save()
@@ -256,7 +257,7 @@ func PluginServerOn(pluginName string, on bool) (*Result, error) {
 		if len(want) == 0 {
 			want = l.hubAgents()
 		}
-		r := reachNow()
+		r := reachNow(l)
 		if len(want) == 0 {
 			hidden := settings.Load().AgentsHidden
 			for _, a := range r.order {

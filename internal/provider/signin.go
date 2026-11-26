@@ -121,6 +121,9 @@ type signInFlow struct {
 	// nonce and hostID are a ChatGPT API sign-in's: what its ID token must
 	// carry, and this machine's id it registers magpie for (chatgpt_api.go)
 	nonce, hostID string
+	// clientID and subject are the account a ChatGPT API sign-in signs in
+	// to again: the client id OpenAI issued it, and who it is
+	clientID, subject string
 	// claimed is a callback being traded for the account: the browser's own
 	// or a pasted address, whichever came first
 	claimed bool
@@ -379,8 +382,15 @@ func (s *signInFlow) begin() error {
 		}
 		s.redirect = fmt.Sprintf("http://127.0.0.1:%d/auth/callback", ln.Addr().(*net.TCPAddr).Port)
 		s.nonce = randomToken(24)
+		// an account signed in to again goes with the client OpenAI
+		// issued it, not a new registration
+		var again siwcCreds
+		if s.user != "" {
+			again, _ = siwcLookup(s.user)
+		}
 		s.mu.Lock()
-		s.st.URL = siwcAuthorize(s.redirect, s.state, s.nonce, challenge, s.hostID)
+		s.clientID, s.subject = again.ClientID, again.Subject
+		s.st.URL = siwcAuthorize(s.redirect, s.state, s.nonce, challenge, s.hostID, again)
 		s.mu.Unlock()
 	case "copilot":
 		// GitHub's device code, as Copilot's editors sign in
@@ -721,7 +731,7 @@ func (s *signInFlow) callback(w http.ResponseWriter, r *http.Request) {
 	l, err := s.exchange(ctx, q.Get("code"))
 	if err == nil {
 		var using bool
-		if err = keepLogin(ctx, func() (err error) { using, err = addLogin(l); return err }); err == nil {
+		if err = keepLogin(ctx, func() (err error) { using, err = addLoginNamed(&l); return err }); err == nil {
 			s.finish(SignInState{State: "done", User: l.User, Plan: l.Plan, Using: using})
 			signInPage(w, true, "You're signed in", fmt.Sprintf("%s is added to magpie. You can close this tab.", l.User))
 			return
@@ -890,9 +900,17 @@ func codexLogin(idToken, accessToken, refreshToken, accountID string) (savedLogi
 // the old, so one refresh token stays in one place. Its kept usage
 // reading goes (StaleAllowance): it was read under the old sign-in, and
 // for a minute it would answer for the new one, a refusal and all.
-func addLogin(l savedLogin) (using bool, err error) {
+func addLogin(l savedLogin) (using bool, err error) { return addLoginNamed(&l) }
+
+// addLoginNamed is addLogin that gives in the name the account is kept
+// by: a second workspace of one email is "email · workspace" (codexName),
+// and what a sign-in does next by the account's name (the proxy picked
+// for it, @zzstar101 on X) is done to it, not to the first workspace.
+func addLoginNamed(in *savedLogin) (using bool, err error) {
+	l := *in
 	defer func() { // under the name it is kept by (codexName), once loginsMu is let go
 		if err == nil {
+			in.User = l.User
 			StaleAllowance(l.Agent, l.User)
 		}
 	}()

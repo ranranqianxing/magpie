@@ -164,6 +164,39 @@ func claudeCloud(at place, path string) string {
 	return ""
 }
 
+// claudeBaseURLElsewhere says where Claude Code's own settings name an
+// ANTHROPIC_BASE_URL other than the gateway, which it applies over an env an
+// outer tool adds to the process (as T3 Code adds magpie's instance env), so
+// the Claude Code at path sends its requests there and never reaches magpie;
+// the file as the agent names it and the URL, both "" when none does. Claude
+// Code puts the env of .claude.json, then the user's settings, then managed
+// settings over the environment it was started in (claudeCloud), so the first
+// of managed, settings and .claude.json that names one is the value it goes
+// by. A base URL that reaches magpie another way (a reverse proxy,
+// reachesMagpie) is magpie's. The shell isn't read: the instance env
+// overwrites a base URL exported there, so only these files win over it.
+func claudeBaseURLElsewhere(at place, path string) (string, string) {
+	managed := claudeManaged()
+	if at.sys != nil {
+		managed = at.sys("/etc/claude-code/managed-settings.json")
+	}
+	global := claudeGlobal(at, filepath.Dir(path))
+	for _, f := range []string{managed, path, global} {
+		v, has := edit.GetJSON(f, "env.ANTHROPIC_BASE_URL")
+		if !has {
+			continue
+		}
+		if v = strings.TrimSpace(v); v == "" {
+			continue
+		}
+		if v == at.gw() || reachesMagpie(v, at.gw()) {
+			return "", ""
+		}
+		return at.native(f), v
+	}
+	return "", ""
+}
+
 // claudeGlobal is the global config of the Claude Code whose folder is dir
 // (its .claude.json), where Claude Code 2.1.316 reads it: a .config.json in
 // the folder that isn't empty, left by an older Claude Code, else
@@ -374,10 +407,11 @@ const claudeReviewEnv = "CLAUDE_CODE_AUTO_MODE_SERVER"
 // "true" also keeps it on in a conversation begun without it, which
 // Claude Code otherwise holds off until it is compacted. The gateway
 // carries deferred tools to Anthropic upstreams and loads them in place on
-// a Responses upstream that takes it (#2660); elsewhere it turns them away,
-// and Claude Code declares every tool for that conversation, so a load
-// doesn't cost the prompt cache (gateway/deferred_route.go).
-// One the user set is theirs.
+// a Responses upstream that takes it (#2660); elsewhere a loaded tool is
+// declared from its load on (a load changes the tools, so an OpenAI-style
+// prompt cache starts again there). It never turns them away: Claude Code
+// would keep tool search off for that conversation (lightwlh on X).
+// One the user set is theirs: false keeps every tool declared and the cache.
 const claudeSearchEnv = "ENABLE_TOOL_SEARCH"
 
 // Claude Code 2.1.295's Explore inherit cap can replace Desktop's
@@ -1151,15 +1185,26 @@ func claudeIn(at place) *Agent {
 			return env(claudeCustomOptionEnv) != "" || at.spell == nil && claudeShellEnv(claudeCustomOptionEnv) != ""
 		}
 		replace := provider.OwnModelsHidden("claude") || claudeNarrowed() && !ownOption()
-		var onTier []string
+		// With the lineup replaced, each tier a model is on gets a row of
+		// its own, its model the tier's word, as the lineup's tier rows
+		// are: without one, "sonnet" named no row, and an app that runs
+		// Claude Code with "sonnet" and matches it against /model's rows by
+		// name (claude-agent-acp's resolveModelPreference, AWS Quick) took
+		// "Claude Sonnet 5.5", the real Claude model, while the user had
+		// put Sonnet on DeepSeek in magpie (LBaoheng24070 on X). The row
+		// stands for the tier's model, whose own row goes, as Claude Code
+		// leaves out a row naming a tier's model beside its lineup.
+		var onTier, tierWords []string
 		for _, t := range claudeTiers {
-			if replace {
-				break
+			v := env(tierEnv(t))
+			if v == "" {
+				continue
 			}
-			if v := env(tierEnv(t)); v != "" {
-				if _, e := tierAt(v); e != "" {
-					onTier = append(onTier, v)
-				}
+			if replace {
+				onTier = append(onTier, v)
+				tierWords = append(tierWords, t)
+			} else if _, e := tierAt(v); e != "" {
+				onTier = append(onTier, v)
 			}
 		}
 		// each row's label is the model's name as every agent's list calls
@@ -1169,11 +1214,9 @@ func claudeIn(at place) *Agent {
 		// provider the label already says is left "via magpie".
 		labels := listLabels("claude")
 		rows := []any{}
-		for _, o := range viaMagpieShared("claude", "") {
-			if slices.ContainsFunc(onTier, func(v string) bool { return claudeSameModel(v, o.Value) }) {
-				continue
-			}
-			label, note := cmp.Or(labels[o.Ref], o.Label, o.Value), o.Note
+		// named is the label and description of o's row
+		named := func(o Option) (label, note string) {
+			label, note = cmp.Or(labels[o.Ref], o.Label, o.Value), o.Note
 			// a subscription's note is its account alone, so a label left
 			// without its provider (Off, or a name the user gave) named
 			// neither in /model; the provider goes before the account then,
@@ -1186,6 +1229,26 @@ func claudeIn(at place) *Agent {
 					note = o.Group + " · " + note
 				}
 			}
+			return label, note
+		}
+		sameAs := func(v string, o Option) bool {
+			return claudeSameModel(v, o.Value) || claudeSameModel(v, spell(o.Value))
+		}
+		via := viaMagpieShared("claude", "")
+		// a tier's row is named as its model's would be, the tier first
+		for _, t := range tierWords {
+			v := env(tierEnv(t))
+			label, note := v, "via magpie"
+			if i := slices.IndexFunc(via, func(o Option) bool { return sameAs(v, o) }); i >= 0 {
+				label, note = named(via[i])
+			}
+			rows = append(rows, map[string]any{"model": t, "label": label, "description": strings.ToUpper(t[:1]) + t[1:] + " · " + note})
+		}
+		for _, o := range via {
+			if slices.ContainsFunc(onTier, func(v string) bool { return sameAs(v, o) }) {
+				continue
+			}
+			label, note := named(o)
 			rows = append(rows, map[string]any{"model": spell(mark1M(o.Value)), "label": label, "description": note})
 		}
 		if len(rows) == 0 {
@@ -2288,7 +2351,9 @@ func claudeIn(at place) *Agent {
 	}
 	// subagents: the model one runs on when it names none (general-purpose,
 	// an agent of the user's without a model:). Unset, the session's, as
-	// before; an agent that names a tier (Explore's haiku) takes the tier's.
+	// before. Explore and Plan say inherit, so Claude Code never reads the
+	// variable for them; the gateway moves their turns onto it
+	// (gateway.claudeSubagentPick, #7176).
 	// setSubagent writes the subagents' model and effort. With no model,
 	// the variable goes and the effort is kept unwritten (subagentSaved):
 	// the main model at an effort would pin every subagent to it.
@@ -2546,9 +2611,10 @@ func claudeIn(at place) *Agent {
 		ID: "claude", Name: "Claude Code", Icon: "claudecode-color", Aliases: []string{"cc", "claude-code"},
 		UA:  []string{"claude-cli", "claude-code"},
 		Bin: "claude", Dir: filepath.Dir(path), Path: path, signIn: ".credentials.json",
-		Fields:       fields,
-		ModelAliases: claudeAliases,
-		Telemetry:    claudeTelemetry(at, path),
+		claudeSettings: &ClaudeSettings{path: path, distro: at.wsl},
+		Fields:         fields,
+		ModelAliases:   claudeAliases,
+		Telemetry:      claudeTelemetry(at, path),
 		// Claude Code as it was before magpie: its default puts it back as
 		// installed, on Anthropic's endpoint, where this brings back the
 		// endpoint, token and model the user had

@@ -1,6 +1,6 @@
 // Run with Node's test runner and Playwright on the module path; see README.md.
-// The skill router, on the Library's Skills tab: a Skill router row under
-// the list with a switch. Off, no skill has a router button. On (posts
+// The skill router, on the Library's Skills tab: a Skill router row at the
+// top, over the install card and the list, with a switch. Off, no skill has a router button. On (posts
 // skills/router {on: true}), each skill an agent may pick itself gets a
 // button that keeps it out of the router (skills/router-direct), and a
 // skill only for the user to type gets none. A skill kept out shows "Not
@@ -14,6 +14,8 @@ const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 const { strings } = require("./strings.cjs");
+// the sidebar's Skills star, as navicons.js draws it
+const SKILLS_STAR = require("node:fs").readFileSync(path.join(__dirname, "../assets/navicons.js"), "utf8").match(/\n    skills: "([^"]+)"/)[1];
 
 const assets = path.resolve(__dirname, "../assets");
 const HOME = "/Users/mg";
@@ -25,7 +27,7 @@ const fixture = (st) => ({
     { id: "pi", name: "Pi", icon: "", skills: `${HOME}/.agents/skills`, ...(st.on ? { skillRouter: "shared" } : {}) },
   ],
   instructions: { agents: [], sets: [] }, servers: [], foundServers: [], projects: [], foundSkills: [{ name: "mine", description: "Its own", agents: ["claude"] }], problems: [],
-  skills: [
+  skills: st.empty ? [] : [
     { name: "pdf", description: "Read PDFs", kind: "folder", agents: ["claude", "pi"], ...(st.direct ? { router: "direct" } : {}) },
     { name: "deploy", description: "Ship it", kind: "folder", agents: ["claude"], manual: true },
   ],
@@ -84,6 +86,21 @@ const sideways = (page) => page.evaluate(() => {
   return over;
 });
 
+// two cards one over the other in the Library's body, with nothing between,
+// keep room between them (the owner, 11-23: the install card sat on the
+// Skill router's): every pair of boxed neighbours is at least 10px apart
+const crowded = (page) => page.evaluate(() => {
+  const boxed = (e) => { const c = getComputedStyle(e); return parseFloat(c.borderTopWidth) > 0 || c.backgroundColor !== "rgba(0, 0, 0, 0)"; };
+  const kids = [...document.querySelectorAll("#view-library .lib-body:not(.lib-skel) > *")].filter((e) => e.getBoundingClientRect().height);
+  const out = [];
+  for (let i = 1; i < kids.length; i++) {
+    if (!boxed(kids[i - 1]) || !boxed(kids[i])) continue;
+    const gap = kids[i].getBoundingClientRect().top - kids[i - 1].getBoundingClientRect().bottom;
+    if (gap < 10) out.push(`${kids[i - 1].className} | ${kids[i].className}: ${gap.toFixed(1)}px`);
+  }
+  return { n: kids.length, out };
+});
+
 const shot = async (page, name) => {
   if (!process.env.ARTIFACT_DIR) return;
   await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
@@ -115,6 +132,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const row = v.locator(".lib-skillrouter");
         await row.waitFor();
 
+        // at the top: over the install card and the skill list
+        assert.equal(await page.evaluate(() => {
+          const v = document.querySelector("#view-library");
+          const r = v.querySelector(".lib-skillrouter"), c = v.querySelector(".lib-install"), l = v.querySelector(".lib-groups");
+          return !!(r.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING) && !!(r.compareDocumentPosition(l) & Node.DOCUMENT_POSITION_FOLLOWING);
+        }), true, "the Skill router row is above the install card and the list");
+
+        assert.equal(await v.locator(".lib-skillrouter-empty").count(), 0, "with library skills, no line on importing them");
+        // its mark is the sidebar Skills star, not a skill's page
+        assert.equal(await row.locator(".lib-glyph svg path").getAttribute("d"), SKILLS_STAR, "the Skill router row has the sidebar's Skills icon");
         // off: the row and its switch, no router buttons, no why
         assert.equal((await row.locator(".name").textContent()).trim(), w("Skill router"));
         const sw = row.locator(".lib-switch");
@@ -122,6 +149,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await v.locator(".lib-routedirect").count(), 0);
         assert.equal(await v.locator(".lib-hub-why").count(), 0);
         assert.deepEqual(await sideways(page), []);
+        { const c = await crowded(page); assert.ok(c.n > 2, "the body is measured"); assert.deepEqual(c.out, [], "cards apart, off"); }
         await shot(page, `${engine}-${lang}-${width}-off`);
 
         // on
@@ -143,6 +171,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal((await found.textContent()).trim(), w("{agents} has skills of its own that aren't in the library, so the router doesn't list them: bring them in below.", { agents: "Claude Code" }));
         assert.equal(await v.locator(".lib-hub-why").count(), 2);
         assert.deepEqual(await sideways(page), []);
+        { const c = await crowded(page); assert.ok(c.n > 2, "the body is measured"); assert.deepEqual(c.out, [], "cards apart, on"); }
         await shot(page, `${engine}-${lang}-${width}-on`);
 
         // pdf kept out of the router
@@ -164,6 +193,73 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await v.locator(".lib-routedirect").first().waitFor({ state: "detached" });
         assert.deepEqual(st.sent.shift(), ["router", { on: false }]);
         assert.deepEqual(st.sent, []);
+        assert.deepEqual(errors, []);
+        await ctx.close();
+      });
+    }
+  });
+}
+
+// The owner (11-23): every skill still in the agents' own folders, none in
+// the library, and no Skill router row at all. With agents it is there, at
+// the top, and says it lists the library's skills, so the agents' own are
+// imported for it. The MCP tab's router row shows with no server alike.
+for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(engine + ": the skill router with no skill in the library yet", async (t) => {
+    I18N = strings().I18N;
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" }));
+    t.after(() => browser.close());
+    for (const width of [1100, 420]) for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
+      await t.test(`${lang} ${width}px`, async () => {
+        const w = (key, vars) => tr(lang, key, vars);
+        const st = { on: false, direct: false, empty: true, sent: [], web: width < 800 };
+        const errors = [];
+        const ctx = await browser.newContext({ viewport: { width, height: 900 }, reducedMotion: "reduce" });
+        await ctx.addInitScript(() => { try { localStorage.setItem("magpie.libTab", "skills"); } catch {} });
+        const page = await ctx.newPage();
+        page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
+        page.on("pageerror", (e) => errors.push(e.message));
+        await page.route("**/*", server(lang, st));
+        await page.goto("http://magpie.test/");
+        await page.locator('button[data-view="library"]').click();
+        const v = page.locator("#view-library");
+        const row = v.locator(".lib-skillrouter");
+        await row.waitFor();
+        assert.equal((await row.locator(".name").textContent()).trim(), w("Skill router"));
+        assert.equal((await row.locator(".lib-skillrouter-empty").textContent()).trim(), w("It lists the library's skills. Import the agents' own skills below for it to list them."));
+        assert.equal(await page.evaluate(() => {
+          const v = document.querySelector("#view-library");
+          const r = v.querySelector(".lib-skillrouter"), c = v.querySelector(".lib-install");
+          return !!(r.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING);
+        }), true, "the Skill router row is above the install card");
+        assert.deepEqual(await sideways(page), []);
+        await shot(page, `${engine}-${lang}-${width}-empty`);
+        await row.locator(".lib-switch").click();
+        await row.locator('.lib-switch[aria-checked="true"]').waitFor();
+        assert.deepEqual(st.sent.shift(), ["router", { on: true }]);
+
+        // the MCP tab, agents and no server: its router row is there too,
+        // over "No servers in the library yet"
+        const mctx = await browser.newContext({ viewport: { width, height: 900 }, reducedMotion: "reduce" });
+        await mctx.addInitScript(() => { try { localStorage.setItem("magpie.libTab", "mcp"); } catch {} });
+        const mp = await mctx.newPage();
+        mp.setDefaultTimeout(5000);
+        mp.setDefaultNavigationTimeout(60000);
+        mp.on("pageerror", (e) => errors.push(e.message));
+        await mp.route("**/*", server(lang, st));
+        await mp.goto("http://magpie.test/");
+        await mp.locator('button[data-view="library"]').click();
+        await mp.locator("#view-library .lib-empty").waitFor();
+        assert.equal(await mp.locator("#view-library .lib-skillrouter").count(), 0, "the MCP tab, not Skills");
+        assert.equal(await mp.evaluate(() => {
+          const v = document.querySelector("#view-library");
+          const h = v.querySelector(".lib-hub"), e = v.querySelector(".lib-empty");
+          return !!h && !!(h.compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING);
+        }), true, "the MCP router row is over the empty list");
+        assert.deepEqual(await sideways(mp), []);
+        await mctx.close();
+        assert.deepEqual(await sideways(page), []);
         assert.deepEqual(errors, []);
         await ctx.close();
       });

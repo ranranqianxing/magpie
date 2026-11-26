@@ -62,6 +62,16 @@ type Server struct {
 	// and list its tools: Codex's startup_timeout_sec (#3168), the only
 	// agent given it. 0 leaves it to the agent (Codex's own is 30s).
 	StartupTimeout int `json:"startupTimeout,omitempty"`
+	// IdleTimeout is the seconds a server magpie runs itself (through the
+	// MCP hub, or for Codex at /mcp/run/) is kept with no call before it is
+	// ended, 0 for magpie's own (hubIdle, runIdle); KeepAlive keeps it
+	// until magpie stops or the server is edited (MasterYi on Discord:
+	// chrome-devtools-mcp --autoConnect, whose Chrome asks again to allow
+	// each new connection, and a heavy one ended sooner to free its
+	// browser). An agent's own entry is never given either: the agent
+	// runs that server.
+	IdleTimeout int  `json:"idleTimeout,omitempty"`
+	KeepAlive   bool `json:"keepAlive,omitempty"`
 	// Local keeps the server to this computer (huhuy72219405 on X: a
 	// server of a program or folder only this computer has). A backup or
 	// a sync never carries it, and one coming in neither takes it away nor
@@ -101,6 +111,10 @@ type Server struct {
 	// about is the hub entry's description, for an agent that shows a
 	// server by one before it has connected (Pi, hubServerFor)
 	about string
+
+	// direct are the hub entry's tools Pi declares to its model whole
+	// (piDirect)
+	direct []string
 
 	// startupWrote is the startup_timeout_sec magpie last wrote in the
 	// entry being written, 0 for none: one the entry has otherwise is the
@@ -200,6 +214,9 @@ func (s *Server) check() error {
 	if s.StartupTimeout < 0 || s.StartupTimeout > maxStartupTimeout {
 		return fmt.Errorf("%s: the startup timeout is between 0 (the agent's own) and %d seconds", s.Name, maxStartupTimeout)
 	}
+	if s.IdleTimeout < 0 || s.IdleTimeout > maxStartupTimeout {
+		return fmt.Errorf("%s: the idle timeout is between 0 (magpie's own) and %d seconds", s.Name, maxStartupTimeout)
+	}
 	for k := range s.Env {
 		if strings.TrimSpace(k) == "" {
 			delete(s.Env, k)
@@ -251,6 +268,23 @@ func program(path string) bool {
 func (s *Server) same(o *Server) bool {
 	return s.Transport == o.Transport && s.Command == o.Command && slices.Equal(s.Args, o.Args) &&
 		maps.Equal(s.Env, o.Env) && s.URL == o.URL && maps.Equal(s.Headers, o.Headers) && s.about == o.about
+}
+
+// piDirect are the tools of s Pi is told to declare to its model as it
+// does a built-in tool (toolExposure "direct", docs/mcp.md "Control tool
+// exposure"), not behind codemode, whose prompt has a line for the
+// server alone: told only that line, a Pi asked to draw an architecture
+// used a skill of its own and never Magpie Artifacts (owner, 11-24).
+// They are written while the entry has neither exposure nor toolExposure:
+// either is the user's, and stays as they wrote it (merged, behind).
+func piDirect(s *Server) []string {
+	if s.Name == HubEntry {
+		return s.direct
+	}
+	if serverKey(s) == artifactsKey {
+		return []string{artifactPublish}
+	}
+	return nil
 }
 
 // ---- each agent's own format ----------------------------------------------
@@ -313,6 +347,11 @@ const (
 	// env, or url/headers with a transport, where a url with none is SSE
 	// (OpenClaw 2026.11.6 docs/cli/mcp.md, McpServerSchema)
 	fmtOpenClaw
+	// fmtTrae is TRAE CN's User/mcp.json in its userData: mcpServers of
+	// command/args/env or url/headers, no type on an entry, a url
+	// streamable HTTP and no way to name SSE (TRAE CN 2.3.105403's
+	// workbench)
+	fmtTrae
 )
 
 // mcpFile is the file an agent keeps its user-wide MCP servers in.
@@ -366,7 +405,7 @@ func (f *mcpFile) supports(s *Server) error {
 	if f.Format == fmtDesktop && s.Remote() {
 		return errNoRemote
 	}
-	if s.Transport == "sse" && (f.Format == fmtCodex || f.Format == fmtGoose || f.Format == fmtDsh || f.Format == fmtPiNative || f.Format == fmtGrok || f.Format == fmtCommandCode || f.Format == fmtZed || f.Format == fmtKiro || f.Format == fmtLiveAgent) {
+	if s.Transport == "sse" && (f.Format == fmtCodex || f.Format == fmtGoose || f.Format == fmtDsh || f.Format == fmtPiNative || f.Format == fmtGrok || f.Format == fmtCommandCode || f.Format == fmtZed || f.Format == fmtKiro || f.Format == fmtTrae || f.Format == fmtLiveAgent) {
 		return errNoSSE
 	}
 	if f.Format == fmtDsh && s.Name != "" && !dshServerName.MatchString(s.Name) {
@@ -487,6 +526,18 @@ func selfTimeout(s *Server, def int) int {
 	return def
 }
 
+// idleFor is how long a server magpie runs is kept with no call: its own
+// IdleTimeout, else def; 0 with KeepAlive, which is never ended for it.
+func (s *Server) idleFor(def time.Duration) time.Duration {
+	switch {
+	case s.KeepAlive:
+		return 0
+	case s.IdleTimeout > 0:
+		return time.Duration(s.IdleTimeout) * time.Second
+	}
+	return def
+}
+
 // maxStartupTimeout is the longest startup timeout a server is given: a
 // day, as a hook's timeout.
 const maxStartupTimeout = 86400
@@ -555,6 +606,9 @@ func (f *mcpFile) behind(s *Server, old map[string]any) bool {
 	if f.Format == fmtCodex && slices.ContainsFunc(codexRefused(s), func(k string) bool { _, ok := old[k]; return ok }) {
 		return true
 	}
+	if f.Format == fmtPiNative && old != nil && len(piDirect(s)) > 0 && !piExposed(old) {
+		return true
+	}
 	if selfTimeout(s, 0) == 0 {
 		return false
 	}
@@ -566,6 +620,13 @@ func (f *mcpFile) behind(s *Server, old map[string]any) bool {
 		return isNumber(old["timeout"], gooseOldTimeout)
 	}
 	return false
+}
+
+// piExposed is whether a Pi entry says how its tools reach the model.
+func piExposed(old map[string]any) bool {
+	_, a := old["exposure"]
+	_, b := old["toolExposure"]
+	return a || b
 }
 
 func isNumber(v any, n float64) bool {
@@ -715,6 +776,13 @@ func (f *mcpFile) encode(s *Server) ordered {
 		if s.about != "" {
 			add("description", s.about)
 		}
+		if d := piDirect(s); len(d) > 0 {
+			ex := map[string]any{}
+			for _, n := range d {
+				ex[n] = "direct"
+			}
+			add("toolExposure", ex)
+		}
 	case fmtHermes, fmtAlma:
 		// Hermes' own `hermes mcp add` writes url/headers or
 		// command/args/env; transport: sse is its only other transport
@@ -781,7 +849,7 @@ func (f *mcpFile) encode(s *Server) ordered {
 		if t := selfTimeout(s, 0); t > 0 {
 			add("requestTimeoutMs", t*1000)
 		}
-	case fmtKiro:
+	case fmtKiro, fmtTrae:
 		// as the docs show them: command/args/env, or url/headers — no
 		// type, the entry's shape saying which (kiro.dev/docs/mcp/
 		// configuration); an SSE server never comes this far
@@ -1096,7 +1164,7 @@ func (f *mcpFile) decode(name string, m map[string]any) (*Server, bool) {
 		if f.Format == fmtPiNative && name == HubEntry {
 			s.about = str(m, "description")
 		}
-	case fmtKiro:
+	case fmtKiro, fmtTrae:
 		// a url is streamable HTTP: the docs give no way to name SSE
 		// (kiro.dev/docs/mcp/configuration), so no transport in the entry
 		// is read as one
@@ -1422,6 +1490,9 @@ var owned = map[mcpFormat][]string{
 	// disabled, autoApprove, disabledTools and oauth are the user's; a
 	// transport names nothing Kiro reads
 	fmtKiro: {"transport", "url", "headers", "command", "args", "env"},
+	// cwd, oauth, disabled and fromGalleryId are the user's (TRAE CN's
+	// own entries); a transport names nothing TRAE CN reads
+	fmtTrae: {"transport", "url", "headers", "command", "args", "env"},
 	// enabled, and the id's description, docsUrl, cwd, timeoutMs,
 	// workspaceRoots, policy and auth, are the user's
 	fmtLiveAgent: {"transport", "url", "headers", "command", "args", "env"},
@@ -1499,6 +1570,13 @@ func (f *mcpFile) merged(s *Server, old map[string]any) ordered {
 			o = slices.DeleteFunc(o, func(e kv) bool { return e.k == "startup_timeout_sec" })
 		} else {
 			mine = append(slices.Clone(mine), "startup_timeout_sec")
+		}
+	}
+	// an exposure of the user's says how the server's tools reach Pi's
+	// model, each of them
+	if f.Format == fmtPiNative && old != nil {
+		if _, ok := old["exposure"]; ok {
+			o = slices.DeleteFunc(o, func(e kv) bool { return e.k == "toolExposure" })
 		}
 	}
 	for i, e := range o {

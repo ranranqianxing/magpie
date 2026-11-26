@@ -1066,6 +1066,27 @@ func wslAgent(k wslKind, d distro) *Agent {
 			return f()
 		}
 	}
+	// its telemetry is the distro's file's (#7460); one stopped since is
+	// asked first, and isn't started for it
+	if tm := a.Telemetry; tm != nil {
+		stopped := func() error {
+			return fmt.Errorf("WSL %s isn't running; start it to change %s's telemetry", d.Name, k.name)
+		}
+		a.Telemetry = &Telemetry{all: tm.all,
+			Get: func() (TelemetryState, error) {
+				if !d.live() {
+					return TelemetryState{}, stopped()
+				}
+				return tm.Get()
+			},
+			Set: func(off bool) error {
+				if !d.live() {
+					return stopped()
+				}
+				return tm.Set(off)
+			},
+		}
+	}
 	// what a set leaves is kept at once, in case the distro stops before
 	// the next look
 	for i := range a.Fields {
@@ -1090,6 +1111,7 @@ func wslAgent(k wslKind, d distro) *Agent {
 func unreached(a *Agent, err error) *Agent {
 	a.unreached = err
 	a.Notice = func() string { return err.Error() }
+	a.Telemetry = nil // its file can't be opened
 	for i := range a.Fields {
 		if a.Fields[i].Set != nil {
 			a.Fields[i].Set = func(string) error { return err }
@@ -1869,6 +1891,13 @@ func wslClaudeStandIn(model string) string {
 // wslClaudeClassifier is ClassifierStandIn for a Claude Code in a running
 // distro, known by the same User-Agent. Detection off reads none (#4872).
 func wslClaudeClassifier(model string) string {
+	return wslClaudeFirst(func(at place) string { return claudeClassifierIn(at, model) })
+}
+
+// wslClaudeFirst is the first answer of read for the Claude Code of a
+// running distro, its files mirrored first; "" with detection off (#4872)
+// or none running.
+func wslClaudeFirst(read func(place) string) string {
 	if !wslLooks() {
 		return ""
 	}
@@ -1886,7 +1915,7 @@ func wslClaudeClassifier(model string) string {
 	cfg := wslConfig()
 	for _, d := range ds {
 		d.mirror(cfg)
-		if m := claudeClassifierIn(d.place("claude@wsl:"+d.Name), model); m != "" {
+		if m := read(d.place("claude@wsl:" + d.Name)); m != "" {
 			return m
 		}
 	}
